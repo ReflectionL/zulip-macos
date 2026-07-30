@@ -1,13 +1,13 @@
 # Zulip Mac Development Tracker
 
-Last updated: 2026-07-30
+Last updated: 2026-07-31
 
 ## Current State
 
-- Milestone: CORE — live Zulip vertical slice
-- Current step: `CORE-006`
-- Next step: `MVP-001`
-- Overall status: in progress
+- Milestone: MVP — daily use
+- Current step: —
+- Next step: `MVP-001` (`ready`)
+- Overall status: ready
 
 ## Step Status
 
@@ -30,12 +30,24 @@ Last updated: 2026-07-30
 | CORE-003 | done | 2026-07-30 | 2026-07-30 | Added bundled SQLite, transactional `user_version` migrations, WAL/foreign-key/busy-timeout configuration, and STRICT account-scoped tables for accounts, users, channels, topics, messages, unread state, drafts, and sync metadata. Tests verify reopen, isolation, foreign keys, rollback, and absence of credential columns. 17 Rust core tests, strict Clippy, and full checks pass. | — | — |
 | CORE-004 | done | 2026-07-30 | 2026-07-30 | Added authenticated `/register` bootstrap and `/events` long-poll transport with bounded responses and server-advertised timeouts; normalized initial users/channels and live message, subscription, user, update, delete, unknown, and heartbeat events; added an ordered idempotent reducer that tolerates nonconsecutive IDs and emits one immutable snapshot per changed batch. `./scripts/check.sh`: 22 Rust core tests, 1 FFI test, 24 Swift tests, strict Clippy, builds, and documentation checks pass. | — | — |
 | CORE-005 | done | 2026-07-30 | 2026-07-30 | Added bounded exponential backoff with deterministic jitter, retryable/fatal classification, typed `BAD_EVENT_QUEUE_ID`, `restart` event handling, and a recovery-aware `SyncSession` that preserves cached state during disconnects and atomically replaces it after full registration. Deterministic disconnect, expiry, restart, duplicate, and nonconsecutive-ID tests pass. `./scripts/check.sh`: 26 Rust core tests, 1 FFI test, 24 Swift tests, strict Clippy, builds, and docs pass. | — | — |
-| CORE-006 | in_progress | 2026-07-30 | — | Added bounded conversation fetch, channel/direct text send with local echo IDs, and read-flag APIs; replaced the bridge ping payload with typed account/conversation/write commands and immutable events; added a Tokio actor for continuous sync, recovery, sends, reads, and snapshots; added password and direct API-key session commands, verified own-user identity, one-time redacted API-key handoff, Keychain save/reload, a native SwiftUI login sheet, fixture/live switching, live sidebar/navigation/timeline mapping, safe non-executing HTML fallback, pending local sends, automatic conversation refresh, and mark-read submission. Added `live_smoke` using the production Rust clients and a stdin-only wrapper. Fixed API authentication to preserve the API login email instead of replacing it with a possibly different profile email. Added a file-based macOS Keychain fallback when an ad-hoc development build lacks data-protection Keychain entitlements. The designated Zulip Cloud organization now passes password login, initial sync, Inbox fetch, self-DM send/receive, reopen, mark-read, Keychain save, disconnect, and password-free saved-key reconnect in the running app. `./scripts/check.sh`: 29 Rust core tests, 3 actor/FFI tests, 29 Swift tests, strict Clippy, formatting, builds, and docs pass. | One HTTPS self-hosted endpoint remains required. | initial commit; live-smoke follow-up |
+| CORE-006 | done | 2026-07-30 | 2026-07-31 | Added bounded conversation fetch, channel/direct text send with local echo IDs, and read-flag APIs; replaced the bridge ping payload with typed account/conversation/write commands and immutable events; added a Tokio actor for continuous sync, recovery, sends, reads, and snapshots; added password and direct API-key session commands, verified own-user identity, one-time redacted API-key handoff, Keychain save/reload, a native SwiftUI login sheet, fixture/live switching, live sidebar/navigation/timeline mapping, safe non-executing HTML fallback, pending local sends, automatic conversation refresh, and mark-read submission. Added `live_smoke` using the production Rust clients and a stdin-only wrapper. Fixed API authentication to preserve the API login email instead of replacing it with a possibly different profile email. Added a file-based macOS Keychain fallback when an ad-hoc development build lacks data-protection Keychain entitlements. The designated Zulip Cloud organization passes password login, initial sync, Inbox fetch, self-DM send/receive, reopen, mark-read, Keychain save, disconnect, and password-free saved-key reconnect in the running app. Deterministic mocks cover authentication, registration, long polling, queue expiry, restart recovery, messages, and read state. `./scripts/check.sh`: 29 Rust core tests, 3 actor/FFI tests, 29 Swift tests, strict Clippy, formatting, builds, and docs pass. | — | initial commit; `922c16c`; `ce1cc64` |
+| MVP-001 | ready | — | — | Dependencies are complete. Scope and acceptance criteria remain defined in `PLAN.md`; no implementation has started. | — | — |
 
 Later milestones remain defined in `PLAN.md` and will be added here when they
 become active; completed rows are never removed.
 
 ## Work Log
+
+### 2026-07-31
+
+- With user approval, revised the milestone boundary so successful Zulip Cloud
+  live testing plus deterministic protocol mocks closes `CORE-006`.
+- Moved the real standard HTTPS self-hosted smoke test to the mandatory
+  `REL-005` GitHub Beta release gate; self-hosted product support remains in
+  scope.
+- Completed `CORE-006` using the existing Cloud live-smoke, running-app login,
+  Keychain reconnect, mock recovery, and full-project verification evidence.
+- Marked `MVP-001` as `ready`; no implementation step is currently active.
 
 ### 2026-07-30
 
@@ -152,11 +164,10 @@ become active; completed rows are never removed.
   restricted local environment even though the macOS-only XCFramework succeeds.
 - Signing and notarization require Developer ID credentials and remain
   conditional for the beta release.
-- `CORE-006` still needs one HTTPS self-hosted smoke target to complete its
-  two-server matrix; the Zulip Cloud target now passes.
-- Live message bodies are displayed as inert text containing the server HTML
-  during `CORE-006`; native sanitized `ContentBlock` parsing remains
-  intentionally scheduled for `MVP-005`.
+- `REL-005` must pass one real standard HTTPS self-hosted smoke target before
+  a GitHub Beta can be published; the Zulip Cloud target already passes.
+- Live message bodies currently display inert server HTML text; native
+  sanitized `ContentBlock` parsing remains scheduled for `MVP-005`.
 
 ## Open Decisions
 

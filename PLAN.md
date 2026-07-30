@@ -1,13 +1,13 @@
 # Zulip Mac Development Plan
 
-Last updated: 2026-07-30
+Last updated: 2026-07-31
 
 ## Current Milestone
 
-**Milestone CORE — Live Zulip vertical slice**
+**Milestone MVP — Daily use**
 
-Success means standard HTTPS Zulip Cloud and self-hosted accounts continuously
-send and receive messages and recover from ordinary network interruption.
+Success means two users can complete one week of ordinary messaging without
+the official client for basic operations.
 
 ## Status Values
 
@@ -74,16 +74,18 @@ message interaction using fixtures through `CoreClientProtocol`.
 | CORE-003 | Persistence | Versioned SQLite schema for accounts, users, channels, topics, messages, unread state, drafts, and sync metadata. | CORE-002 | Migration, isolation, and rollback tests | done (2026-07-30) |
 | CORE-004 | Initial sync and events | Register event queue, reduce initial state, long-poll heartbeats/events, and publish batched snapshots. | CORE-003 | Fixture protocol and reducer tests | done (2026-07-30) |
 | CORE-005 | Recovery | Backoff with jitter, duplicate filtering, bad queue recovery, server restart handling, and full resync. | CORE-004 | Deterministic disconnect/restart tests | done (2026-07-30) |
-| CORE-006 | Live message loop | Login, initial sync, open conversation, receive/send text, and update read state against Cloud and one self-hosted server. | CORE-005 | `./scripts/live-smoke.sh` against Cloud and one HTTPS self-hosted server; running-app login/UI smoke | in_progress |
+| CORE-006 | Live message loop | Login, initial sync, open conversation, receive/send text, and update read state against Zulip Cloud. Self-hosted protocol compatibility is covered by deterministic mock servers; a real HTTPS self-hosted smoke remains a release gate in `REL-005`. | CORE-005 | `./scripts/live-smoke.sh` against Cloud; running-app login/UI/Keychain smoke; mock authentication, queue, recovery, message, and read-state tests | done (2026-07-31) |
 
-Milestone exit: standard HTTPS Cloud and self-hosted accounts continuously send
-and receive messages and recover from ordinary network interruption.
+Milestone exit: Zulip Cloud continuously sends and receives messages, restores
+saved credentials, and recovers from ordinary network interruption. Standard
+self-hosted compatibility is covered by deterministic protocol tests until the
+required live release smoke in `REL-005`.
 
 ## Milestone MVP — Daily Use
 
 | ID | Step | Deliverable and acceptance criteria | Depends on | Verification | Status |
 | --- | --- | --- | --- | --- | --- |
-| MVP-001 | Browsing | Combined feed, channels, topics, DMs, mentions, starred, unread filters, and history pagination. | CORE-006 | API/reducer/navigation tests | planned |
+| MVP-001 | Browsing | Combined feed, channels, topics, DMs, mentions, starred, unread filters, and history pagination. | CORE-006 | API/reducer/navigation tests | ready |
 | MVP-002 | Search | Server-side narrow search and stable navigation to a result message. | MVP-001 | Search fixture and live smoke tests | planned |
 | MVP-003 | Message actions | Pending/error/retry states for send, edit, delete, reaction, star, and read operations. | MVP-002 | Mock failure/rollback tests | planned |
 | MVP-004 | Files and media | Upload attachments; authenticated, account-isolated media cache; safe local URLs for Swift. | MVP-003 | Upload/cache/security tests | planned |
@@ -103,7 +105,7 @@ official client for basic operations.
 | REL-002 | Resilience | Recover or report migration, disk, rate-limit, server-upgrade, and Rust panic failures without corrupting cache. | REL-001 | Failure-injection suite | planned |
 | REL-003 | Diagnostics | Redacted structured logs and an explicit user-exported diagnostic bundle. | REL-002 | Secret scanning test | planned |
 | REL-004 | Contributor docs | Build guide, architecture, testing, known limits, security policy, and release procedure. | REL-003 | Clean-machine documentation run | planned |
-| REL-005 | GitHub beta | Produce arm64 GitHub Release artifacts; sign/notarize only when Developer ID secrets are configured. | REL-004 | Release smoke checklist | planned |
+| REL-005 | GitHub beta | Produce arm64 GitHub Release artifacts; pass Cloud and one standard HTTPS self-hosted live smoke; sign/notarize only when Developer ID secrets are configured. | REL-004 | `./scripts/live-smoke.sh` against Cloud and one HTTPS self-hosted server; release smoke checklist | planned |
 
 ## Deferred Scope
 
