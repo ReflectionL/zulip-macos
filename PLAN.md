@@ -74,7 +74,7 @@ message interaction using fixtures through `CoreClientProtocol`.
 | CORE-003 | Persistence | Versioned SQLite schema for accounts, users, channels, topics, messages, unread state, drafts, and sync metadata. | CORE-002 | Migration, isolation, and rollback tests | done (2026-07-30) |
 | CORE-004 | Initial sync and events | Register event queue, reduce initial state, long-poll heartbeats/events, and publish batched snapshots. | CORE-003 | Fixture protocol and reducer tests | done (2026-07-30) |
 | CORE-005 | Recovery | Backoff with jitter, duplicate filtering, bad queue recovery, server restart handling, and full resync. | CORE-004 | Deterministic disconnect/restart tests | done (2026-07-30) |
-| CORE-006 | Live message loop | Login, initial sync, open conversation, receive/send text, and update read state against Cloud and one self-hosted server. | CORE-005 | End-to-end smoke checklist | in_progress |
+| CORE-006 | Live message loop | Login, initial sync, open conversation, receive/send text, and update read state against Cloud and one self-hosted server. | CORE-005 | `./scripts/live-smoke.sh` against Cloud and one HTTPS self-hosted server; running-app login/UI smoke | in_progress |
 
 Milestone exit: standard HTTPS Cloud and self-hosted accounts continuously send
 and receive messages and recover from ordinary network interruption.

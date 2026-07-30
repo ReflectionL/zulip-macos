@@ -88,7 +88,14 @@ land:
 ./scripts/build-app.sh
 ./scripts/test.sh
 ./scripts/check.sh
+./scripts/live-smoke.sh
 ```
+
+`live-smoke.sh` reads server URL, email, and password as three stdin lines with
+terminal echo disabled. It must print only redacted step results; never pass
+credentials as command arguments or environment variables. Run it from a
+local interactive terminal; do not inject credentials through an automation
+channel unless that channel is known not to mirror stdin.
 
 Until a script exists, use the step-specific commands recorded in `PLAN.md`.
 

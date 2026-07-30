@@ -30,7 +30,7 @@ Last updated: 2026-07-30
 | CORE-003 | done | 2026-07-30 | 2026-07-30 | Added bundled SQLite, transactional `user_version` migrations, WAL/foreign-key/busy-timeout configuration, and STRICT account-scoped tables for accounts, users, channels, topics, messages, unread state, drafts, and sync metadata. Tests verify reopen, isolation, foreign keys, rollback, and absence of credential columns. 17 Rust core tests, strict Clippy, and full checks pass. | — | — |
 | CORE-004 | done | 2026-07-30 | 2026-07-30 | Added authenticated `/register` bootstrap and `/events` long-poll transport with bounded responses and server-advertised timeouts; normalized initial users/channels and live message, subscription, user, update, delete, unknown, and heartbeat events; added an ordered idempotent reducer that tolerates nonconsecutive IDs and emits one immutable snapshot per changed batch. `./scripts/check.sh`: 22 Rust core tests, 1 FFI test, 24 Swift tests, strict Clippy, builds, and documentation checks pass. | — | — |
 | CORE-005 | done | 2026-07-30 | 2026-07-30 | Added bounded exponential backoff with deterministic jitter, retryable/fatal classification, typed `BAD_EVENT_QUEUE_ID`, `restart` event handling, and a recovery-aware `SyncSession` that preserves cached state during disconnects and atomically replaces it after full registration. Deterministic disconnect, expiry, restart, duplicate, and nonconsecutive-ID tests pass. `./scripts/check.sh`: 26 Rust core tests, 1 FFI test, 24 Swift tests, strict Clippy, builds, and docs pass. | — | — |
-| CORE-006 | in_progress | 2026-07-30 | — | Added bounded conversation fetch, channel/direct text send with local echo IDs, and read-flag APIs; replaced the bridge ping payload with typed account/conversation/write commands and immutable events; added a Tokio actor for continuous sync, recovery, sends, reads, and snapshots; added password and direct API-key session commands, verified own-user identity, one-time redacted API-key handoff, Keychain save/reload, a native SwiftUI login sheet, fixture/live switching, live sidebar/navigation/timeline mapping, safe non-executing HTML fallback, pending local sends, automatic conversation refresh, and mark-read submission. `./scripts/check.sh`: 29 Rust core tests, 3 actor/FFI tests, 28 Swift tests, strict Clippy, formatting, builds, and docs pass. | Final Cloud and HTTPS self-hosted login/receive/send/read smoke checks require disposable endpoints and credentials entered locally; the user is currently away from the Mac. | initial commit |
+| CORE-006 | in_progress | 2026-07-30 | — | Added bounded conversation fetch, channel/direct text send with local echo IDs, and read-flag APIs; replaced the bridge ping payload with typed account/conversation/write commands and immutable events; added a Tokio actor for continuous sync, recovery, sends, reads, and snapshots; added password and direct API-key session commands, verified own-user identity, one-time redacted API-key handoff, Keychain save/reload, a native SwiftUI login sheet, fixture/live switching, live sidebar/navigation/timeline mapping, safe non-executing HTML fallback, pending local sends, automatic conversation refresh, and mark-read submission. Added `live_smoke` using the production Rust clients and a stdin-only wrapper. `./scripts/check.sh`: 29 Rust core tests, 3 actor/FFI tests, 28 Swift tests, strict Clippy, formatting, builds, and docs pass. Public `chat.zulip.org` discovery succeeded at feature level 507, but its password API rejected the supplied credentials before queue creation or writes. | Cloud credentials or the exact organization URL must be corrected; the running-app smoke is also waiting for the Mac to be unlocked. One HTTPS self-hosted endpoint remains required. | initial commit; live-smoke follow-up |
 
 Later milestones remain defined in `PLAN.md` and will be added here when they
 become active; completed rows are never removed.
@@ -114,6 +114,15 @@ become active; completed rows are never removed.
 - Saved the repository foundation through the unattended `CORE-006` wiring in
   the initial project commit, with implementation and control documents in the
   same change set.
+- Added a redacted, stdin-only live smoke runner using the production
+  authentication, sync, message, and read-state clients. It sends only a
+  self-DM when authentication and initial registration have succeeded.
+- Verified the public `https://chat.zulip.org/api/v1/server_settings` endpoint:
+  Zulip Community, password authentication enabled, feature level 507.
+- Attempted the authorized Cloud password login. The server returned
+  `InvalidCredentials` during password-to-API-key exchange, before register,
+  event polling, message sending, or any other account mutation. GUI testing
+  was unavailable because the Mac remained locked.
 
 ## Known Issues and Technical Debt
 
