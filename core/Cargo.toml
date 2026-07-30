@@ -1,0 +1,34 @@
+[workspace]
+members = [
+    "crates/zulip-core",
+    "crates/zulip-ffi",
+    "tools/uniffi-bindgen-swift",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.95"
+
+[workspace.dependencies]
+futures-util = { version = "=0.3.32", default-features = false, features = ["std"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "stream"] }
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+uniffi = "0.32.0"
+url = "2"
+zeroize = "1"
+tempfile = "3"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"

@@ -1,0 +1,724 @@
+//! Authenticated conversation fetch, send, and read-state APIs.
+
+use futures_util::StreamExt;
+use reqwest::{Client, Response};
+use serde::Deserialize;
+use serde::de::DeserializeOwned;
+use serde_json::Value;
+use thiserror::Error;
+
+use crate::{
+    auth::SecretString,
+    server::{DEFAULT_REQUEST_TIMEOUT, ServerBaseUrl, ServerUrlError, secure_http_client},
+    sync::MessageSummary,
+};
+
+const MESSAGES_PATH: &str = "api/v1/messages";
+const MESSAGE_FLAGS_PATH: &str = "api/v1/messages/flags";
+const MAX_MESSAGES_RESPONSE_BYTES: usize = 16 * 1_048_576;
+const MAX_WRITE_RESPONSE_BYTES: usize = 1_048_576;
+const MAX_FETCH_MESSAGES: u16 = 1_000;
+
+/// Stable server-side conversation selection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ConversationTarget {
+    /// The account's combined feed.
+    Combined,
+    /// All visible messages in one channel.
+    Channel {
+        /// Zulip stream identifier.
+        stream_id: i64,
+    },
+    /// Messages in one channel topic.
+    Topic {
+        /// Zulip stream identifier.
+        stream_id: i64,
+        /// Exact topic name.
+        topic: String,
+    },
+    /// Direct messages with the given participants.
+    Direct {
+        /// Other participant identifiers.
+        recipient_ids: Vec<i64>,
+    },
+}
+
+impl ConversationTarget {
+    fn narrow_json(&self) -> Result<String, MessageApiError> {
+        let narrow = match self {
+            Self::Combined => Value::Array(Vec::new()),
+            Self::Channel { stream_id } => serde_json::json!([
+                {"operator": "channel", "operand": stream_id}
+            ]),
+            Self::Topic { stream_id, topic } => {
+                if topic.chars().any(char::is_control) {
+                    return Err(MessageApiError::InvalidInput);
+                }
+                serde_json::json!([
+                    {"operator": "channel", "operand": stream_id},
+                    {"operator": "topic", "operand": topic}
+                ])
+            }
+            Self::Direct { recipient_ids } => {
+                if recipient_ids.is_empty() || recipient_ids.iter().any(|id| *id <= 0) {
+                    return Err(MessageApiError::InvalidInput);
+                }
+                serde_json::json!([
+                    {"operator": "dm", "operand": recipient_ids}
+                ])
+            }
+        };
+        Ok(narrow.to_string())
+    }
+}
+
+/// A validated outgoing text message.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OutgoingMessage {
+    /// Message to a channel topic.
+    Channel {
+        /// Destination channel identifier.
+        stream_id: i64,
+        /// Destination topic.
+        topic: String,
+        /// Zulip-flavored Markdown content.
+        content: String,
+    },
+    /// Direct message to one or more users.
+    Direct {
+        /// Destination user identifiers.
+        recipient_ids: Vec<i64>,
+        /// Zulip-flavored Markdown content.
+        content: String,
+    },
+}
+
+/// One fetched conversation page.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConversationMessages {
+    /// Stable conversation selection.
+    pub target: ConversationTarget,
+    /// Messages sorted by server message identifier.
+    pub messages: Vec<MessageSummary>,
+    /// Whether the response reached the oldest matching message.
+    pub found_oldest: bool,
+    /// Whether the response reached the newest matching message.
+    pub found_newest: bool,
+}
+
+/// Message API failures safe to map into application errors.
+#[derive(Debug, Error)]
+pub enum MessageApiError {
+    /// The server root violated the shared HTTPS policy.
+    #[error(transparent)]
+    InvalidServer(#[from] ServerUrlError),
+    /// A credential, destination, content, or identifier was invalid.
+    #[error("enter valid message details")]
+    InvalidInput,
+    /// DNS, TLS, timeout, redirect, or connection failure.
+    #[error("could not communicate with the Zulip server: {message}")]
+    Transport {
+        /// Sanitized transport error.
+        message: String,
+    },
+    /// The endpoint returned an unclassified non-success status.
+    #[error("message request returned HTTP {0}")]
+    HttpStatus(u16),
+    /// Zulip rejected the operation with a stable API code.
+    #[error("Zulip rejected the message operation: {code}")]
+    Rejected {
+        /// Stable server error code, excluding server-rendered message text.
+        code: String,
+    },
+    /// The response exceeded its memory bound.
+    #[error("message response is too large")]
+    ResponseTooLarge,
+    /// The response could not be normalized.
+    #[error("the server returned an invalid message response: {0}")]
+    InvalidResponse(&'static str),
+}
+
+/// Authenticated client for conversation reads and basic writes.
+#[derive(Debug)]
+pub struct MessageClient {
+    http: Client,
+    base_url: ServerBaseUrl,
+    email: String,
+    api_key: SecretString,
+}
+
+impl MessageClient {
+    /// Creates a client with the shared native-root HTTPS policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageApiError`] for invalid server or credential input.
+    pub fn new(
+        server: &str,
+        email: impl Into<String>,
+        api_key: SecretString,
+    ) -> Result<Self, MessageApiError> {
+        let base_url = ServerBaseUrl::parse(server)?;
+        let email = email.into();
+        if email.trim().is_empty()
+            || email.contains(':')
+            || email.chars().any(char::is_control)
+            || api_key.expose_secret().is_empty()
+        {
+            return Err(MessageApiError::InvalidInput);
+        }
+        let http = secure_http_client(Some(DEFAULT_REQUEST_TIMEOUT))
+            .map_err(|message| MessageApiError::Transport { message })?;
+        Ok(Self {
+            http,
+            base_url,
+            email,
+            api_key,
+        })
+    }
+
+    /// Fetches the newest messages matching a stable conversation target.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageApiError`] for invalid limits/targets, transport,
+    /// status, size, or message normalization failures.
+    pub async fn fetch_conversation(
+        &self,
+        target: ConversationTarget,
+        limit: u16,
+    ) -> Result<ConversationMessages, MessageApiError> {
+        if limit == 0 || limit > MAX_FETCH_MESSAGES {
+            return Err(MessageApiError::InvalidInput);
+        }
+        let narrow = target.narrow_json()?;
+        let response = self
+            .http
+            .get(self.base_url.endpoint(MESSAGES_PATH))
+            .basic_auth(&self.email, Some(self.api_key.expose_secret()))
+            .query(&[
+                ("anchor", "newest".to_owned()),
+                ("num_before", limit.to_string()),
+                ("num_after", "0".to_owned()),
+                ("narrow", narrow),
+                ("apply_markdown", "true".to_owned()),
+                ("client_gravatar", "false".to_owned()),
+                ("allow_empty_topic_name", "true".to_owned()),
+            ])
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let document: MessagesDocument =
+            decode_response(response, MAX_MESSAGES_RESPONSE_BYTES).await?;
+        document.validate_result()?;
+        let messages = document
+            .messages
+            .into_iter()
+            .map(MessageDocument::normalize)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ConversationMessages {
+            target,
+            messages,
+            found_oldest: document.found_oldest,
+            found_newest: document.found_newest,
+        })
+    }
+
+    /// Sends a channel or direct text message and returns its server ID.
+    ///
+    /// `queue_id` and `local_id` must either both be present or both be absent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageApiError`] for invalid content/destination/local echo,
+    /// transport, rejection, size, or response failures.
+    pub async fn send_message(
+        &self,
+        message: OutgoingMessage,
+        local_echo: Option<(&str, &str)>,
+    ) -> Result<i64, MessageApiError> {
+        let mut form = match message {
+            OutgoingMessage::Channel {
+                stream_id,
+                topic,
+                content,
+            } => {
+                validate_content(&content)?;
+                if stream_id <= 0 || topic.chars().any(char::is_control) {
+                    return Err(MessageApiError::InvalidInput);
+                }
+                vec![
+                    ("type".to_owned(), "stream".to_owned()),
+                    ("to".to_owned(), stream_id.to_string()),
+                    ("topic".to_owned(), topic),
+                    ("content".to_owned(), content),
+                ]
+            }
+            OutgoingMessage::Direct {
+                recipient_ids,
+                content,
+            } => {
+                validate_content(&content)?;
+                if recipient_ids.is_empty() || recipient_ids.iter().any(|id| *id <= 0) {
+                    return Err(MessageApiError::InvalidInput);
+                }
+                vec![
+                    ("type".to_owned(), "direct".to_owned()),
+                    (
+                        "to".to_owned(),
+                        serde_json::json!(recipient_ids).to_string(),
+                    ),
+                    ("content".to_owned(), content),
+                ]
+            }
+        };
+        form.push(("read_by_sender".to_owned(), "true".to_owned()));
+        if let Some((queue_id, local_id)) = local_echo {
+            if queue_id.trim().is_empty()
+                || local_id.trim().is_empty()
+                || queue_id.chars().any(char::is_control)
+                || local_id.chars().any(char::is_control)
+            {
+                return Err(MessageApiError::InvalidInput);
+            }
+            form.push(("queue_id".to_owned(), queue_id.to_owned()));
+            form.push(("local_id".to_owned(), local_id.to_owned()));
+        }
+
+        let response = self
+            .http
+            .post(self.base_url.endpoint(MESSAGES_PATH))
+            .basic_auth(&self.email, Some(self.api_key.expose_secret()))
+            .form(&form)
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let document: SendMessageDocument =
+            decode_response(response, MAX_WRITE_RESPONSE_BYTES).await?;
+        document.validate_result()?;
+        document
+            .id
+            .filter(|message_id| *message_id > 0)
+            .ok_or(MessageApiError::InvalidResponse(
+                "missing sent message identifier",
+            ))
+    }
+
+    /// Adds the personal `read` flag to the supplied messages.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageApiError`] for empty/invalid identifiers, transport,
+    /// rejection, size, or response failures.
+    pub async fn mark_read(&self, message_ids: &[i64]) -> Result<(), MessageApiError> {
+        if message_ids.is_empty() || message_ids.iter().any(|id| *id <= 0) {
+            return Err(MessageApiError::InvalidInput);
+        }
+        let messages =
+            serde_json::to_string(message_ids).map_err(|_| MessageApiError::InvalidInput)?;
+        let response = self
+            .http
+            .post(self.base_url.endpoint(MESSAGE_FLAGS_PATH))
+            .basic_auth(&self.email, Some(self.api_key.expose_secret()))
+            .form(&[
+                ("messages", messages.as_str()),
+                ("op", "add"),
+                ("flag", "read"),
+            ])
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let document: ApiResultDocument =
+            decode_response(response, MAX_WRITE_RESPONSE_BYTES).await?;
+        document.validate_result()
+    }
+}
+
+fn validate_content(content: &str) -> Result<(), MessageApiError> {
+    if content.trim().is_empty() || content.chars().any(|character| character == '\0') {
+        Err(MessageApiError::InvalidInput)
+    } else {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct MessagesDocument {
+    result: Option<String>,
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    found_oldest: bool,
+    #[serde(default)]
+    found_newest: bool,
+    #[serde(default)]
+    messages: Vec<MessageDocument>,
+}
+
+impl MessagesDocument {
+    fn validate_result(&self) -> Result<(), MessageApiError> {
+        validate_api_result(self.result.as_deref(), self.code.as_deref())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct SendMessageDocument {
+    result: Option<String>,
+    #[serde(default)]
+    code: Option<String>,
+    id: Option<i64>,
+}
+
+impl SendMessageDocument {
+    fn validate_result(&self) -> Result<(), MessageApiError> {
+        validate_api_result(self.result.as_deref(), self.code.as_deref())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiResultDocument {
+    result: Option<String>,
+    #[serde(default)]
+    code: Option<String>,
+}
+
+impl ApiResultDocument {
+    fn validate_result(&self) -> Result<(), MessageApiError> {
+        validate_api_result(self.result.as_deref(), self.code.as_deref())
+    }
+}
+
+fn validate_api_result(result: Option<&str>, code: Option<&str>) -> Result<(), MessageApiError> {
+    if result.is_none_or(|result| result == "success") {
+        return Ok(());
+    }
+    Err(MessageApiError::Rejected {
+        code: code.unwrap_or("UNKNOWN").to_owned(),
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct MessageDocument {
+    id: i64,
+    sender_id: i64,
+    #[serde(default)]
+    sender_full_name: String,
+    timestamp: i64,
+    content: String,
+    #[serde(rename = "type")]
+    message_type: String,
+    #[serde(default)]
+    stream_id: Option<i64>,
+    #[serde(default, alias = "subject")]
+    topic: Option<String>,
+    #[serde(default)]
+    display_recipient: Value,
+}
+
+impl MessageDocument {
+    fn normalize(self) -> Result<MessageSummary, MessageApiError> {
+        let is_channel = matches!(self.message_type.as_str(), "stream" | "channel");
+        if !is_channel && !matches!(self.message_type.as_str(), "private" | "direct") {
+            return Err(MessageApiError::InvalidResponse("unknown message type"));
+        }
+        if is_channel && self.stream_id.is_none() {
+            return Err(MessageApiError::InvalidResponse(
+                "channel message missing channel identifier",
+            ));
+        }
+        let recipient_ids = if is_channel {
+            Vec::new()
+        } else {
+            self.display_recipient
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|recipient| recipient.get("id").and_then(Value::as_i64))
+                .collect()
+        };
+        Ok(MessageSummary {
+            id: self.id,
+            sender_id: self.sender_id,
+            sender_full_name: self.sender_full_name,
+            timestamp: self.timestamp,
+            content_html: self.content,
+            stream_id: self.stream_id,
+            topic: self.topic,
+            recipient_ids,
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiErrorDocument {
+    code: Option<String>,
+}
+
+fn transport_error(error: reqwest::Error) -> MessageApiError {
+    MessageApiError::Transport {
+        message: error.without_url().to_string(),
+    }
+}
+
+async fn decode_response<T: DeserializeOwned>(
+    response: Response,
+    maximum_bytes: usize,
+) -> Result<T, MessageApiError> {
+    let status = response.status();
+    if response
+        .content_length()
+        .is_some_and(|length| length > u64::try_from(maximum_bytes).unwrap_or(u64::MAX))
+    {
+        return Err(MessageApiError::ResponseTooLarge);
+    }
+
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(transport_error)?;
+        if bytes.len().saturating_add(chunk.len()) > maximum_bytes {
+            return Err(MessageApiError::ResponseTooLarge);
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+
+    if !status.is_success() {
+        if let Some(code) = serde_json::from_slice::<ApiErrorDocument>(&bytes)
+            .ok()
+            .and_then(|document| document.code)
+        {
+            return Err(MessageApiError::Rejected { code });
+        }
+        return Err(MessageApiError::HttpStatus(status.as_u16()));
+    }
+    serde_json::from_slice(&bytes).map_err(|_| MessageApiError::InvalidResponse("invalid JSON"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        sync::mpsc,
+        thread,
+    };
+
+    use reqwest::StatusCode;
+
+    use super::{ConversationTarget, MessageApiError, MessageClient, OutgoingMessage};
+    use crate::auth::SecretString;
+
+    const API_KEY: &str = "fixture-message-key-do-not-log";
+
+    #[tokio::test]
+    async fn fetch_send_and_mark_read_follow_the_zulip_protocol() {
+        let responses = vec![
+            (
+                StatusCode::OK,
+                r#"{
+                    "result":"success",
+                    "found_oldest":true,
+                    "found_newest":true,
+                    "messages":[{
+                        "id":42,
+                        "sender_id":7,
+                        "sender_full_name":"Maya Chen",
+                        "timestamp":1770000000,
+                        "content":"<p>Hello</p>",
+                        "type":"stream",
+                        "stream_id":5,
+                        "subject":"Rust core",
+                        "display_recipient":"engineering"
+                    }]
+                }"#
+                .to_owned(),
+            ),
+            (StatusCode::OK, r#"{"result":"success","id":43}"#.to_owned()),
+            (
+                StatusCode::OK,
+                r#"{"result":"success","messages":[42,43]}"#.to_owned(),
+            ),
+        ];
+        let (server, requests) = spawn_mock(responses);
+        let client = MessageClient::new(&server, "maya@example.com", SecretString::new(API_KEY))
+            .expect("message client");
+
+        let page = client
+            .fetch_conversation(
+                ConversationTarget::Topic {
+                    stream_id: 5,
+                    topic: "Rust core".to_owned(),
+                },
+                50,
+            )
+            .await
+            .expect("fetch conversation");
+        assert_eq!(page.messages[0].id, 42);
+        assert_eq!(page.messages[0].content_html, "<p>Hello</p>");
+        assert!(page.found_oldest && page.found_newest);
+
+        let message_id = client
+            .send_message(
+                OutgoingMessage::Channel {
+                    stream_id: 5,
+                    topic: "Rust core".to_owned(),
+                    content: "A live message".to_owned(),
+                },
+                Some(("queue-fixture", "local-1")),
+            )
+            .await
+            .expect("send message");
+        assert_eq!(message_id, 43);
+        client.mark_read(&[42, 43]).await.expect("mark read");
+
+        assert_fetch_request(&requests.recv().expect("fetch request"));
+        assert_send_request(&requests.recv().expect("send request"));
+        assert_read_request(&requests.recv().expect("read request"));
+    }
+
+    #[tokio::test]
+    async fn direct_messages_and_rejections_are_typed() {
+        let responses = vec![(
+            StatusCode::BAD_REQUEST,
+            r#"{"result":"error","code":"BAD_REQUEST","msg":"invalid recipient"}"#.to_owned(),
+        )];
+        let (server, requests) = spawn_mock(responses);
+        let client = MessageClient::new(&server, "maya@example.com", SecretString::new(API_KEY))
+            .expect("message client");
+        let error = client
+            .send_message(
+                OutgoingMessage::Direct {
+                    recipient_ids: vec![9, 10],
+                    content: "Hello".to_owned(),
+                },
+                None,
+            )
+            .await
+            .expect_err("server rejection");
+
+        assert!(matches!(
+            error,
+            MessageApiError::Rejected { ref code } if code == "BAD_REQUEST"
+        ));
+        let request = requests.recv().expect("direct request");
+        assert!(request.contains("type=direct"));
+        assert!(request.contains("to=%5B9%2C10%5D"));
+        assert!(!format!("{error:?} {error}").contains(API_KEY));
+    }
+
+    #[tokio::test]
+    async fn invalid_message_input_fails_before_networking() {
+        let (server, _) = spawn_mock(Vec::new());
+        let client = MessageClient::new(&server, "maya@example.com", SecretString::new(API_KEY))
+            .expect("message client");
+
+        assert!(
+            client
+                .fetch_conversation(ConversationTarget::Combined, 0)
+                .await
+                .is_err()
+        );
+        assert!(client.mark_read(&[]).await.is_err());
+        assert!(
+            client
+                .send_message(
+                    OutgoingMessage::Direct {
+                        recipient_ids: Vec::new(),
+                        content: " ".to_owned(),
+                    },
+                    None,
+                )
+                .await
+                .is_err()
+        );
+    }
+
+    fn assert_fetch_request(request: &str) {
+        assert!(request.starts_with("GET /api/v1/messages?"));
+        assert!(request.contains("anchor=newest"));
+        assert!(request.contains("num_before=50"));
+        assert!(request.contains("narrow="));
+        assert!(request.contains("apply_markdown=true"));
+    }
+
+    fn assert_send_request(request: &str) {
+        assert!(request.starts_with("POST /api/v1/messages HTTP/1.1"));
+        assert!(request.contains("type=stream"));
+        assert!(request.contains("to=5"));
+        assert!(request.contains("topic=Rust+core"));
+        assert!(request.contains("queue_id=queue-fixture"));
+        assert!(request.contains("local_id=local-1"));
+    }
+
+    fn assert_read_request(request: &str) {
+        assert!(request.starts_with("POST /api/v1/messages/flags HTTP/1.1"));
+        assert!(request.contains("messages=%5B42%2C43%5D"));
+        assert!(request.contains("op=add"));
+        assert!(request.contains("flag=read"));
+    }
+
+    fn spawn_mock(responses: Vec<(StatusCode, String)>) -> (String, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback mock server");
+        let address = listener.local_addr().expect("mock server address");
+        let (sender, receiver) = mpsc::channel();
+
+        thread::spawn(move || {
+            for (status, body) in responses {
+                let (mut stream, _) = listener.accept().expect("accept request");
+                let request = read_http_request(&mut stream);
+                let _ = sender.send(request);
+
+                let reason = status.canonical_reason().unwrap_or("Unknown");
+                let response = format!(
+                    "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    status.as_u16(),
+                    reason,
+                    body.len(),
+                    body
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("write response");
+            }
+        });
+
+        (format!("http://{address}/"), receiver)
+    }
+
+    fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4_096];
+        let mut expected_length = None;
+
+        loop {
+            let count = stream.read(&mut buffer).expect("read request");
+            if count == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..count]);
+
+            if expected_length.is_none()
+                && let Some(header_end) =
+                    request.windows(4).position(|window| window == b"\r\n\r\n")
+            {
+                let header_length = header_end + 4;
+                let headers = String::from_utf8_lossy(&request[..header_length]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .and_then(|value| value.trim().parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                expected_length = Some(header_length + content_length);
+            }
+
+            if expected_length.is_some_and(|length| request.len() >= length) {
+                break;
+            }
+        }
+
+        String::from_utf8_lossy(&request).into_owned()
+    }
+}

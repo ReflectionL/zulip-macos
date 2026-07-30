@@ -1,0 +1,18 @@
+[package]
+name = "zulip-ffi"
+description = "Swift FFI boundary for the native Zulip macOS client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[dependencies]
+tokio.workspace = true
+uniffi.workspace = true
+zulip-core = { path = "../zulip-core" }
+
+[lints]
+workspace = true

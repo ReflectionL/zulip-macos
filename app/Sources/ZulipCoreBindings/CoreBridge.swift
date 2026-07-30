@@ -1,0 +1,562 @@
+import Foundation
+
+/// A user supplied by the live Rust snapshot.
+public struct LiveUserSnapshot: Equatable, Sendable {
+    public let userID: Int64
+    public let fullName: String
+    public let email: String?
+    public let isActive: Bool
+    public let isBot: Bool
+
+    public init(
+        userID: Int64,
+        fullName: String,
+        email: String?,
+        isActive: Bool,
+        isBot: Bool
+    ) {
+        self.userID = userID
+        self.fullName = fullName
+        self.email = email
+        self.isActive = isActive
+        self.isBot = isBot
+    }
+}
+
+/// A channel supplied by the live Rust snapshot.
+public struct LiveChannelSnapshot: Equatable, Sendable {
+    public let streamID: Int64
+    public let name: String
+    public let colorHex: String
+    public let isMuted: Bool
+
+    public init(streamID: Int64, name: String, colorHex: String, isMuted: Bool) {
+        self.streamID = streamID
+        self.name = name
+        self.colorHex = colorHex
+        self.isMuted = isMuted
+    }
+}
+
+/// A normalized live message whose untrusted HTML still requires Rust content parsing.
+public struct LiveMessageSnapshot: Equatable, Sendable {
+    public let messageID: Int64
+    public let senderID: Int64
+    public let senderFullName: String
+    public let timestamp: Date
+    public let contentHTML: String
+    public let streamID: Int64?
+    public let topic: String?
+    public let recipientIDs: [Int64]
+
+    public init(
+        messageID: Int64,
+        senderID: Int64,
+        senderFullName: String,
+        timestamp: Date,
+        contentHTML: String,
+        streamID: Int64?,
+        topic: String?,
+        recipientIDs: [Int64]
+    ) {
+        self.messageID = messageID
+        self.senderID = senderID
+        self.senderFullName = senderFullName
+        self.timestamp = timestamp
+        self.contentHTML = contentHTML
+        self.streamID = streamID
+        self.topic = topic
+        self.recipientIDs = recipientIDs
+    }
+}
+
+/// Immutable live state emitted after register or a changed event batch.
+public struct LiveSnapshot: Equatable, Sendable {
+    public let revision: UInt64
+    public let lastEventID: Int64
+    public let users: [LiveUserSnapshot]
+    public let channels: [LiveChannelSnapshot]
+    public let messages: [LiveMessageSnapshot]
+
+    public init(
+        revision: UInt64,
+        lastEventID: Int64,
+        users: [LiveUserSnapshot],
+        channels: [LiveChannelSnapshot],
+        messages: [LiveMessageSnapshot]
+    ) {
+        self.revision = revision
+        self.lastEventID = lastEventID
+        self.users = users
+        self.channels = channels
+        self.messages = messages
+    }
+}
+
+/// Newest live messages for one stable conversation.
+public struct LiveConversationPage: Equatable, Sendable {
+    public let key: ConversationKey
+    public let messages: [LiveMessageSnapshot]
+    public let foundOldest: Bool
+    public let foundNewest: Bool
+
+    public init(
+        key: ConversationKey,
+        messages: [LiveMessageSnapshot],
+        foundOldest: Bool,
+        foundNewest: Bool
+    ) {
+        self.key = key
+        self.messages = messages
+        self.foundOldest = foundOldest
+        self.foundNewest = foundNewest
+    }
+}
+
+/// Authenticated identity used by the live presentation layer.
+public struct LiveSessionIdentity: Equatable, Sendable {
+    public let accountID: String
+    public let serverURL: String
+    public let email: String
+    public let userID: Int64
+    public let fullName: String
+
+    public init(
+        accountID: String,
+        serverURL: String,
+        email: String,
+        userID: Int64,
+        fullName: String
+    ) {
+        self.accountID = accountID
+        self.serverURL = serverURL
+        self.email = email
+        self.userID = userID
+        self.fullName = fullName
+    }
+}
+
+/// Stable application-facing commands sent synchronously to the Rust actor.
+public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
+    CustomDebugStringConvertible
+{
+    case ping(requestID: UInt64, payload: String)
+    case startAPIKeySession(
+        requestID: UInt64,
+        accountID: String,
+        serverURL: String,
+        email: String,
+        apiKey: String
+    )
+    case startPasswordSession(
+        requestID: UInt64,
+        accountID: String,
+        serverURL: String,
+        username: String,
+        password: String
+    )
+    case openConversation(requestID: UInt64, key: ConversationKey, limit: UInt16)
+    case sendChannelMessage(
+        requestID: UInt64,
+        accountID: String,
+        streamID: Int64,
+        topic: String,
+        content: String,
+        localID: String
+    )
+    case sendDirectMessage(
+        requestID: UInt64,
+        accountID: String,
+        recipientIDs: [Int64],
+        content: String,
+        localID: String
+    )
+    case markRead(requestID: UInt64, accountID: String, messageIDs: [Int64])
+    case disconnect(requestID: UInt64)
+
+    /// Backward-compatible foundation ping initializer.
+    public init(requestID: UInt64, payload: String) {
+        self = .ping(requestID: requestID, payload: payload)
+    }
+
+    public var requestID: UInt64 {
+        switch self {
+        case let .ping(requestID, _),
+             let .startAPIKeySession(requestID, _, _, _, _),
+             let .startPasswordSession(requestID, _, _, _, _),
+             let .openConversation(requestID, _, _),
+             let .sendChannelMessage(requestID, _, _, _, _, _),
+             let .sendDirectMessage(requestID, _, _, _, _),
+             let .markRead(requestID, _, _),
+             let .disconnect(requestID):
+            requestID
+        }
+    }
+
+    public var description: String {
+        switch self {
+        case .ping:
+            "BridgeCommand.ping"
+        case .startAPIKeySession:
+            "BridgeCommand.startAPIKeySession(apiKey: [REDACTED])"
+        case .startPasswordSession:
+            "BridgeCommand.startPasswordSession(password: [REDACTED])"
+        case .openConversation:
+            "BridgeCommand.openConversation"
+        case .sendChannelMessage:
+            "BridgeCommand.sendChannelMessage"
+        case .sendDirectMessage:
+            "BridgeCommand.sendDirectMessage"
+        case .markRead:
+            "BridgeCommand.markRead"
+        case .disconnect:
+            "BridgeCommand.disconnect"
+        }
+    }
+
+    public var debugDescription: String { description }
+
+    fileprivate func ffiValue() throws -> CoreCommand {
+        switch self {
+        case let .ping(requestID, payload):
+            .ping(requestId: requestID, payload: payload)
+        case let .startAPIKeySession(requestID, accountID, serverURL, email, apiKey):
+            .startApiKeySession(
+                requestId: requestID,
+                accountId: accountID,
+                serverUrl: serverURL,
+                email: email,
+                apiKey: apiKey
+            )
+        case let .startPasswordSession(requestID, accountID, serverURL, username, password):
+            .startPasswordSession(
+                requestId: requestID,
+                accountId: accountID,
+                serverUrl: serverURL,
+                username: username,
+                password: password
+            )
+        case let .openConversation(requestID, key, limit):
+            .openConversation(
+                requestId: requestID,
+                key: try key.ffiValue(),
+                limit: limit
+            )
+        case let .sendChannelMessage(
+            requestID,
+            accountID,
+            streamID,
+            topic,
+            content,
+            localID
+        ):
+            .sendChannelMessage(
+                requestId: requestID,
+                accountId: accountID,
+                streamId: streamID,
+                topic: topic,
+                content: content,
+                localId: localID
+            )
+        case let .sendDirectMessage(
+            requestID,
+            accountID,
+            recipientIDs,
+            content,
+            localID
+        ):
+            .sendDirectMessage(
+                requestId: requestID,
+                accountId: accountID,
+                recipientIds: recipientIDs,
+                content: content,
+                localId: localID
+            )
+        case let .markRead(requestID, accountID, messageIDs):
+            .markRead(
+                requestId: requestID,
+                accountId: accountID,
+                messageIds: messageIDs
+            )
+        case let .disconnect(requestID):
+            .disconnect(requestId: requestID)
+        }
+    }
+}
+
+/// Stable application-facing events emitted by the Rust actor.
+public enum BridgeEvent:
+    Equatable,
+    Sendable,
+    CustomStringConvertible,
+    CustomDebugStringConvertible
+{
+    case pong(requestID: UInt64, message: String)
+    case sessionStarted(
+        requestID: UInt64,
+        identity: LiveSessionIdentity,
+        credential: StoredAPICredential,
+        snapshot: LiveSnapshot
+    )
+    case snapshotUpdated(accountID: String, snapshot: LiveSnapshot)
+    case conversationOpened(requestID: UInt64, page: LiveConversationPage)
+    case messageSent(requestID: UInt64, localID: String, messageID: Int64)
+    case messagesMarkedRead(requestID: UInt64, messageIDs: [Int64])
+    case retryScheduled(accountID: String, delayMilliseconds: UInt64)
+    case disconnected(requestID: UInt64)
+    case failed(requestID: UInt64?, message: String)
+
+    public var requestID: UInt64 {
+        switch self {
+        case let .pong(requestID, _),
+             let .sessionStarted(requestID, _, _, _),
+             let .conversationOpened(requestID, _),
+             let .messageSent(requestID, _, _),
+             let .messagesMarkedRead(requestID, _),
+             let .disconnected(requestID):
+            requestID
+        case let .failed(requestID, _):
+            requestID ?? 0
+        case .snapshotUpdated, .retryScheduled:
+            0
+        }
+    }
+
+    public var message: String {
+        switch self {
+        case let .pong(_, message), let .failed(_, message):
+            message
+        case .sessionStarted:
+            "Live session started"
+        case .snapshotUpdated:
+            "Live snapshot updated"
+        case .conversationOpened:
+            "Conversation opened"
+        case .messageSent:
+            "Message sent"
+        case .messagesMarkedRead:
+            "Messages marked read"
+        case .retryScheduled:
+            "Retry scheduled"
+        case .disconnected:
+            "Disconnected"
+        }
+    }
+
+    public var description: String {
+        switch self {
+        case .sessionStarted:
+            "BridgeEvent.sessionStarted(credential: [REDACTED])"
+        default:
+            "BridgeEvent.\(message)"
+        }
+    }
+
+    public var debugDescription: String { description }
+}
+
+/// The UI-facing core boundary shared by preview and live implementations.
+public protocol CoreClientProtocol: Sendable {
+    var events: AsyncStream<BridgeEvent> { get }
+    func submit(_ command: BridgeCommand)
+}
+
+private final class EventRelay: CoreEventSink, @unchecked Sendable {
+    private let continuation: AsyncStream<BridgeEvent>.Continuation
+
+    init(continuation: AsyncStream<BridgeEvent>.Continuation) {
+        self.continuation = continuation
+    }
+
+    func handleEvent(event: CoreEvent) {
+        continuation.yield(BridgeEvent(event))
+    }
+
+    func yield(_ event: BridgeEvent) {
+        continuation.yield(event)
+    }
+
+    deinit {
+        continuation.finish()
+    }
+}
+
+/// UniFFI-backed implementation used by the application.
+public final class LiveCoreClient: CoreClientProtocol, @unchecked Sendable {
+    public let events: AsyncStream<BridgeEvent>
+
+    private let eventRelay: EventRelay
+    private let rustClient: RustCoreClient
+
+    public init() {
+        let streamPair = AsyncStream<BridgeEvent>.makeStream()
+        let eventRelay = EventRelay(continuation: streamPair.continuation)
+
+        events = streamPair.stream
+        self.eventRelay = eventRelay
+        rustClient = RustCoreClient(eventSink: eventRelay)
+    }
+
+    public func submit(_ command: BridgeCommand) {
+        do {
+            rustClient.submit(command: try command.ffiValue())
+        } catch {
+            eventRelay.yield(
+                .failed(requestID: command.requestID, message: error.localizedDescription)
+            )
+        }
+    }
+}
+
+private enum BridgeMappingError: LocalizedError {
+    case unsupportedConversation
+
+    var errorDescription: String? {
+        "This conversation is not available in the current live milestone."
+    }
+}
+
+private extension ConversationKey {
+    func ffiValue() throws -> CoreConversationKey {
+        switch self {
+        case let .inbox(accountID):
+            .inbox(accountId: accountID)
+        case let .channel(accountID, streamID):
+            .channel(accountId: accountID, streamId: streamID)
+        case let .topic(accountID, streamID, topic):
+            .topic(accountId: accountID, streamId: streamID, topic: topic)
+        case let .directMessage(accountID, recipientIDs):
+            .directMessage(accountId: accountID, recipientIds: recipientIDs)
+        case .mentions, .starred, .drafts:
+            throw BridgeMappingError.unsupportedConversation
+        }
+    }
+
+    init(_ value: CoreConversationKey) {
+        switch value {
+        case let .inbox(accountID):
+            self = .inbox(accountID: accountID)
+        case let .channel(accountID, streamID):
+            self = .channel(accountID: accountID, streamID: streamID)
+        case let .topic(accountID, streamID, topic):
+            self = .topic(accountID: accountID, streamID: streamID, topic: topic)
+        case let .directMessage(accountID, recipientIDs):
+            self = .directMessage(accountID: accountID, recipientIDs: recipientIDs)
+        }
+    }
+}
+
+private extension LiveSnapshot {
+    init(_ snapshot: CoreSnapshot) {
+        revision = snapshot.revision
+        lastEventID = snapshot.lastEventId
+        users = snapshot.users.map(LiveUserSnapshot.init)
+        channels = snapshot.channels.map(LiveChannelSnapshot.init)
+        messages = snapshot.messages.map(LiveMessageSnapshot.init)
+    }
+}
+
+private extension LiveUserSnapshot {
+    init(_ user: CoreUser) {
+        userID = user.userId
+        fullName = user.fullName
+        email = user.email
+        isActive = user.isActive
+        isBot = user.isBot
+    }
+}
+
+private extension LiveChannelSnapshot {
+    init(_ channel: CoreChannel) {
+        streamID = channel.streamId
+        name = channel.name
+        colorHex = channel.color
+        isMuted = channel.isMuted
+    }
+}
+
+private extension LiveMessageSnapshot {
+    init(_ message: CoreMessage) {
+        messageID = message.messageId
+        senderID = message.senderId
+        senderFullName = message.senderFullName
+        timestamp = Date(timeIntervalSince1970: TimeInterval(message.timestamp))
+        contentHTML = message.contentHtml
+        streamID = message.streamId
+        topic = message.topic
+        recipientIDs = message.recipientIds
+    }
+}
+
+private extension LiveConversationPage {
+    init(_ page: CoreConversationPage) {
+        key = ConversationKey(page.key)
+        messages = page.messages.map(LiveMessageSnapshot.init)
+        foundOldest = page.foundOldest
+        foundNewest = page.foundNewest
+    }
+}
+
+private extension BridgeEvent {
+    init(_ event: CoreEvent) {
+        switch event {
+        case let .pong(requestID, message):
+            self = .pong(requestID: requestID, message: message)
+        case let .sessionStarted(
+            requestID,
+            accountID,
+            serverURL,
+            email,
+            userID,
+            fullName,
+            credential,
+            snapshot
+        ):
+            self = .sessionStarted(
+                requestID: requestID,
+                identity: LiveSessionIdentity(
+                    accountID: accountID,
+                    serverURL: serverURL,
+                    email: email,
+                    userID: userID,
+                    fullName: fullName
+                ),
+                credential: StoredAPICredential(
+                    accountID: accountID,
+                    apiKey: credential.apiKey
+                ),
+                snapshot: LiveSnapshot(snapshot)
+            )
+        case let .snapshotUpdated(accountID, snapshot):
+            self = .snapshotUpdated(
+                accountID: accountID,
+                snapshot: LiveSnapshot(snapshot)
+            )
+        case let .conversationOpened(requestID, page):
+            self = .conversationOpened(
+                requestID: requestID,
+                page: LiveConversationPage(page)
+            )
+        case let .messageSent(requestID, localID, messageID):
+            self = .messageSent(
+                requestID: requestID,
+                localID: localID,
+                messageID: messageID
+            )
+        case let .messagesMarkedRead(requestID, messageIDs):
+            self = .messagesMarkedRead(
+                requestID: requestID,
+                messageIDs: messageIDs
+            )
+        case let .retryScheduled(accountID, delayMilliseconds):
+            self = .retryScheduled(
+                accountID: accountID,
+                delayMilliseconds: delayMilliseconds
+            )
+        case let .disconnected(requestID):
+            self = .disconnected(requestID: requestID)
+        case let .failed(requestID, message):
+            self = .failed(requestID: requestID, message: message)
+        }
+    }
+}

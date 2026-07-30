@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: macOS 26 arm64
+    runs-on: macos-26
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Install Rust 1.95
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal --component clippy,rustfmt
+          rustup default 1.95.0
+
+      - name: Verify toolchain
+        run: ./scripts/bootstrap.sh
+
+      - name: Run checks and tests
+        run: ./scripts/check.sh
+
+      - name: Build release artifacts
+        run: |
+          ./scripts/build-core.sh release
+          ./scripts/build-app.sh release

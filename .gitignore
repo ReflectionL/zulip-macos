@@ -1,0 +1,35 @@
+# macOS
+.DS_Store
+
+# Xcode and SwiftPM
+DerivedData/
+.build/
+*.xcuserstate
+xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+.swiftpm/
+
+# Rust
+target/
+
+# Generated FFI artifacts
+generated/
+app/Vendor/ZulipCoreFFI.xcframework/
+app/Sources/ZulipCoreBindings/Generated/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.zuliprc
+Secrets.xcconfig
+
+# Logs and diagnostics
+*.log
+diagnostics/
+dist/
+
+# Editors
+.idea/
+.vscode/
+*.swp

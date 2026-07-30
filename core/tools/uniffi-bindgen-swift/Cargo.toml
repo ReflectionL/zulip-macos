@@ -1,0 +1,13 @@
+[package]
+name = "uniffi-bindgen-swift"
+description = "Pinned Swift binding generator for Zulip Mac"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+uniffi = { workspace = true, features = ["cli"] }
+
+[lints]
+workspace = true

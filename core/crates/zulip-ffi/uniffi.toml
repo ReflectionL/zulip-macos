@@ -1,0 +1,4 @@
+[bindings.swift]
+module_name = "ZulipCoreBindings"
+ffi_module_name = "ZulipCoreFFI"
+generate_immutable_records = true
