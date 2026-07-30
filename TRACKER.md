@@ -5,9 +5,9 @@ Last updated: 2026-07-31
 ## Current State
 
 - Milestone: MVP — daily use
-- Current step: —
-- Next step: `MVP-001` (`ready`)
-- Overall status: ready
+- Current step: none
+- Next step: `MVP-002` (`ready`)
+- Overall status: ready for the next step
 
 ## Step Status
 
@@ -31,7 +31,8 @@ Last updated: 2026-07-31
 | CORE-004 | done | 2026-07-30 | 2026-07-30 | Added authenticated `/register` bootstrap and `/events` long-poll transport with bounded responses and server-advertised timeouts; normalized initial users/channels and live message, subscription, user, update, delete, unknown, and heartbeat events; added an ordered idempotent reducer that tolerates nonconsecutive IDs and emits one immutable snapshot per changed batch. `./scripts/check.sh`: 22 Rust core tests, 1 FFI test, 24 Swift tests, strict Clippy, builds, and documentation checks pass. | — | — |
 | CORE-005 | done | 2026-07-30 | 2026-07-30 | Added bounded exponential backoff with deterministic jitter, retryable/fatal classification, typed `BAD_EVENT_QUEUE_ID`, `restart` event handling, and a recovery-aware `SyncSession` that preserves cached state during disconnects and atomically replaces it after full registration. Deterministic disconnect, expiry, restart, duplicate, and nonconsecutive-ID tests pass. `./scripts/check.sh`: 26 Rust core tests, 1 FFI test, 24 Swift tests, strict Clippy, builds, and docs pass. | — | — |
 | CORE-006 | done | 2026-07-30 | 2026-07-31 | Added bounded conversation fetch, channel/direct text send with local echo IDs, and read-flag APIs; replaced the bridge ping payload with typed account/conversation/write commands and immutable events; added a Tokio actor for continuous sync, recovery, sends, reads, and snapshots; added password and direct API-key session commands, verified own-user identity, one-time redacted API-key handoff, Keychain save/reload, a native SwiftUI login sheet, fixture/live switching, live sidebar/navigation/timeline mapping, safe non-executing HTML fallback, pending local sends, automatic conversation refresh, and mark-read submission. Added `live_smoke` using the production Rust clients and a stdin-only wrapper. Fixed API authentication to preserve the API login email instead of replacing it with a possibly different profile email. Added a file-based macOS Keychain fallback when an ad-hoc development build lacks data-protection Keychain entitlements. The designated Zulip Cloud organization passes password login, initial sync, Inbox fetch, self-DM send/receive, reopen, mark-read, Keychain save, disconnect, and password-free saved-key reconnect in the running app. Deterministic mocks cover authentication, registration, long polling, queue expiry, restart recovery, messages, and read state. `./scripts/check.sh`: 29 Rust core tests, 3 actor/FFI tests, 29 Swift tests, strict Clippy, formatting, builds, and docs pass. | — | initial commit; `922c16c`; `ce1cc64` |
-| MVP-001 | ready | — | — | Dependencies are complete. Scope and acceptance criteria remain defined in `PLAN.md`; no implementation has started. | — | — |
+| MVP-001 | done | 2026-07-31 | 2026-07-31 | Added authenticated Inbox/Mentions/Starred/Unread narrows, bounded topic discovery, channel/topic/self-and-user DM navigation, stable account-scoped conversation keys, anchored older-message requests, duplicate-free ordered page merging, latest-page refresh, and loading UI. `./scripts/check.sh`: 31 Rust core tests, 4 FFI tests, 29 Swift tests, strict Clippy, formatting, builds, and docs pass. Real Cloud smoke opened every quick destination, a channel, a self-DM, and `#Zulip > 欢迎来到Zulip！`; loading history merged 6 older messages into an initial 10-message page without duplicates or reordering, preserved the viewport, and removed the load control at the oldest page. | — | — |
+| MVP-002 | ready | — | — | Server-side search and result navigation are next. | — | — |
 
 Later milestones remain defined in `PLAN.md` and will be added here when they
 become active; completed rows are never removed.
@@ -40,6 +41,21 @@ become active; completed rows are never removed.
 
 ### 2026-07-31
 
+- Began `MVP-001`; refined its acceptance criteria around stable live
+  destinations, duplicate-free historical pagination, immutable account-scoped
+  pages, and off-main-actor network work.
+- Implemented the Rust narrow/topic/pagination APIs, expanded the UniFFI actor
+  contract, and wired live Swift navigation, quiet refresh, and ordered history
+  merging.
+- `./scripts/check.sh` passes with 31 Rust core, 4 FFI actor, and 29 Swift
+  tests. The designated Cloud account passes Inbox, Mentions, Starred, Unread,
+  channel, and self-DM browsing.
+- Completed the running-app history smoke: the initial 10-message Inbox page
+  loaded 6 older messages without duplicates or reordering, preserved the
+  viewport, and removed the load control after reaching the oldest page.
+- Confirmed the live quick switcher discovers topics and opens
+  `#Zulip > 欢迎来到Zulip！` with the correct message narrow. Closed `MVP-001`
+  and marked `MVP-002` ready.
 - With user approval, revised the milestone boundary so successful Zulip Cloud
   live testing plus deterministic protocol mocks closes `CORE-006`.
 - Moved the real standard HTTPS self-hosted smoke test to the mandatory

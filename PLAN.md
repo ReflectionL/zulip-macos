@@ -85,8 +85,8 @@ required live release smoke in `REL-005`.
 
 | ID | Step | Deliverable and acceptance criteria | Depends on | Verification | Status |
 | --- | --- | --- | --- | --- | --- |
-| MVP-001 | Browsing | Combined feed, channels, topics, DMs, mentions, starred, unread filters, and history pagination. | CORE-006 | API/reducer/navigation tests | ready |
-| MVP-002 | Search | Server-side narrow search and stable navigation to a result message. | MVP-001 | Search fixture and live smoke tests | planned |
+| MVP-001 | Browsing | Live combined feed, channel, topic, direct-message, mentions, starred, and unread destinations use stable `ConversationKey` values and immutable account-scoped pages. Users can load older history without duplicating or reordering messages, while preserving the newest-page live refresh path. The Swift sidebar and quick switcher expose every destination without performing network work on the main actor. | CORE-006 | Rust API pagination/narrow tests; FFI actor snapshot tests; Swift navigation/view-model tests; `./scripts/check.sh`; running-app browse and load-older smoke | done (2026-07-31) |
+| MVP-002 | Search | Server-side narrow search and stable navigation to a result message. | MVP-001 | Search fixture and live smoke tests | ready |
 | MVP-003 | Message actions | Pending/error/retry states for send, edit, delete, reaction, star, and read operations. | MVP-002 | Mock failure/rollback tests | planned |
 | MVP-004 | Files and media | Upload attachments; authenticated, account-isolated media cache; safe local URLs for Swift. | MVP-003 | Upload/cache/security tests | planned |
 | MVP-005 | Zulip content | Sanitize server HTML into native `ContentBlock` values with safe unsupported-content fallback. | MVP-004 | Malformed/adversarial HTML corpus | planned |

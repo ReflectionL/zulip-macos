@@ -97,6 +97,21 @@ struct LiveSessionTests {
 
         #expect(model.sidebarSnapshot?.channels.map(\.name) == ["engineering"])
         #expect(model.sidebarSnapshot?.currentUserName == "Maya Chen")
+        #expect(
+            model.sidebarSnapshot?.quickLinks.map(\.title)
+                == ["Inbox", "Mentions", "Starred", "Unread"]
+        )
+        #expect(
+            model.navigationDirectory
+                .destination(
+                    for: .topic(
+                        accountID: accountID,
+                        streamID: 5,
+                        topic: "macOS"
+                    )
+                )?
+                .title == "macOS"
+        )
         let savedCredential = await credentials.savedCredential()
         #expect(
             savedCredential
@@ -145,7 +160,7 @@ struct LiveSessionTests {
                             recipientIDs: []
                         ),
                     ],
-                    foundOldest: true,
+                    foundOldest: false,
                     foundNewest: true
                 )
             )
@@ -185,6 +200,68 @@ struct LiveSessionTests {
                 return false
             }
         )
+
+        model.loadOlderMessages(for: key)
+        let historyCommand = core.commands.last {
+            if case .loadOlderMessages = $0 {
+                return true
+            }
+            return false
+        }
+        guard case let .loadOlderMessages(
+            historyRequestID,
+            historyKey,
+            beforeMessageID,
+            limit
+        ) = historyCommand else {
+            Issue.record("Expected history command")
+            return
+        }
+        #expect(historyKey == key)
+        #expect(beforeMessageID == 44)
+        #expect(limit == 10)
+        #expect(model.isLoadingOlderMessages)
+
+        core.emit(
+            .conversationHistoryLoaded(
+                requestID: historyRequestID,
+                page: LiveConversationPage(
+                    key: key,
+                    messages: [
+                        LiveMessageSnapshot(
+                            messageID: 42,
+                            senderID: 22,
+                            senderFullName: "Theo Martin",
+                            timestamp: Date(timeIntervalSince1970: 1_699_999_900),
+                            contentHTML: "<p>Earlier</p>",
+                            streamID: 5,
+                            topic: "macOS",
+                            recipientIDs: []
+                        ),
+                        LiveMessageSnapshot(
+                            messageID: 44,
+                            senderID: 22,
+                            senderFullName: "Theo Martin",
+                            timestamp: Date(timeIntervalSince1970: 1_700_000_000),
+                            contentHTML: "<p>Hello <strong>world</strong></p>",
+                            streamID: 5,
+                            topic: "macOS",
+                            recipientIDs: []
+                        ),
+                    ],
+                    foundOldest: true,
+                    foundNewest: false
+                )
+            )
+        )
+        await eventually {
+            guard case let .loaded(page) = model.conversationState else {
+                return false
+            }
+            return page.messages.map(\.id) == [42, 44]
+                && page.beforeCursor == nil
+                && !model.isLoadingOlderMessages
+        }
     }
 
     private var snapshot: LiveSnapshot {
@@ -213,6 +290,13 @@ struct LiveSessionTests {
                     name: "engineering",
                     colorHex: "#76ce90",
                     isMuted: false
+                ),
+            ],
+            topics: [
+                LiveTopicSnapshot(
+                    streamID: 5,
+                    name: "macOS",
+                    maxMessageID: 40
                 ),
             ],
             messages: [

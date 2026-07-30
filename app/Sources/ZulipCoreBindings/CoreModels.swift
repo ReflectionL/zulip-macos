@@ -5,6 +5,7 @@ public enum ConversationKey: Hashable, Sendable {
     case inbox(accountID: String)
     case mentions(accountID: String)
     case starred(accountID: String)
+    case unread(accountID: String)
     case drafts(accountID: String)
     case channel(accountID: String, streamID: Int64)
     case topic(accountID: String, streamID: Int64, topic: String)
@@ -15,6 +16,7 @@ public enum ConversationKey: Hashable, Sendable {
         case let .inbox(accountID),
              let .mentions(accountID),
              let .starred(accountID),
+             let .unread(accountID),
              let .drafts(accountID),
              let .channel(accountID, _),
              let .topic(accountID, _, _),

@@ -26,6 +26,12 @@ enum FixtureSidebar {
                 systemImage: "star"
             ),
             QuickLinkSnapshot(
+                key: .unread(accountID: accountID),
+                title: "Unread",
+                systemImage: "circle.fill",
+                unreadCount: 12
+            ),
+            QuickLinkSnapshot(
                 key: .drafts(accountID: accountID),
                 title: "Drafts",
                 systemImage: "doc.text",

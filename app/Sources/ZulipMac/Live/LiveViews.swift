@@ -238,6 +238,8 @@ private struct LiveWindowView: View {
                 return
             }
             sidebarModel.snapshot = snapshot
+        }
+        .onChange(of: session.navigationDirectory) {
             navigation.replaceDirectory(session.navigationDirectory)
         }
     }
@@ -248,6 +250,10 @@ private struct LiveWindowView: View {
         case let .loaded(page):
             ConversationSurface(
                 page: page,
+                isLoadingEarlier: session.isLoadingOlderMessages,
+                loadEarlier: {
+                    session.loadOlderMessages(for: page.key)
+                },
                 submitMessage: { content in
                     session.sendText(content, to: page.key)
                 }

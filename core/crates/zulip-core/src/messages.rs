@@ -15,6 +15,7 @@ use crate::{
 
 const MESSAGES_PATH: &str = "api/v1/messages";
 const MESSAGE_FLAGS_PATH: &str = "api/v1/messages/flags";
+const TOPICS_PATH_PREFIX: &str = "api/v1/users/me";
 const MAX_MESSAGES_RESPONSE_BYTES: usize = 16 * 1_048_576;
 const MAX_WRITE_RESPONSE_BYTES: usize = 1_048_576;
 const MAX_FETCH_MESSAGES: u16 = 1_000;
@@ -24,6 +25,12 @@ const MAX_FETCH_MESSAGES: u16 = 1_000;
 pub enum ConversationTarget {
     /// The account's combined feed.
     Combined,
+    /// Messages that mention the current user.
+    Mentions,
+    /// Messages starred by the current user.
+    Starred,
+    /// Messages that the current user has not read.
+    Unread,
     /// All visible messages in one channel.
     Channel {
         /// Zulip stream identifier.
@@ -47,6 +54,15 @@ impl ConversationTarget {
     fn narrow_json(&self) -> Result<String, MessageApiError> {
         let narrow = match self {
             Self::Combined => Value::Array(Vec::new()),
+            Self::Mentions => serde_json::json!([
+                {"operator": "is", "operand": "mentioned"}
+            ]),
+            Self::Starred => serde_json::json!([
+                {"operator": "is", "operand": "starred"}
+            ]),
+            Self::Unread => serde_json::json!([
+                {"operator": "is", "operand": "unread"}
+            ]),
             Self::Channel { stream_id } => serde_json::json!([
                 {"operator": "channel", "operand": stream_id}
             ]),
@@ -70,6 +86,17 @@ impl ConversationTarget {
         };
         Ok(narrow.to_string())
     }
+}
+
+/// One topic visible to the current account.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TopicSummary {
+    /// Zulip stream identifier.
+    pub stream_id: i64,
+    /// Exact topic name.
+    pub name: String,
+    /// Most recent message in the topic.
+    pub max_message_id: i64,
 }
 
 /// A validated outgoing text message.
@@ -188,6 +215,36 @@ impl MessageClient {
         target: ConversationTarget,
         limit: u16,
     ) -> Result<ConversationMessages, MessageApiError> {
+        self.fetch_page(target, "newest".to_owned(), true, limit)
+            .await
+    }
+
+    /// Fetches messages older than `before_message_id` for one conversation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageApiError`] for invalid identifiers/limits/targets,
+    /// transport, status, size, or message normalization failures.
+    pub async fn fetch_older_messages(
+        &self,
+        target: ConversationTarget,
+        before_message_id: i64,
+        limit: u16,
+    ) -> Result<ConversationMessages, MessageApiError> {
+        if before_message_id <= 0 {
+            return Err(MessageApiError::InvalidInput);
+        }
+        self.fetch_page(target, before_message_id.to_string(), false, limit)
+            .await
+    }
+
+    async fn fetch_page(
+        &self,
+        target: ConversationTarget,
+        anchor: String,
+        include_anchor: bool,
+        limit: u16,
+    ) -> Result<ConversationMessages, MessageApiError> {
         if limit == 0 || limit > MAX_FETCH_MESSAGES {
             return Err(MessageApiError::InvalidInput);
         }
@@ -197,7 +254,8 @@ impl MessageClient {
             .get(self.base_url.endpoint(MESSAGES_PATH))
             .basic_auth(&self.email, Some(self.api_key.expose_secret()))
             .query(&[
-                ("anchor", "newest".to_owned()),
+                ("anchor", anchor),
+                ("include_anchor", include_anchor.to_string()),
                 ("num_before", limit.to_string()),
                 ("num_after", "0".to_owned()),
                 ("narrow", narrow),
@@ -222,6 +280,35 @@ impl MessageClient {
             found_oldest: document.found_oldest,
             found_newest: document.found_newest,
         })
+    }
+
+    /// Fetches all currently visible topics in one subscribed channel.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageApiError`] for invalid channel identifiers, transport,
+    /// status, size, or topic normalization failures.
+    pub async fn fetch_topics(&self, stream_id: i64) -> Result<Vec<TopicSummary>, MessageApiError> {
+        if stream_id <= 0 {
+            return Err(MessageApiError::InvalidInput);
+        }
+        let path = format!("{TOPICS_PATH_PREFIX}/{stream_id}/topics");
+        let response = self
+            .http
+            .get(self.base_url.endpoint(&path))
+            .basic_auth(&self.email, Some(self.api_key.expose_secret()))
+            .query(&[("allow_empty_topic_name", "true")])
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let document: TopicsDocument =
+            decode_response(response, MAX_MESSAGES_RESPONSE_BYTES).await?;
+        document.validate_result()?;
+        document
+            .topics
+            .into_iter()
+            .map(|topic| topic.normalize(stream_id))
+            .collect()
     }
 
     /// Sends a channel or direct text message and returns its server ID.
@@ -353,6 +440,40 @@ struct MessagesDocument {
     found_newest: bool,
     #[serde(default)]
     messages: Vec<MessageDocument>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TopicsDocument {
+    result: Option<String>,
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    topics: Vec<TopicDocument>,
+}
+
+impl TopicsDocument {
+    fn validate_result(&self) -> Result<(), MessageApiError> {
+        validate_api_result(self.result.as_deref(), self.code.as_deref())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct TopicDocument {
+    max_id: i64,
+    name: String,
+}
+
+impl TopicDocument {
+    fn normalize(self, stream_id: i64) -> Result<TopicSummary, MessageApiError> {
+        if self.max_id <= 0 || self.name.chars().any(char::is_control) {
+            return Err(MessageApiError::InvalidResponse("invalid topic"));
+        }
+        Ok(TopicSummary {
+            stream_id,
+            name: self.name,
+            max_message_id: self.max_id,
+        })
+    }
 }
 
 impl MessagesDocument {
@@ -607,6 +728,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn special_narrows_history_and_topics_follow_the_zulip_protocol() {
+        let responses = vec![
+            (
+                StatusCode::OK,
+                r#"{
+                    "result":"success",
+                    "found_oldest":true,
+                    "found_newest":false,
+                    "messages":[{
+                        "id":40,
+                        "sender_id":7,
+                        "sender_full_name":"Maya Chen",
+                        "timestamp":1770000000,
+                        "content":"<p>Earlier</p>",
+                        "type":"private",
+                        "display_recipient":[{"id":7},{"id":9}]
+                    }]
+                }"#
+                .to_owned(),
+            ),
+            (
+                StatusCode::OK,
+                r#"{
+                    "result":"success",
+                    "topics":[
+                        {"max_id":44,"name":"macOS"},
+                        {"max_id":40,"name":"Rust core"}
+                    ]
+                }"#
+                .to_owned(),
+            ),
+        ];
+        let (server, requests) = spawn_mock(responses);
+        let client = MessageClient::new(&server, "maya@example.com", SecretString::new(API_KEY))
+            .expect("message client");
+
+        let page = client
+            .fetch_older_messages(ConversationTarget::Unread, 42, 25)
+            .await
+            .expect("older unread messages");
+        assert_eq!(page.messages[0].id, 40);
+        assert!(page.found_oldest);
+        assert!(!page.found_newest);
+
+        let topics = client.fetch_topics(5).await.expect("channel topics");
+        assert_eq!(topics.len(), 2);
+        assert_eq!(topics[0].stream_id, 5);
+        assert_eq!(topics[0].name, "macOS");
+        assert_eq!(topics[0].max_message_id, 44);
+
+        let history = requests.recv().expect("history request");
+        assert!(history.starts_with("GET /api/v1/messages?"));
+        assert!(history.contains("anchor=42"));
+        assert!(history.contains("include_anchor=false"));
+        assert!(history.contains("num_before=25"));
+        assert!(history.contains("%22operand%22%3A%22unread%22"));
+
+        let topics_request = requests.recv().expect("topics request");
+        assert!(topics_request.starts_with("GET /api/v1/users/me/5/topics?"));
+        assert!(topics_request.contains("allow_empty_topic_name=true"));
+    }
+
+    #[test]
+    fn browsing_targets_encode_stable_narrows() {
+        assert_eq!(
+            ConversationTarget::Combined
+                .narrow_json()
+                .expect("combined"),
+            "[]"
+        );
+        for (target, expected) in [
+            (ConversationTarget::Mentions, "\"mentioned\""),
+            (ConversationTarget::Starred, "\"starred\""),
+            (ConversationTarget::Unread, "\"unread\""),
+        ] {
+            assert!(
+                target
+                    .narrow_json()
+                    .expect("special narrow")
+                    .contains(expected)
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn invalid_message_input_fails_before_networking() {
         let (server, _) = spawn_mock(Vec::new());
         let client = MessageClient::new(&server, "maya@example.com", SecretString::new(API_KEY))
@@ -636,6 +842,7 @@ mod tests {
     fn assert_fetch_request(request: &str) {
         assert!(request.starts_with("GET /api/v1/messages?"));
         assert!(request.contains("anchor=newest"));
+        assert!(request.contains("include_anchor=true"));
         assert!(request.contains("num_before=50"));
         assert!(request.contains("narrow="));
         assert!(request.contains("apply_markdown=true"));

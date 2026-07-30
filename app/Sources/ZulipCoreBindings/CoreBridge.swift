@@ -38,6 +38,19 @@ public struct LiveChannelSnapshot: Equatable, Sendable {
     }
 }
 
+/// A topic supplied by the authenticated Rust topic directory.
+public struct LiveTopicSnapshot: Equatable, Sendable {
+    public let streamID: Int64
+    public let name: String
+    public let maxMessageID: Int64
+
+    public init(streamID: Int64, name: String, maxMessageID: Int64) {
+        self.streamID = streamID
+        self.name = name
+        self.maxMessageID = maxMessageID
+    }
+}
+
 /// A normalized live message whose untrusted HTML still requires Rust content parsing.
 public struct LiveMessageSnapshot: Equatable, Sendable {
     public let messageID: Int64
@@ -76,6 +89,7 @@ public struct LiveSnapshot: Equatable, Sendable {
     public let lastEventID: Int64
     public let users: [LiveUserSnapshot]
     public let channels: [LiveChannelSnapshot]
+    public let topics: [LiveTopicSnapshot]
     public let messages: [LiveMessageSnapshot]
 
     public init(
@@ -83,12 +97,14 @@ public struct LiveSnapshot: Equatable, Sendable {
         lastEventID: Int64,
         users: [LiveUserSnapshot],
         channels: [LiveChannelSnapshot],
+        topics: [LiveTopicSnapshot] = [],
         messages: [LiveMessageSnapshot]
     ) {
         self.revision = revision
         self.lastEventID = lastEventID
         self.users = users
         self.channels = channels
+        self.topics = topics
         self.messages = messages
     }
 }
@@ -156,6 +172,12 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
         password: String
     )
     case openConversation(requestID: UInt64, key: ConversationKey, limit: UInt16)
+    case loadOlderMessages(
+        requestID: UInt64,
+        key: ConversationKey,
+        beforeMessageID: Int64,
+        limit: UInt16
+    )
     case sendChannelMessage(
         requestID: UInt64,
         accountID: String,
@@ -185,6 +207,7 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
              let .startAPIKeySession(requestID, _, _, _, _),
              let .startPasswordSession(requestID, _, _, _, _),
              let .openConversation(requestID, _, _),
+             let .loadOlderMessages(requestID, _, _, _),
              let .sendChannelMessage(requestID, _, _, _, _, _),
              let .sendDirectMessage(requestID, _, _, _, _),
              let .markRead(requestID, _, _),
@@ -203,6 +226,8 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
             "BridgeCommand.startPasswordSession(password: [REDACTED])"
         case .openConversation:
             "BridgeCommand.openConversation"
+        case .loadOlderMessages:
+            "BridgeCommand.loadOlderMessages"
         case .sendChannelMessage:
             "BridgeCommand.sendChannelMessage"
         case .sendDirectMessage:
@@ -240,6 +265,13 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
             .openConversation(
                 requestId: requestID,
                 key: try key.ffiValue(),
+                limit: limit
+            )
+        case let .loadOlderMessages(requestID, key, beforeMessageID, limit):
+            .loadOlderMessages(
+                requestId: requestID,
+                key: try key.ffiValue(),
+                beforeMessageId: beforeMessageID,
                 limit: limit
             )
         case let .sendChannelMessage(
@@ -300,6 +332,7 @@ public enum BridgeEvent:
     )
     case snapshotUpdated(accountID: String, snapshot: LiveSnapshot)
     case conversationOpened(requestID: UInt64, page: LiveConversationPage)
+    case conversationHistoryLoaded(requestID: UInt64, page: LiveConversationPage)
     case messageSent(requestID: UInt64, localID: String, messageID: Int64)
     case messagesMarkedRead(requestID: UInt64, messageIDs: [Int64])
     case retryScheduled(accountID: String, delayMilliseconds: UInt64)
@@ -311,6 +344,7 @@ public enum BridgeEvent:
         case let .pong(requestID, _),
              let .sessionStarted(requestID, _, _, _),
              let .conversationOpened(requestID, _),
+             let .conversationHistoryLoaded(requestID, _),
              let .messageSent(requestID, _, _),
              let .messagesMarkedRead(requestID, _),
              let .disconnected(requestID):
@@ -332,6 +366,8 @@ public enum BridgeEvent:
             "Live snapshot updated"
         case .conversationOpened:
             "Conversation opened"
+        case .conversationHistoryLoaded:
+            "Conversation history loaded"
         case .messageSent:
             "Message sent"
         case .messagesMarkedRead:
@@ -421,13 +457,19 @@ private extension ConversationKey {
         switch self {
         case let .inbox(accountID):
             .inbox(accountId: accountID)
+        case let .mentions(accountID):
+            .mentions(accountId: accountID)
+        case let .starred(accountID):
+            .starred(accountId: accountID)
+        case let .unread(accountID):
+            .unread(accountId: accountID)
         case let .channel(accountID, streamID):
             .channel(accountId: accountID, streamId: streamID)
         case let .topic(accountID, streamID, topic):
             .topic(accountId: accountID, streamId: streamID, topic: topic)
         case let .directMessage(accountID, recipientIDs):
             .directMessage(accountId: accountID, recipientIds: recipientIDs)
-        case .mentions, .starred, .drafts:
+        case .drafts:
             throw BridgeMappingError.unsupportedConversation
         }
     }
@@ -436,6 +478,12 @@ private extension ConversationKey {
         switch value {
         case let .inbox(accountID):
             self = .inbox(accountID: accountID)
+        case let .mentions(accountID):
+            self = .mentions(accountID: accountID)
+        case let .starred(accountID):
+            self = .starred(accountID: accountID)
+        case let .unread(accountID):
+            self = .unread(accountID: accountID)
         case let .channel(accountID, streamID):
             self = .channel(accountID: accountID, streamID: streamID)
         case let .topic(accountID, streamID, topic):
@@ -452,6 +500,7 @@ private extension LiveSnapshot {
         lastEventID = snapshot.lastEventId
         users = snapshot.users.map(LiveUserSnapshot.init)
         channels = snapshot.channels.map(LiveChannelSnapshot.init)
+        topics = snapshot.topics.map(LiveTopicSnapshot.init)
         messages = snapshot.messages.map(LiveMessageSnapshot.init)
     }
 }
@@ -472,6 +521,14 @@ private extension LiveChannelSnapshot {
         name = channel.name
         colorHex = channel.color
         isMuted = channel.isMuted
+    }
+}
+
+private extension LiveTopicSnapshot {
+    init(_ topic: CoreTopic) {
+        streamID = topic.streamId
+        name = topic.name
+        maxMessageID = topic.maxMessageId
     }
 }
 
@@ -534,6 +591,11 @@ private extension BridgeEvent {
             )
         case let .conversationOpened(requestID, page):
             self = .conversationOpened(
+                requestID: requestID,
+                page: LiveConversationPage(page)
+            )
+        case let .conversationHistoryLoaded(requestID, page):
+            self = .conversationHistoryLoaded(
                 requestID: requestID,
                 page: LiveConversationPage(page)
             )

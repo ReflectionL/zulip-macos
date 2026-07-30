@@ -5,11 +5,12 @@ use std::{sync::Arc, time::Duration};
 use tokio::{
     runtime::Runtime,
     sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
+    task::JoinSet,
     time::Instant,
 };
 use zulip_core::{
     auth::{AuthenticatedAccount, AuthenticationClient, SecretString},
-    messages::{ConversationTarget, MessageClient, OutgoingMessage},
+    messages::{ConversationTarget, MessageClient, OutgoingMessage, TopicSummary},
     sync::{
         EventQueueClient, MessageSummary, RecoveryPolicy, SyncCycle, SyncSession, SyncSnapshot,
         UserSummary,
@@ -23,6 +24,21 @@ uniffi::setup_scaffolding!();
 pub enum CoreConversationKey {
     /// Account combined feed.
     Inbox {
+        /// Client-owned account identifier.
+        account_id: String,
+    },
+    /// Messages mentioning the current user.
+    Mentions {
+        /// Client-owned account identifier.
+        account_id: String,
+    },
+    /// Messages starred by the current user.
+    Starred {
+        /// Client-owned account identifier.
+        account_id: String,
+    },
+    /// Messages not yet read by the current user.
+    Unread {
         /// Client-owned account identifier.
         account_id: String,
     },
@@ -55,6 +71,9 @@ impl CoreConversationKey {
     fn account_id(&self) -> &str {
         match self {
             Self::Inbox { account_id }
+            | Self::Mentions { account_id }
+            | Self::Starred { account_id }
+            | Self::Unread { account_id }
             | Self::Channel { account_id, .. }
             | Self::Topic { account_id, .. }
             | Self::DirectMessage { account_id, .. } => account_id,
@@ -64,6 +83,9 @@ impl CoreConversationKey {
     fn target(&self) -> ConversationTarget {
         match self {
             Self::Inbox { .. } => ConversationTarget::Combined,
+            Self::Mentions { .. } => ConversationTarget::Mentions,
+            Self::Starred { .. } => ConversationTarget::Starred,
+            Self::Unread { .. } => ConversationTarget::Unread,
             Self::Channel { stream_id, .. } => ConversationTarget::Channel {
                 stream_id: *stream_id,
             },
@@ -125,6 +147,17 @@ pub enum CoreCommand {
         /// Number of newest messages, from 1 through 1000.
         limit: u16,
     },
+    /// Loads a page ending immediately before a known message.
+    LoadOlderMessages {
+        /// Correlates the response.
+        request_id: u64,
+        /// Stable account-scoped conversation.
+        key: CoreConversationKey,
+        /// Oldest message currently held by Swift.
+        before_message_id: i64,
+        /// Maximum number of earlier messages, from 1 through 1000.
+        limit: u16,
+    },
     /// Sends a channel message.
     SendChannelMessage {
         /// Correlates the response.
@@ -176,6 +209,7 @@ impl CoreCommand {
             | Self::StartApiKeySession { request_id, .. }
             | Self::StartPasswordSession { request_id, .. }
             | Self::OpenConversation { request_id, .. }
+            | Self::LoadOlderMessages { request_id, .. }
             | Self::SendChannelMessage { request_id, .. }
             | Self::SendDirectMessage { request_id, .. }
             | Self::MarkRead { request_id, .. }
@@ -225,6 +259,17 @@ pub struct CoreChannel {
     pub is_muted: bool,
 }
 
+/// Topic projection discovered through the authenticated topics API.
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct CoreTopic {
+    /// Zulip stream identifier.
+    pub stream_id: i64,
+    /// Exact topic name.
+    pub name: String,
+    /// Most recent message in the topic.
+    pub max_message_id: i64,
+}
+
 /// Message projection in a bridge snapshot or page.
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct CoreMessage {
@@ -257,6 +302,8 @@ pub struct CoreSnapshot {
     pub users: Vec<CoreUser>,
     /// Channels sorted by identifier.
     pub channels: Vec<CoreChannel>,
+    /// Visible topics ordered by channel and server recency.
+    pub topics: Vec<CoreTopic>,
     /// Messages sorted by identifier.
     pub messages: Vec<CoreMessage>,
 }
@@ -316,6 +363,13 @@ pub enum CoreEvent {
         /// Originating request.
         request_id: u64,
         /// Loaded page.
+        page: CoreConversationPage,
+    },
+    /// An older page loaded for merging ahead of the current timeline.
+    ConversationHistoryLoaded {
+        /// Originating request.
+        request_id: u64,
+        /// Historical page.
         page: CoreConversationPage,
     },
     /// A send request succeeded.
@@ -405,8 +459,9 @@ impl RustCoreClient {
 
 struct AccountSession {
     account_id: String,
-    messages: MessageClient,
+    messages: Arc<MessageClient>,
     sync: SyncSession,
+    topics: Vec<TopicSummary>,
 }
 
 enum ActorInput {
@@ -463,6 +518,7 @@ async fn run_actor(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn handle_command(
     command: CoreCommand,
     account: &mut Option<AccountSession>,
@@ -502,6 +558,22 @@ async fn handle_command(
             key,
             limit,
         } => open_conversation(request_id, key, limit, account.as_ref(), event_sink).await,
+        CoreCommand::LoadOlderMessages {
+            request_id,
+            key,
+            before_message_id,
+            limit,
+        } => {
+            load_older_messages(
+                request_id,
+                key,
+                before_message_id,
+                limit,
+                account.as_ref(),
+                event_sink,
+            )
+            .await;
+        }
         CoreCommand::SendChannelMessage {
             request_id,
             account_id,
@@ -558,10 +630,46 @@ async fn handle_command(
             )
             .await;
         }
-        CoreCommand::Disconnect { request_id } => {
-            *account = None;
-            event_sink.handle_event(CoreEvent::Disconnected { request_id });
-        }
+        CoreCommand::Disconnect { request_id } => disconnect(request_id, account, event_sink),
+    }
+}
+
+fn disconnect(
+    request_id: u64,
+    account: &mut Option<AccountSession>,
+    event_sink: &Arc<dyn CoreEventSink>,
+) {
+    *account = None;
+    event_sink.handle_event(CoreEvent::Disconnected { request_id });
+}
+
+async fn load_older_messages(
+    request_id: u64,
+    key: CoreConversationKey,
+    before_message_id: i64,
+    limit: u16,
+    account: Option<&AccountSession>,
+    event_sink: &Arc<dyn CoreEventSink>,
+) {
+    let Some(session) = account.filter(|item| item.account_id == key.account_id()) else {
+        emit_no_session(request_id, event_sink);
+        return;
+    };
+    match session
+        .messages
+        .fetch_older_messages(key.target(), before_message_id, limit)
+        .await
+    {
+        Ok(page) => event_sink.handle_event(CoreEvent::ConversationHistoryLoaded {
+            request_id,
+            page: CoreConversationPage {
+                key,
+                messages: page.messages.into_iter().map(Into::into).collect(),
+                found_oldest: page.found_oldest,
+                found_newest: page.found_newest,
+            },
+        }),
+        Err(error) => emit_error(Some(request_id), error, event_sink),
     }
 }
 
@@ -762,7 +870,7 @@ async fn start_session(
         email.clone(),
         SecretString::new(api_key.clone()),
     ) {
-        Ok(client) => client,
+        Ok(client) => Arc::new(client),
         Err(error) => {
             emit_error(Some(request_id), error, event_sink);
             return;
@@ -770,11 +878,35 @@ async fn start_session(
     };
     match SyncSession::start(sync_client, RecoveryPolicy::default(), request_id).await {
         Ok((sync, snapshot)) => {
-            let bridge_snapshot = snapshot.into();
+            let mut topics = Vec::new();
+            for channels in snapshot.channels.chunks(6) {
+                let mut topic_tasks = JoinSet::new();
+                for channel in channels {
+                    let messages = Arc::clone(&messages);
+                    let stream_id = channel.id;
+                    topic_tasks.spawn(async move { messages.fetch_topics(stream_id).await });
+                }
+                while let Some(result) = topic_tasks.join_next().await {
+                    if let Ok(Ok(mut channel_topics)) = result {
+                        topics.append(&mut channel_topics);
+                    }
+                }
+            }
+            topics.sort_by(|left, right| {
+                left.stream_id
+                    .cmp(&right.stream_id)
+                    .then_with(|| right.max_message_id.cmp(&left.max_message_id))
+                    .then_with(|| left.name.cmp(&right.name))
+            });
+            topics.dedup_by(|left, right| {
+                left.stream_id == right.stream_id && left.name == right.name
+            });
+            let bridge_snapshot = CoreSnapshot::from_sync(snapshot, &topics);
             *account = Some(AccountSession {
                 account_id: account_id.clone(),
                 messages,
                 sync,
+                topics,
             });
             event_sink.handle_event(CoreEvent::SessionStarted {
                 request_id,
@@ -820,7 +952,7 @@ fn handle_sync_cycle(
             if let Some(snapshot) = outcome.snapshot {
                 event_sink.handle_event(CoreEvent::SnapshotUpdated {
                     account_id: account.account_id.clone(),
-                    snapshot: snapshot.into(),
+                    snapshot: CoreSnapshot::from_sync(snapshot, &account.topics),
                 });
             }
             Instant::now()
@@ -828,7 +960,7 @@ fn handle_sync_cycle(
         SyncCycle::Resynchronized { snapshot, .. } => {
             event_sink.handle_event(CoreEvent::SnapshotUpdated {
                 account_id: account.account_id.clone(),
-                snapshot: snapshot.into(),
+                snapshot: CoreSnapshot::from_sync(snapshot, &account.topics),
             });
             Instant::now()
         }
@@ -895,8 +1027,8 @@ impl From<MessageSummary> for CoreMessage {
     }
 }
 
-impl From<SyncSnapshot> for CoreSnapshot {
-    fn from(snapshot: SyncSnapshot) -> Self {
+impl CoreSnapshot {
+    fn from_sync(snapshot: SyncSnapshot, topics: &[TopicSummary]) -> Self {
         Self {
             revision: snapshot.revision,
             last_event_id: snapshot.last_event_id,
@@ -911,7 +1043,18 @@ impl From<SyncSnapshot> for CoreSnapshot {
                     is_muted: channel.is_muted,
                 })
                 .collect(),
+            topics: topics.iter().cloned().map(Into::into).collect(),
             messages: snapshot.messages.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<TopicSummary> for CoreTopic {
+    fn from(topic: TopicSummary) -> Self {
+        Self {
+            stream_id: topic.stream_id,
+            name: topic.name,
+            max_message_id: topic.max_message_id,
         }
     }
 }
@@ -926,7 +1069,13 @@ mod tests {
         time::Duration,
     };
 
-    use super::{CoreCommand, CoreEvent, CoreEventSink, RustCoreClient};
+    use super::{
+        CoreCommand, CoreConversationKey, CoreEvent, CoreEventSink, CoreSnapshot, RustCoreClient,
+    };
+    use zulip_core::{
+        messages::{ConversationTarget, TopicSummary},
+        sync::SyncSnapshot,
+    };
 
     #[derive(Default)]
     struct RecordingSink {
@@ -976,6 +1125,52 @@ mod tests {
     }
 
     #[test]
+    fn browsing_keys_and_topics_cross_the_boundary_without_transport_types() {
+        for (key, target) in [
+            (
+                CoreConversationKey::Mentions {
+                    account_id: "account-1".to_owned(),
+                },
+                ConversationTarget::Mentions,
+            ),
+            (
+                CoreConversationKey::Starred {
+                    account_id: "account-1".to_owned(),
+                },
+                ConversationTarget::Starred,
+            ),
+            (
+                CoreConversationKey::Unread {
+                    account_id: "account-1".to_owned(),
+                },
+                ConversationTarget::Unread,
+            ),
+        ] {
+            assert_eq!(key.account_id(), "account-1");
+            assert_eq!(key.target(), target);
+        }
+
+        let snapshot = CoreSnapshot::from_sync(
+            SyncSnapshot {
+                revision: 2,
+                last_event_id: 10,
+                users: Vec::new(),
+                channels: Vec::new(),
+                messages: Vec::new(),
+            },
+            &[TopicSummary {
+                stream_id: 5,
+                name: "macOS".to_owned(),
+                max_message_id: 44,
+            }],
+        );
+        assert_eq!(snapshot.topics.len(), 1);
+        assert_eq!(snapshot.topics[0].stream_id, 5);
+        assert_eq!(snapshot.topics[0].name, "macOS");
+        assert_eq!(snapshot.topics[0].max_message_id, 44);
+    }
+
+    #[test]
     fn api_key_session_registers_off_the_calling_thread() {
         let (server, request) = spawn_register_mock();
         let (signal_sender, signal_receiver) = mpsc::channel();
@@ -1004,7 +1199,9 @@ mod tests {
                 account_id,
                 snapshot,
                 ..
-            } if account_id == "account-1" && snapshot.channels[0].name == "engineering"
+            } if account_id == "account-1"
+                && snapshot.channels[0].name == "engineering"
+                && snapshot.topics[0].name == "macOS"
         ));
         let own_user = request
             .recv_timeout(Duration::from_secs(1))
@@ -1092,6 +1289,7 @@ mod tests {
                         "is_muted":false
                     }]
                 }"##,
+                r#"{"result":"success","topics":[{"max_id":44,"name":"macOS"}]}"#,
             ];
             for body in bodies {
                 let (mut stream, _) = listener.accept().expect("accept request");
@@ -1132,6 +1330,7 @@ mod tests {
                         "is_muted":false
                     }]
                 }"##,
+                r#"{"result":"success","topics":[{"max_id":44,"name":"macOS"}]}"#,
             ];
             for body in bodies {
                 let (mut stream, _) = listener.accept().expect("accept request");

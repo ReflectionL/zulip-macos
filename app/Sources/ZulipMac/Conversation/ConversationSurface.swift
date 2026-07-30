@@ -4,7 +4,9 @@ import ZulipCoreBindings
 struct ConversationSurface: View {
     let page: ConversationPage
     var isOffline = false
+    var isLoadingEarlier = false
     var reconnect: () -> Void = {}
+    var loadEarlier: (() -> Void)?
     var submitMessage: ((String) -> Bool)?
 
     @State private var messages: [MessageViewData]
@@ -15,12 +17,16 @@ struct ConversationSurface: View {
     init(
         page: ConversationPage,
         isOffline: Bool = false,
+        isLoadingEarlier: Bool = false,
         reconnect: @escaping () -> Void = {},
+        loadEarlier: (() -> Void)? = nil,
         submitMessage: ((String) -> Bool)? = nil
     ) {
         self.page = page
         self.isOffline = isOffline
+        self.isLoadingEarlier = isLoadingEarlier
         self.reconnect = reconnect
+        self.loadEarlier = loadEarlier
         self.submitMessage = submitMessage
         _messages = State(initialValue: page.messages)
     }
@@ -57,10 +63,21 @@ struct ConversationSurface: View {
                     ScrollView {
                         LazyVStack(spacing: 0) {
                             if page.beforeCursor != nil {
-                                Button("Load earlier messages") {
-                                    // Pagination is wired to the core in MVP-001.
+                                Button {
+                                    loadEarlier?()
+                                } label: {
+                                    if isLoadingEarlier {
+                                        HStack(spacing: AppTheme.Spacing.small) {
+                                            ProgressView()
+                                                .controlSize(.small)
+                                            Text("Loading earlier messages…")
+                                        }
+                                    } else {
+                                        Text("Load earlier messages")
+                                    }
                                 }
                                 .buttonStyle(.borderless)
+                                .disabled(isLoadingEarlier || loadEarlier == nil)
                                 .font(AppTheme.Typography.metadata)
                                 .foregroundStyle(AppTheme.Colors.secondaryText)
                                 .padding(.vertical, AppTheme.Spacing.large)

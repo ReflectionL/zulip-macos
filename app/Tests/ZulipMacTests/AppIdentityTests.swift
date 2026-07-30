@@ -52,7 +52,7 @@ struct AppIdentityTests {
         client.submit(
             .openConversation(
                 requestID: 44,
-                key: .mentions(accountID: "account-1"),
+                key: .drafts(accountID: "account-1"),
                 limit: 50
             )
         )
@@ -60,5 +60,16 @@ struct AppIdentityTests {
         let event = await events.next()
         #expect(event?.requestID == 44)
         #expect(event?.message.contains("not available") == true)
+
+        client.submit(
+            .openConversation(
+                requestID: 46,
+                key: .mentions(accountID: "account-1"),
+                limit: 50
+            )
+        )
+        let supportedEvent = await events.next()
+        #expect(supportedEvent?.requestID == 46)
+        #expect(supportedEvent?.message.contains("no matching live account") == true)
     }
 }
