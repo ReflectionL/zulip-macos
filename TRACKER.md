@@ -30,7 +30,7 @@ Last updated: 2026-07-30
 | CORE-003 | done | 2026-07-30 | 2026-07-30 | Added bundled SQLite, transactional `user_version` migrations, WAL/foreign-key/busy-timeout configuration, and STRICT account-scoped tables for accounts, users, channels, topics, messages, unread state, drafts, and sync metadata. Tests verify reopen, isolation, foreign keys, rollback, and absence of credential columns. 17 Rust core tests, strict Clippy, and full checks pass. | — | — |
 | CORE-004 | done | 2026-07-30 | 2026-07-30 | Added authenticated `/register` bootstrap and `/events` long-poll transport with bounded responses and server-advertised timeouts; normalized initial users/channels and live message, subscription, user, update, delete, unknown, and heartbeat events; added an ordered idempotent reducer that tolerates nonconsecutive IDs and emits one immutable snapshot per changed batch. `./scripts/check.sh`: 22 Rust core tests, 1 FFI test, 24 Swift tests, strict Clippy, builds, and documentation checks pass. | — | — |
 | CORE-005 | done | 2026-07-30 | 2026-07-30 | Added bounded exponential backoff with deterministic jitter, retryable/fatal classification, typed `BAD_EVENT_QUEUE_ID`, `restart` event handling, and a recovery-aware `SyncSession` that preserves cached state during disconnects and atomically replaces it after full registration. Deterministic disconnect, expiry, restart, duplicate, and nonconsecutive-ID tests pass. `./scripts/check.sh`: 26 Rust core tests, 1 FFI test, 24 Swift tests, strict Clippy, builds, and docs pass. | — | — |
-| CORE-006 | in_progress | 2026-07-30 | — | Added bounded conversation fetch, channel/direct text send with local echo IDs, and read-flag APIs; replaced the bridge ping payload with typed account/conversation/write commands and immutable events; added a Tokio actor for continuous sync, recovery, sends, reads, and snapshots; added password and direct API-key session commands, verified own-user identity, one-time redacted API-key handoff, Keychain save/reload, a native SwiftUI login sheet, fixture/live switching, live sidebar/navigation/timeline mapping, safe non-executing HTML fallback, pending local sends, automatic conversation refresh, and mark-read submission. Added `live_smoke` using the production Rust clients and a stdin-only wrapper. `./scripts/check.sh`: 29 Rust core tests, 3 actor/FFI tests, 28 Swift tests, strict Clippy, formatting, builds, and docs pass. Public `chat.zulip.org` discovery succeeded at feature level 507, but its password API rejected the supplied credentials before queue creation or writes. | Cloud credentials or the exact organization URL must be corrected; the running-app smoke is also waiting for the Mac to be unlocked. One HTTPS self-hosted endpoint remains required. | initial commit; live-smoke follow-up |
+| CORE-006 | in_progress | 2026-07-30 | — | Added bounded conversation fetch, channel/direct text send with local echo IDs, and read-flag APIs; replaced the bridge ping payload with typed account/conversation/write commands and immutable events; added a Tokio actor for continuous sync, recovery, sends, reads, and snapshots; added password and direct API-key session commands, verified own-user identity, one-time redacted API-key handoff, Keychain save/reload, a native SwiftUI login sheet, fixture/live switching, live sidebar/navigation/timeline mapping, safe non-executing HTML fallback, pending local sends, automatic conversation refresh, and mark-read submission. Added `live_smoke` using the production Rust clients and a stdin-only wrapper. Fixed API authentication to preserve the API login email instead of replacing it with a possibly different profile email. Added a file-based macOS Keychain fallback when an ad-hoc development build lacks data-protection Keychain entitlements. The designated Zulip Cloud organization now passes password login, initial sync, Inbox fetch, self-DM send/receive, reopen, mark-read, Keychain save, disconnect, and password-free saved-key reconnect in the running app. `./scripts/check.sh`: 29 Rust core tests, 3 actor/FFI tests, 29 Swift tests, strict Clippy, formatting, builds, and docs pass. | One HTTPS self-hosted endpoint remains required. | initial commit; live-smoke follow-up |
 
 Later milestones remain defined in `PLAN.md` and will be added here when they
 become active; completed rows are never removed.
@@ -123,6 +123,28 @@ become active; completed rows are never removed.
   `InvalidCredentials` during password-to-API-key exchange, before register,
   event polling, message sending, or any other account mutation. GUI testing
   was unavailable because the Mac remained locked.
+- Corrected the default login server to the designated Zulip Cloud
+  organization without storing an email or credential in source or fixtures.
+- Reproduced the reported `event synchronization returned HTTP 401` after
+  successful password authentication. A redacted request comparison showed
+  that the profile email returned by `/users/me` differed from the API login
+  email and caused every subsequent authenticated request to fail.
+- Fixed authentication to preserve the API login identifier through sync and
+  message clients. Regression fixtures now cover differing API/profile emails.
+- Ran the production live smoke successfully against Zulip Cloud:
+  authentication, initial sync (1 user, 3 channels), Inbox fetch, self-DM
+  send/receive, reopen, and mark-read all passed.
+- Re-ran `./scripts/check.sh`: 29 Rust core tests, 3 FFI actor tests, and 29
+  Swift tests pass with strict formatting, lint, builds, and documentation
+  checks.
+- Verified the running app loads the real organization, channels, account, and
+  Inbox after password login; the earlier HTTP 401 is resolved.
+- Found that the ad-hoc development signature lacks the entitlements required
+  by the data-protection Keychain. Added a macOS file-keychain fallback while
+  retaining data-protection Keychain as the preferred path.
+- Verified credential persistence end to end in the packaged app: password
+  login saved the API key, disconnect returned to fixture mode, and
+  `Use Saved API Key` reconnected to the real Inbox without a password.
 
 ## Known Issues and Technical Debt
 
@@ -130,8 +152,8 @@ become active; completed rows are never removed.
   restricted local environment even though the macOS-only XCFramework succeeds.
 - Signing and notarization require Developer ID credentials and remain
   conditional for the beta release.
-- `CORE-006` cannot complete its two-server live smoke matrix until disposable
-  Zulip Cloud and HTTPS self-hosted test credentials are available.
+- `CORE-006` still needs one HTTPS self-hosted smoke target to complete its
+  two-server matrix; the Zulip Cloud target now passes.
 - Live message bodies are displayed as inert text containing the server HTML
   during `CORE-006`; native sanitized `ContentBlock` parsing remains
   intentionally scheduled for `MVP-005`.

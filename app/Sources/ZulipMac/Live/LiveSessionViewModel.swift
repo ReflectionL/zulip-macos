@@ -24,8 +24,10 @@ enum LiveConnectionState: Equatable, Sendable {
 @MainActor
 @Observable
 final class LiveSessionViewModel {
+    static let defaultServerURL = "https://shitcreator.zulipchat.com"
+
     var authenticationMethod = LiveAuthenticationMethod.password
-    var serverURL = ""
+    var serverURL = LiveSessionViewModel.defaultServerURL
     var email = ""
     var secret = ""
     var connectionState = LiveConnectionState.signedOut

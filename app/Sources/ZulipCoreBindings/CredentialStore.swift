@@ -55,14 +55,15 @@ struct SecurityKeychainBackend: KeychainBackend {
         guard let value = request.value else {
             return errSecParam
         }
+        let dataProtectionStatus = SecItemAdd(
+            addQuery(request, value: value, dataProtection: true) as CFDictionary,
+            nil
+        )
+        guard dataProtectionStatus == errSecMissingEntitlement else {
+            return dataProtectionStatus
+        }
         return SecItemAdd(
-            baseQuery(request)
-                .merging([
-                    kSecValueData as String: value,
-                    kSecAttrAccessible as String:
-                        kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
-                    kSecUseDataProtectionKeychain as String: true,
-                ]) { _, new in new } as CFDictionary,
+            addQuery(request, value: value, dataProtection: false) as CFDictionary,
             nil
         )
     }
@@ -71,16 +72,47 @@ struct SecurityKeychainBackend: KeychainBackend {
         guard let value = request.value else {
             return errSecParam
         }
+        let attributes = [kSecValueData as String: value] as CFDictionary
+        let dataProtectionStatus = SecItemUpdate(
+            baseQuery(request, dataProtection: true) as CFDictionary,
+            attributes
+        )
+        guard shouldTryFileKeychain(after: dataProtectionStatus) else {
+            return dataProtectionStatus
+        }
         return SecItemUpdate(
-            baseQuery(request) as CFDictionary,
-            [kSecValueData as String: value] as CFDictionary
+            baseQuery(request, dataProtection: false) as CFDictionary,
+            attributes
         )
     }
 
     func copy(_ request: KeychainRequest) -> (OSStatus, Data?) {
+        let dataProtectionResult = copy(request, dataProtection: true)
+        guard shouldTryFileKeychain(after: dataProtectionResult.0) else {
+            return dataProtectionResult
+        }
+        return copy(request, dataProtection: false)
+    }
+
+    func delete(_ request: KeychainRequest) -> OSStatus {
+        let dataProtectionStatus = SecItemDelete(
+            baseQuery(request, dataProtection: true) as CFDictionary
+        )
+        guard shouldTryFileKeychain(after: dataProtectionStatus) else {
+            return dataProtectionStatus
+        }
+        return SecItemDelete(
+            baseQuery(request, dataProtection: false) as CFDictionary
+        )
+    }
+
+    private func copy(
+        _ request: KeychainRequest,
+        dataProtection: Bool
+    ) -> (OSStatus, Data?) {
         var result: CFTypeRef?
         let status = SecItemCopyMatching(
-            baseQuery(request)
+            baseQuery(request, dataProtection: dataProtection)
                 .merging([
                     kSecReturnData as String: true,
                     kSecMatchLimit as String: kSecMatchLimitOne,
@@ -90,18 +122,38 @@ struct SecurityKeychainBackend: KeychainBackend {
         return (status, result as? Data)
     }
 
-    func delete(_ request: KeychainRequest) -> OSStatus {
-        SecItemDelete(baseQuery(request) as CFDictionary)
+    private func addQuery(
+        _ request: KeychainRequest,
+        value: Data,
+        dataProtection: Bool
+    ) -> [String: Any] {
+        var query = baseQuery(request, dataProtection: dataProtection)
+        query[kSecValueData as String] = value
+        if dataProtection {
+            query[kSecAttrAccessible as String] =
+                kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        }
+        return query
     }
 
-    private func baseQuery(_ request: KeychainRequest) -> [String: Any] {
-        [
+    private func baseQuery(
+        _ request: KeychainRequest,
+        dataProtection: Bool
+    ) -> [String: Any] {
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: request.service,
             kSecAttrAccount as String: request.account,
-            kSecAttrSynchronizable as String: false,
-            kSecUseDataProtectionKeychain as String: true,
         ]
+        if dataProtection {
+            query[kSecAttrSynchronizable as String] = false
+            query[kSecUseDataProtectionKeychain as String] = true
+        }
+        return query
+    }
+
+    private func shouldTryFileKeychain(after status: OSStatus) -> Bool {
+        status == errSecMissingEntitlement || status == errSecItemNotFound
     }
 }
 

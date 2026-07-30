@@ -230,7 +230,7 @@ impl AuthenticationClient {
 
         Ok(AuthenticatedAccount {
             server_url: base_url.as_str().to_owned(),
-            email: user.email,
+            email: email.to_owned(),
             user_id: user.user_id,
             full_name: user.full_name,
             api_key,
@@ -338,28 +338,33 @@ mod tests {
             (
                 StatusCode::OK,
                 format!(
-                    r#"{{"result":"success","api_key":"{API_KEY}","email":"maya@example.com"}}"#
+                    r#"{{"result":"success","api_key":"{API_KEY}","email":"maya-api@example.com"}}"#
                 ),
             ),
             (
                 StatusCode::OK,
-                r#"{"result":"success","email":"maya@example.com","full_name":"Maya Chen","user_id":101}"#
+                r#"{"result":"success","email":"maya-profile@example.com","full_name":"Maya Chen","user_id":101}"#
                     .to_owned(),
             ),
         ];
         let (server, requests) = spawn_mock(responses);
         let account = AuthenticationClient::default()
-            .authenticate_with_password(&server, "maya@example.com", SecretString::new(PASSWORD))
+            .authenticate_with_password(
+                &server,
+                "maya-login@example.com",
+                SecretString::new(PASSWORD),
+            )
             .await
             .expect("password authentication succeeds");
 
+        assert_eq!(account.email, "maya-api@example.com");
         assert_eq!(account.user_id, 101);
         assert_eq!(account.full_name, "Maya Chen");
         assert_eq!(account.api_key.expose_secret(), API_KEY);
 
         let first = requests.recv().expect("password request");
         assert!(first.starts_with("POST /api/v1/fetch_api_key HTTP/1.1"));
-        assert!(first.contains("username=maya%40example.com"));
+        assert!(first.contains("username=maya-login%40example.com"));
         assert!(first.contains("password=fixture-password-do-not-log"));
 
         let second = requests.recv().expect("identity request");
@@ -379,15 +384,15 @@ mod tests {
     async fn direct_api_key_is_validated() {
         let (server, requests) = spawn_mock(vec![(
             StatusCode::OK,
-            r#"{"result":"success","email":"theo@example.com","full_name":"Theo Martin","user_id":102}"#
+            r#"{"result":"success","email":"theo-profile@example.com","full_name":"Theo Martin","user_id":102}"#
                 .to_owned(),
         )]);
         let account = AuthenticationClient::default()
-            .authenticate_with_api_key(&server, "theo@example.com", SecretString::new(API_KEY))
+            .authenticate_with_api_key(&server, "theo-api@example.com", SecretString::new(API_KEY))
             .await
             .expect("API key authentication succeeds");
 
-        assert_eq!(account.email, "theo@example.com");
+        assert_eq!(account.email, "theo-api@example.com");
         assert_eq!(account.api_key.expose_secret(), API_KEY);
         assert!(
             requests

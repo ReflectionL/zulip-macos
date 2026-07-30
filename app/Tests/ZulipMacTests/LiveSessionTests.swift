@@ -7,6 +7,18 @@ import ZulipCoreBindings
 @Suite("Live session presentation")
 @MainActor
 struct LiveSessionTests {
+    @Test("Login defaults to the primary Zulip Cloud organization")
+    func defaultServer() {
+        let model = LiveSessionViewModel(
+            client: RecordingCoreClient(),
+            credentialStore: MemoryCredentialStore()
+        )
+
+        #expect(model.serverURL == "https://shitcreator.zulipchat.com")
+        #expect(model.email.isEmpty)
+        #expect(model.secret.isEmpty)
+    }
+
     @Test("The native login sheet renders without exposing a credential")
     func loginSheetRenders() {
         let model = LiveSessionViewModel(
