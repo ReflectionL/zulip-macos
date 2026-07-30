@@ -73,4 +73,29 @@ struct NavigationTests {
 
         #expect(store.selection == FixtureSidebar.defaultSelection)
     }
+
+    @Test("A server search result can install and select its stable destination")
+    func selectsSearchResultDestination() {
+        let store = NavigationStore(
+            directory: FixtureNavigation.directory,
+            initialSelection: FixtureSidebar.defaultSelection
+        )
+        let key = ConversationKey.topic(
+            accountID: FixtureSidebar.accountID,
+            streamID: 9_999,
+            topic: "Discovered by search"
+        )
+        let destination = NavigationDestination(
+            key: key,
+            title: "Discovered by search",
+            subtitle: "#new-channel",
+            systemImage: "text.bubble",
+            keywords: []
+        )
+
+        store.select(destination)
+
+        #expect(store.selection == key)
+        #expect(store.directory.destination(for: key) == destination)
+    }
 }

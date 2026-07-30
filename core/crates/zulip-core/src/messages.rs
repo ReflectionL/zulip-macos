@@ -19,6 +19,8 @@ const TOPICS_PATH_PREFIX: &str = "api/v1/users/me";
 const MAX_MESSAGES_RESPONSE_BYTES: usize = 16 * 1_048_576;
 const MAX_WRITE_RESPONSE_BYTES: usize = 1_048_576;
 const MAX_FETCH_MESSAGES: u16 = 1_000;
+const MAX_SEARCH_MESSAGES: u16 = 100;
+const MAX_SEARCH_QUERY_BYTES: usize = 512;
 
 /// Stable server-side conversation selection.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -215,7 +217,10 @@ impl MessageClient {
         target: ConversationTarget,
         limit: u16,
     ) -> Result<ConversationMessages, MessageApiError> {
-        self.fetch_page(target, "newest".to_owned(), true, limit)
+        if limit == 0 || limit > MAX_FETCH_MESSAGES {
+            return Err(MessageApiError::InvalidInput);
+        }
+        self.fetch_page(target, "newest".to_owned(), true, limit, 0)
             .await
     }
 
@@ -231,11 +236,75 @@ impl MessageClient {
         before_message_id: i64,
         limit: u16,
     ) -> Result<ConversationMessages, MessageApiError> {
-        if before_message_id <= 0 {
+        if before_message_id <= 0 || limit == 0 || limit > MAX_FETCH_MESSAGES {
             return Err(MessageApiError::InvalidInput);
         }
-        self.fetch_page(target, before_message_id.to_string(), false, limit)
+        self.fetch_page(target, before_message_id.to_string(), false, limit, 0)
             .await
+    }
+
+    /// Searches all visible messages using Zulip's server-side `search` narrow.
+    ///
+    /// Results are returned newest first and remain bounded to 100 messages.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageApiError`] for empty/oversized queries, invalid limits,
+    /// transport, status, size, or message normalization failures.
+    pub async fn search_messages(
+        &self,
+        query: &str,
+        limit: u16,
+    ) -> Result<Vec<MessageSummary>, MessageApiError> {
+        let query = query.trim();
+        if query.is_empty()
+            || query.len() > MAX_SEARCH_QUERY_BYTES
+            || query.chars().any(char::is_control)
+            || limit == 0
+            || limit > MAX_SEARCH_MESSAGES
+        {
+            return Err(MessageApiError::InvalidInput);
+        }
+        let narrow = serde_json::json!([
+            {"operator": "search", "operand": query}
+        ])
+        .to_string();
+        let page = self
+            .fetch_narrow_page(narrow, "newest".to_owned(), true, limit, 0)
+            .await?;
+        Ok(page.messages.into_iter().rev().collect())
+    }
+
+    /// Fetches conversation context centered on one visible server message.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageApiError`] for invalid identifiers/counts/targets,
+    /// transport, status, size, normalization, or a missing anchor message.
+    pub async fn fetch_message_context(
+        &self,
+        target: ConversationTarget,
+        message_id: i64,
+        num_before: u16,
+        num_after: u16,
+    ) -> Result<ConversationMessages, MessageApiError> {
+        if message_id <= 0
+            || usize::from(num_before)
+                .saturating_add(usize::from(num_after))
+                .saturating_add(1)
+                > usize::from(MAX_FETCH_MESSAGES)
+        {
+            return Err(MessageApiError::InvalidInput);
+        }
+        let page = self
+            .fetch_page(target, message_id.to_string(), true, num_before, num_after)
+            .await?;
+        if page.messages.iter().all(|message| message.id != message_id) {
+            return Err(MessageApiError::InvalidResponse(
+                "anchored message is unavailable",
+            ));
+        }
+        Ok(page)
     }
 
     async fn fetch_page(
@@ -243,12 +312,39 @@ impl MessageClient {
         target: ConversationTarget,
         anchor: String,
         include_anchor: bool,
-        limit: u16,
+        num_before: u16,
+        num_after: u16,
     ) -> Result<ConversationMessages, MessageApiError> {
-        if limit == 0 || limit > MAX_FETCH_MESSAGES {
+        if num_before == 0 && num_after == 0 && !include_anchor {
             return Err(MessageApiError::InvalidInput);
         }
         let narrow = target.narrow_json()?;
+        let page = self
+            .fetch_narrow_page(narrow, anchor, include_anchor, num_before, num_after)
+            .await?;
+        Ok(ConversationMessages {
+            target,
+            messages: page.messages,
+            found_oldest: page.found_oldest,
+            found_newest: page.found_newest,
+        })
+    }
+
+    async fn fetch_narrow_page(
+        &self,
+        narrow: String,
+        anchor: String,
+        include_anchor: bool,
+        num_before: u16,
+        num_after: u16,
+    ) -> Result<NormalizedMessagesPage, MessageApiError> {
+        if usize::from(num_before)
+            .saturating_add(usize::from(num_after))
+            .saturating_add(usize::from(include_anchor))
+            > usize::from(MAX_FETCH_MESSAGES)
+        {
+            return Err(MessageApiError::InvalidInput);
+        }
         let response = self
             .http
             .get(self.base_url.endpoint(MESSAGES_PATH))
@@ -256,8 +352,8 @@ impl MessageClient {
             .query(&[
                 ("anchor", anchor),
                 ("include_anchor", include_anchor.to_string()),
-                ("num_before", limit.to_string()),
-                ("num_after", "0".to_owned()),
+                ("num_before", num_before.to_string()),
+                ("num_after", num_after.to_string()),
                 ("narrow", narrow),
                 ("apply_markdown", "true".to_owned()),
                 ("client_gravatar", "false".to_owned()),
@@ -274,8 +370,7 @@ impl MessageClient {
             .into_iter()
             .map(MessageDocument::normalize)
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(ConversationMessages {
-            target,
+        Ok(NormalizedMessagesPage {
             messages,
             found_oldest: document.found_oldest,
             found_newest: document.found_newest,
@@ -419,6 +514,12 @@ impl MessageClient {
             decode_response(response, MAX_WRITE_RESPONSE_BYTES).await?;
         document.validate_result()
     }
+}
+
+struct NormalizedMessagesPage {
+    messages: Vec<MessageSummary>,
+    found_oldest: bool,
+    found_newest: bool,
 }
 
 fn validate_content(content: &str) -> Result<(), MessageApiError> {
@@ -790,6 +891,103 @@ mod tests {
         assert!(topics_request.contains("allow_empty_topic_name=true"));
     }
 
+    #[tokio::test]
+    async fn search_and_message_context_use_bounded_server_narrows() {
+        let responses = vec![
+            (
+                StatusCode::OK,
+                r#"{
+                    "result":"success",
+                    "found_oldest":true,
+                    "found_newest":true,
+                    "messages":[
+                        {
+                            "id":42,
+                            "sender_id":7,
+                            "sender_full_name":"Maya Chen",
+                            "timestamp":1770000000,
+                            "content":"<p>Native macOS client</p>",
+                            "type":"stream",
+                            "stream_id":5,
+                            "subject":"Rust core",
+                            "display_recipient":"engineering"
+                        },
+                        {
+                            "id":43,
+                            "sender_id":9,
+                            "sender_full_name":"Hua Hai",
+                            "timestamp":1770000001,
+                            "content":"<p>Search result</p>",
+                            "type":"private",
+                            "display_recipient":[{"id":7},{"id":9}]
+                        }
+                    ]
+                }"#
+                .to_owned(),
+            ),
+            (
+                StatusCode::OK,
+                r#"{
+                    "result":"success",
+                    "found_oldest":false,
+                    "found_newest":false,
+                    "messages":[{
+                        "id":42,
+                        "sender_id":7,
+                        "sender_full_name":"Maya Chen",
+                        "timestamp":1770000000,
+                        "content":"<p>Native macOS client</p>",
+                        "type":"stream",
+                        "stream_id":5,
+                        "subject":"Rust core",
+                        "display_recipient":"engineering"
+                    }]
+                }"#
+                .to_owned(),
+            ),
+        ];
+        let (server, requests) = spawn_mock(responses);
+        let client = MessageClient::new(&server, "maya@example.com", SecretString::new(API_KEY))
+            .expect("message client");
+
+        let results = client
+            .search_messages(" native macOS ", 20)
+            .await
+            .expect("search messages");
+        assert_eq!(
+            results.iter().map(|message| message.id).collect::<Vec<_>>(),
+            vec![43, 42]
+        );
+
+        let page = client
+            .fetch_message_context(
+                ConversationTarget::Topic {
+                    stream_id: 5,
+                    topic: "Rust core".to_owned(),
+                },
+                42,
+                10,
+                10,
+            )
+            .await
+            .expect("message context");
+        assert_eq!(page.messages[0].id, 42);
+
+        let search = requests.recv().expect("search request");
+        assert!(search.starts_with("GET /api/v1/messages?"));
+        assert!(search.contains("anchor=newest"));
+        assert!(search.contains("num_before=20"));
+        assert!(search.contains("%22operator%22%3A%22search%22"));
+        assert!(search.contains("native+macOS"));
+
+        let context = requests.recv().expect("context request");
+        assert!(context.contains("anchor=42"));
+        assert!(context.contains("include_anchor=true"));
+        assert!(context.contains("num_before=10"));
+        assert!(context.contains("num_after=10"));
+        assert!(context.contains("%22operator%22%3A%22topic%22"));
+    }
+
     #[test]
     fn browsing_targets_encode_stable_narrows() {
         assert_eq!(
@@ -821,6 +1019,14 @@ mod tests {
         assert!(
             client
                 .fetch_conversation(ConversationTarget::Combined, 0)
+                .await
+                .is_err()
+        );
+        assert!(client.search_messages(" ", 20).await.is_err());
+        assert!(client.search_messages("valid", 101).await.is_err());
+        assert!(
+            client
+                .fetch_message_context(ConversationTarget::Combined, 0, 10, 10)
                 .await
                 .is_err()
         );

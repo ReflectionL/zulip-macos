@@ -8,6 +8,7 @@ struct ConversationSurface: View {
     var reconnect: () -> Void = {}
     var loadEarlier: (() -> Void)?
     var submitMessage: ((String) -> Bool)?
+    var openSearch: (() -> Void)?
 
     @State private var messages: [MessageViewData]
     @State private var draft = ""
@@ -20,7 +21,8 @@ struct ConversationSurface: View {
         isLoadingEarlier: Bool = false,
         reconnect: @escaping () -> Void = {},
         loadEarlier: (() -> Void)? = nil,
-        submitMessage: ((String) -> Bool)? = nil
+        submitMessage: ((String) -> Bool)? = nil,
+        openSearch: (() -> Void)? = nil
     ) {
         self.page = page
         self.isOffline = isOffline
@@ -28,6 +30,7 @@ struct ConversationSurface: View {
         self.reconnect = reconnect
         self.loadEarlier = loadEarlier
         self.submitMessage = submitMessage
+        self.openSearch = openSearch
         _messages = State(initialValue: page.messages)
     }
 
@@ -36,7 +39,8 @@ struct ConversationSurface: View {
             ConversationPathHeader(
                 title: page.title,
                 subtitle: page.subtitle,
-                isOffline: isOffline
+                isOffline: isOffline,
+                openSearch: openSearch
             )
             Divider()
 
@@ -86,6 +90,7 @@ struct ConversationSurface: View {
                             ForEach(messages) { message in
                                 MessageRow(
                                     message: message,
+                                    isFocusedSearchResult: page.focusedMessageID == message.id,
                                     toggleReaction: {
                                         toggleReaction(for: message.id)
                                     },
@@ -93,6 +98,7 @@ struct ConversationSurface: View {
                                         toggleStar(for: message.id)
                                     }
                                 )
+                                .id(message.id)
                             }
 
                             Color.clear
@@ -111,8 +117,22 @@ struct ConversationSurface: View {
                     } action: { _, isAtBottom in
                         followsNewest = isAtBottom
                     }
-                    .task(id: page.key) {
-                        proxy.scrollTo(TimelineAnchor.bottom, anchor: .bottom)
+                    .task(
+                        id: TimelineFocus(
+                            key: page.key,
+                            messageID: page.focusedMessageID
+                        )
+                    ) {
+                        await Task.yield()
+                        if let messageID = page.focusedMessageID,
+                           messages.contains(where: { $0.id == messageID })
+                        {
+                            followsNewest = false
+                            proxy.scrollTo(messageID, anchor: .center)
+                        } else {
+                            followsNewest = true
+                            proxy.scrollTo(TimelineAnchor.bottom, anchor: .bottom)
+                        }
                     }
                     .onChange(of: messages.count) {
                         guard followsNewest else {
@@ -217,10 +237,16 @@ private enum TimelineAnchor: Hashable {
     case bottom
 }
 
+private struct TimelineFocus: Hashable {
+    let key: ConversationKey
+    let messageID: Int64?
+}
+
 struct ConversationPathHeader: View {
     let title: String
     let subtitle: String
     let isOffline: Bool
+    var openSearch: (() -> Void)? = nil
 
     var body: some View {
         HStack(spacing: AppTheme.Spacing.small) {
@@ -247,6 +273,16 @@ struct ConversationPathHeader: View {
                     .clipShape(Capsule())
             }
 
+            if let openSearch {
+                Button(action: openSearch) {
+                    Image(systemName: "magnifyingglass")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(AppTheme.Colors.secondaryText)
+                .help("Search messages")
+                .accessibilityLabel("Search messages")
+            }
+
             Button {
                 // Conversation details arrive with live membership data.
             } label: {
@@ -269,6 +305,7 @@ struct ConversationPathHeader: View {
 
 private struct MessageRow: View {
     let message: MessageViewData
+    let isFocusedSearchResult: Bool
     let toggleReaction: () -> Void
     let toggleStar: () -> Void
 
@@ -324,7 +361,28 @@ private struct MessageRow: View {
         .padding(.horizontal, AppTheme.Spacing.medium)
         .padding(.vertical, AppTheme.Spacing.small)
         .contentShape(Rectangle())
-        .background(isHovered ? AppTheme.Colors.hover.opacity(0.45) : .clear)
+        .background {
+            RoundedRectangle(
+                cornerRadius: AppTheme.Metrics.controlRadius,
+                style: .continuous
+            )
+            .fill(
+                isFocusedSearchResult
+                    ? AppTheme.Colors.accent.opacity(0.12)
+                    : isHovered
+                        ? AppTheme.Colors.hover.opacity(0.45)
+                        : .clear
+            )
+        }
+        .overlay {
+            if isFocusedSearchResult {
+                RoundedRectangle(
+                    cornerRadius: AppTheme.Metrics.controlRadius,
+                    style: .continuous
+                )
+                .stroke(AppTheme.Colors.accent.opacity(0.7), lineWidth: 1)
+            }
+        }
         .overlay(alignment: .topTrailing) {
             MessageActions(
                 isStarred: message.isStarred,
@@ -339,6 +397,7 @@ private struct MessageRow: View {
         .onHover { isHovered = $0 }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(message.senderName), \(message.plainText)")
+        .accessibilityHint(isFocusedSearchResult ? "Selected search result" : "")
         .accessibilityAction(named: "React") {
             toggleReaction()
         }

@@ -21,11 +21,51 @@ enum LiveConnectionState: Equatable, Sendable {
     }
 }
 
+struct MessageSearchResult: Identifiable, Equatable, Sendable {
+    struct ID: Hashable, Sendable {
+        let accountID: String
+        let messageID: Int64
+    }
+
+    let accountID: String
+    let conversationKey: ConversationKey
+    let messageID: Int64
+    let senderName: String
+    let timestamp: Date
+    let contentPreview: String
+    let title: String
+    let subtitle: String
+    let systemImage: String
+
+    var id: ID {
+        ID(accountID: accountID, messageID: messageID)
+    }
+
+    var navigationDestination: NavigationDestination {
+        NavigationDestination(
+            key: conversationKey,
+            title: title,
+            subtitle: subtitle,
+            systemImage: systemImage,
+            keywords: []
+        )
+    }
+}
+
+enum MessageSearchState: Equatable, Sendable {
+    case idle
+    case loading(query: String)
+    case loaded(query: String, results: [MessageSearchResult])
+    case failed(query: String, message: String)
+}
+
 @MainActor
 @Observable
 final class LiveSessionViewModel {
     static let defaultServerURL = "https://shitcreator.zulipchat.com"
     private static let conversationPageSize: UInt16 = 10
+    private static let searchResultLimit: UInt16 = 20
+    private static let searchContextRadius: UInt16 = 10
 
     var authenticationMethod = LiveAuthenticationMethod.password
     var serverURL = LiveSessionViewModel.defaultServerURL
@@ -41,6 +81,7 @@ final class LiveSessionViewModel {
         subtitle: "Live Zulip"
     )
     private(set) var isLoadingOlderMessages = false
+    private(set) var messageSearchState = MessageSearchState.idle
 
     @ObservationIgnored private let client: any CoreClientProtocol
     @ObservationIgnored private let credentialStore: any CredentialStore
@@ -48,6 +89,11 @@ final class LiveSessionViewModel {
     private var requestID: UInt64 = 1
     private var activeSelection: ConversationKey?
     private var pendingOlderRequestID: UInt64?
+    private var pendingSearchRequestID: UInt64?
+    private var pendingSearchQuery: String?
+    private var issuedSearchRequestIDs = Set<UInt64>()
+    private var pendingFocusedMessageRequestID: UInt64?
+    private var issuedFocusedMessageRequestIDs = Set<UInt64>()
     private var knownTopics: [ConversationKey: LiveTopicSnapshot] = [:]
 
     init(
@@ -144,6 +190,9 @@ final class LiveSessionViewModel {
         guard identity?.accountID == key.accountID else {
             return
         }
+        pendingFocusedMessageRequestID = nil
+        pendingOlderRequestID = nil
+        isLoadingOlderMessages = false
         activeSelection = key
         let destination = navigationDirectory.destination(for: key)
         conversationState = .loading(
@@ -155,6 +204,69 @@ final class LiveSessionViewModel {
                 requestID: nextRequestID(),
                 key: key,
                 limit: Self.conversationPageSize
+            )
+        )
+    }
+
+    func searchMessages(_ query: String) {
+        let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let identity else {
+            messageSearchState = .failed(
+                query: query,
+                message: "Connect to Zulip before searching messages."
+            )
+            return
+        }
+        guard !query.isEmpty else {
+            clearMessageSearch()
+            return
+        }
+
+        let id = nextRequestID()
+        pendingSearchRequestID = id
+        pendingSearchQuery = query
+        issuedSearchRequestIDs.insert(id)
+        messageSearchState = .loading(query: query)
+        client.submit(
+            .searchMessages(
+                requestID: id,
+                accountID: identity.accountID,
+                query: query,
+                limit: Self.searchResultLimit
+            )
+        )
+    }
+
+    func clearMessageSearch() {
+        pendingSearchRequestID = nil
+        pendingSearchQuery = nil
+        messageSearchState = .idle
+    }
+
+    func openSearchResult(_ result: MessageSearchResult) {
+        guard identity?.accountID == result.accountID,
+              result.conversationKey.accountID == result.accountID
+        else {
+            return
+        }
+        pendingSearchRequestID = nil
+        pendingSearchQuery = nil
+        messageSearchState = .idle
+        pendingOlderRequestID = nil
+        isLoadingOlderMessages = false
+        activeSelection = result.conversationKey
+        conversationState = .loading(title: result.title, subtitle: result.subtitle)
+
+        let id = nextRequestID()
+        pendingFocusedMessageRequestID = id
+        issuedFocusedMessageRequestIDs.insert(id)
+        client.submit(
+            .openMessage(
+                requestID: id,
+                key: result.conversationKey,
+                messageID: result.messageID,
+                numBefore: Self.searchContextRadius,
+                numAfter: Self.searchContextRadius
             )
         )
     }
@@ -254,7 +366,9 @@ final class LiveSessionViewModel {
             }
 
         case let .conversationOpened(_, page):
-            guard activeSelection == page.key else {
+            guard pendingFocusedMessageRequestID == nil,
+                  activeSelection == page.key
+            else {
                 return
             }
             rememberTopics(from: page.messages)
@@ -289,6 +403,47 @@ final class LiveSessionViewModel {
                 makeHistoricalConversationPage(page, merging: existing)
             )
 
+        case let .searchCompleted(requestID, accountID, results):
+            issuedSearchRequestIDs.remove(requestID)
+            guard pendingSearchRequestID == requestID,
+                  identity?.accountID == accountID,
+                  let query = pendingSearchQuery
+            else {
+                return
+            }
+            pendingSearchRequestID = nil
+            pendingSearchQuery = nil
+            rememberTopics(from: results.map(\.message))
+            var seen = Set<MessageSearchResult.ID>()
+            let mapped = results
+                .compactMap(makeSearchResult)
+                .filter { seen.insert($0.id).inserted }
+            messageSearchState = .loaded(query: query, results: mapped)
+
+        case let .messageFocused(requestID, messageID, page):
+            issuedFocusedMessageRequestIDs.remove(requestID)
+            guard pendingFocusedMessageRequestID == requestID,
+                  activeSelection == page.key,
+                  page.messages.contains(where: { $0.messageID == messageID })
+            else {
+                return
+            }
+            pendingFocusedMessageRequestID = nil
+            rememberTopics(from: page.messages)
+            conversationState = .loaded(
+                makeConversationPage(page, focusedMessageID: messageID)
+            )
+            let messageIDs = page.messages.map(\.messageID)
+            if !messageIDs.isEmpty, let identity {
+                client.submit(
+                    .markRead(
+                        requestID: nextRequestID(),
+                        accountID: identity.accountID,
+                        messageIDs: messageIDs
+                    )
+                )
+            }
+
         case .messageSent:
             if let activeSelection {
                 refreshConversation(activeSelection)
@@ -306,12 +461,38 @@ final class LiveSessionViewModel {
             navigationDirectory = NavigationDirectory(destinations: [])
             activeSelection = nil
             pendingOlderRequestID = nil
+            pendingSearchRequestID = nil
+            pendingSearchQuery = nil
+            issuedSearchRequestIDs = []
+            pendingFocusedMessageRequestID = nil
+            issuedFocusedMessageRequestIDs = []
             isLoadingOlderMessages = false
+            messageSearchState = .idle
             knownTopics = [:]
             connectionState = .signedOut
 
         case let .failed(requestID, message):
-            if pendingOlderRequestID == requestID {
+            if let requestID, issuedSearchRequestIDs.remove(requestID) != nil {
+                guard pendingSearchRequestID == requestID else {
+                    return
+                }
+                let query = pendingSearchQuery ?? ""
+                pendingSearchRequestID = nil
+                pendingSearchQuery = nil
+                messageSearchState = .failed(query: query, message: message)
+            } else if let requestID,
+                      issuedFocusedMessageRequestIDs.remove(requestID) != nil
+            {
+                guard pendingFocusedMessageRequestID == requestID else {
+                    return
+                }
+                pendingFocusedMessageRequestID = nil
+                conversationState = .failure(
+                    title: "Message unavailable",
+                    subtitle: organizationName,
+                    message: message
+                )
+            } else if pendingOlderRequestID == requestID {
                 pendingOlderRequestID = nil
                 isLoadingOlderMessages = false
                 notice = "Earlier messages could not be loaded: \(message)"
@@ -337,7 +518,8 @@ final class LiveSessionViewModel {
 
     private func makeConversationPage(
         _ livePage: LiveConversationPage,
-        merging existing: ConversationPage? = nil
+        merging existing: ConversationPage? = nil,
+        focusedMessageID: Int64? = nil
     ) -> ConversationPage {
         let destination = navigationDirectory.destination(for: livePage.key)
         let incoming = makeMessages(livePage)
@@ -353,7 +535,8 @@ final class LiveSessionViewModel {
                 : messages.first.map { String($0.id) },
             afterCursor: livePage.foundNewest
                 ? nil
-                : messages.last.map { String($0.id) }
+                : messages.last.map { String($0.id) },
+            focusedMessageID: focusedMessageID ?? existing?.focusedMessageID
         )
     }
 
@@ -370,7 +553,8 @@ final class LiveSessionViewModel {
             beforeCursor: livePage.foundOldest
                 ? nil
                 : messages.first.map { String($0.id) },
-            afterCursor: existing.afterCursor
+            afterCursor: existing.afterCursor,
+            focusedMessageID: existing.focusedMessageID
         )
     }
 
@@ -388,6 +572,57 @@ final class LiveSessionViewModel {
                 isOwnMessage: message.senderID == identity?.userID
             )
         }
+    }
+
+    private func makeSearchResult(_ result: LiveSearchResult) -> MessageSearchResult? {
+        guard let identity,
+              result.key.accountID == identity.accountID,
+              result.message.messageID > 0
+        else {
+            return nil
+        }
+
+        let title: String
+        let subtitle: String
+        let systemImage: String
+        switch result.key {
+        case let .topic(_, streamID, topic):
+            let channel = sidebarSnapshot?.channels
+                .first(where: { $0.streamID == streamID })?.name ?? "channel"
+            title = topic.isEmpty ? "(no topic)" : topic
+            subtitle = "#\(channel)"
+            systemImage = "text.bubble"
+        case let .channel(_, streamID):
+            title = sidebarSnapshot?.channels
+                .first(where: { $0.streamID == streamID })?.name ?? "Channel"
+            subtitle = "Channel"
+            systemImage = "number"
+        case let .directMessage(_, recipientIDs):
+            let names = recipientIDs.compactMap { userID in
+                sidebarSnapshot?.directMessages
+                    .first(where: { $0.userID == userID })?.displayName
+            }
+            title = names.isEmpty ? "Direct message" : names.joined(separator: ", ")
+            subtitle = "Direct message"
+            systemImage = "person.crop.circle"
+        default:
+            let destination = navigationDirectory.destination(for: result.key)
+            title = destination?.title ?? "Conversation"
+            subtitle = destination?.subtitle ?? organizationName
+            systemImage = destination?.systemImage ?? "text.bubble"
+        }
+
+        return MessageSearchResult(
+            accountID: identity.accountID,
+            conversationKey: result.key,
+            messageID: result.message.messageID,
+            senderName: result.message.senderFullName,
+            timestamp: result.message.timestamp,
+            contentPreview: result.message.contentHTML,
+            title: title,
+            subtitle: subtitle,
+            systemImage: systemImage
+        )
     }
 
     private func mergeMessages(

@@ -89,6 +89,15 @@ final class NavigationStore {
         dismissCommandPalette()
     }
 
+    func select(_ destination: NavigationDestination) {
+        if directory.destination(for: destination.key) == nil {
+            directory = NavigationDirectory(
+                destinations: directory.destinations + [destination]
+            )
+        }
+        select(destination.key)
+    }
+
     func replaceDirectory(_ directory: NavigationDirectory) {
         self.directory = directory
         if directory.destination(for: selection) == nil,

@@ -129,6 +129,17 @@ public struct LiveConversationPage: Equatable, Sendable {
     }
 }
 
+/// One immutable result from Zulip's authenticated server-side search.
+public struct LiveSearchResult: Equatable, Sendable {
+    public let key: ConversationKey
+    public let message: LiveMessageSnapshot
+
+    public init(key: ConversationKey, message: LiveMessageSnapshot) {
+        self.key = key
+        self.message = message
+    }
+}
+
 /// Authenticated identity used by the live presentation layer.
 public struct LiveSessionIdentity: Equatable, Sendable {
     public let accountID: String
@@ -178,6 +189,19 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
         beforeMessageID: Int64,
         limit: UInt16
     )
+    case searchMessages(
+        requestID: UInt64,
+        accountID: String,
+        query: String,
+        limit: UInt16
+    )
+    case openMessage(
+        requestID: UInt64,
+        key: ConversationKey,
+        messageID: Int64,
+        numBefore: UInt16,
+        numAfter: UInt16
+    )
     case sendChannelMessage(
         requestID: UInt64,
         accountID: String,
@@ -208,6 +232,8 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
              let .startPasswordSession(requestID, _, _, _, _),
              let .openConversation(requestID, _, _),
              let .loadOlderMessages(requestID, _, _, _),
+             let .searchMessages(requestID, _, _, _),
+             let .openMessage(requestID, _, _, _, _),
              let .sendChannelMessage(requestID, _, _, _, _, _),
              let .sendDirectMessage(requestID, _, _, _, _),
              let .markRead(requestID, _, _),
@@ -228,6 +254,10 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
             "BridgeCommand.openConversation"
         case .loadOlderMessages:
             "BridgeCommand.loadOlderMessages"
+        case .searchMessages:
+            "BridgeCommand.searchMessages"
+        case .openMessage:
+            "BridgeCommand.openMessage"
         case .sendChannelMessage:
             "BridgeCommand.sendChannelMessage"
         case .sendDirectMessage:
@@ -273,6 +303,21 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
                 key: try key.ffiValue(),
                 beforeMessageId: beforeMessageID,
                 limit: limit
+            )
+        case let .searchMessages(requestID, accountID, query, limit):
+            .searchMessages(
+                requestId: requestID,
+                accountId: accountID,
+                query: query,
+                limit: limit
+            )
+        case let .openMessage(requestID, key, messageID, numBefore, numAfter):
+            .openMessage(
+                requestId: requestID,
+                key: try key.ffiValue(),
+                messageId: messageID,
+                numBefore: numBefore,
+                numAfter: numAfter
             )
         case let .sendChannelMessage(
             requestID,
@@ -333,6 +378,16 @@ public enum BridgeEvent:
     case snapshotUpdated(accountID: String, snapshot: LiveSnapshot)
     case conversationOpened(requestID: UInt64, page: LiveConversationPage)
     case conversationHistoryLoaded(requestID: UInt64, page: LiveConversationPage)
+    case searchCompleted(
+        requestID: UInt64,
+        accountID: String,
+        results: [LiveSearchResult]
+    )
+    case messageFocused(
+        requestID: UInt64,
+        messageID: Int64,
+        page: LiveConversationPage
+    )
     case messageSent(requestID: UInt64, localID: String, messageID: Int64)
     case messagesMarkedRead(requestID: UInt64, messageIDs: [Int64])
     case retryScheduled(accountID: String, delayMilliseconds: UInt64)
@@ -345,6 +400,8 @@ public enum BridgeEvent:
              let .sessionStarted(requestID, _, _, _),
              let .conversationOpened(requestID, _),
              let .conversationHistoryLoaded(requestID, _),
+             let .searchCompleted(requestID, _, _),
+             let .messageFocused(requestID, _, _),
              let .messageSent(requestID, _, _),
              let .messagesMarkedRead(requestID, _),
              let .disconnected(requestID):
@@ -368,6 +425,10 @@ public enum BridgeEvent:
             "Conversation opened"
         case .conversationHistoryLoaded:
             "Conversation history loaded"
+        case .searchCompleted:
+            "Message search completed"
+        case .messageFocused:
+            "Message focused"
         case .messageSent:
             "Message sent"
         case .messagesMarkedRead:
@@ -554,6 +615,13 @@ private extension LiveConversationPage {
     }
 }
 
+private extension LiveSearchResult {
+    init(_ result: CoreSearchResult) {
+        key = ConversationKey(result.key)
+        message = LiveMessageSnapshot(result.message)
+    }
+}
+
 private extension BridgeEvent {
     init(_ event: CoreEvent) {
         switch event {
@@ -597,6 +665,18 @@ private extension BridgeEvent {
         case let .conversationHistoryLoaded(requestID, page):
             self = .conversationHistoryLoaded(
                 requestID: requestID,
+                page: LiveConversationPage(page)
+            )
+        case let .searchCompleted(requestID, accountID, results):
+            self = .searchCompleted(
+                requestID: requestID,
+                accountID: accountID,
+                results: results.map(LiveSearchResult.init)
+            )
+        case let .messageFocused(requestID, messageID, page):
+            self = .messageFocused(
+                requestID: requestID,
+                messageID: messageID,
                 page: LiveConversationPage(page)
             )
         case let .messageSent(requestID, localID, messageID):

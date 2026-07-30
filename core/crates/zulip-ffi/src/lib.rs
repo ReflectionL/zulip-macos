@@ -158,6 +158,30 @@ pub enum CoreCommand {
         /// Maximum number of earlier messages, from 1 through 1000.
         limit: u16,
     },
+    /// Searches all messages visible to the active account.
+    SearchMessages {
+        /// Correlates the response and allows Swift to ignore stale searches.
+        request_id: u64,
+        /// Client-owned account partition.
+        account_id: String,
+        /// Non-empty server-side search query.
+        query: String,
+        /// Maximum number of results, from 1 through 100.
+        limit: u16,
+    },
+    /// Loads conversation context centered on one search result.
+    OpenMessage {
+        /// Correlates the response.
+        request_id: u64,
+        /// Stable account-scoped conversation containing the message.
+        key: CoreConversationKey,
+        /// Server message identifier to include and focus.
+        message_id: i64,
+        /// Number of messages before the target.
+        num_before: u16,
+        /// Number of messages after the target.
+        num_after: u16,
+    },
     /// Sends a channel message.
     SendChannelMessage {
         /// Correlates the response.
@@ -210,6 +234,8 @@ impl CoreCommand {
             | Self::StartPasswordSession { request_id, .. }
             | Self::OpenConversation { request_id, .. }
             | Self::LoadOlderMessages { request_id, .. }
+            | Self::SearchMessages { request_id, .. }
+            | Self::OpenMessage { request_id, .. }
             | Self::SendChannelMessage { request_id, .. }
             | Self::SendDirectMessage { request_id, .. }
             | Self::MarkRead { request_id, .. }
@@ -321,6 +347,15 @@ pub struct CoreConversationPage {
     pub found_newest: bool,
 }
 
+/// One immutable, account-scoped server search result.
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct CoreSearchResult {
+    /// Conversation that contains the matching message.
+    pub key: CoreConversationKey,
+    /// Matching server message.
+    pub message: CoreMessage,
+}
+
 /// Typed events delivered from the Rust actor to Swift.
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Enum)]
 pub enum CoreEvent {
@@ -370,6 +405,24 @@ pub enum CoreEvent {
         /// Originating request.
         request_id: u64,
         /// Historical page.
+        page: CoreConversationPage,
+    },
+    /// A correlated server-side message search completed.
+    SearchCompleted {
+        /// Originating request.
+        request_id: u64,
+        /// Active account partition.
+        account_id: String,
+        /// Results ordered newest first.
+        results: Vec<CoreSearchResult>,
+    },
+    /// Conversation context centered on a requested message loaded.
+    MessageFocused {
+        /// Originating request.
+        request_id: u64,
+        /// Message that must be present and focused.
+        message_id: i64,
+        /// Anchored conversation page.
         page: CoreConversationPage,
     },
     /// A send request succeeded.
@@ -459,6 +512,7 @@ impl RustCoreClient {
 
 struct AccountSession {
     account_id: String,
+    own_user_id: i64,
     messages: Arc<MessageClient>,
     sync: SyncSession,
     topics: Vec<TopicSummary>,
@@ -574,6 +628,40 @@ async fn handle_command(
             )
             .await;
         }
+        CoreCommand::SearchMessages {
+            request_id,
+            account_id,
+            query,
+            limit,
+        } => {
+            search_messages(
+                request_id,
+                &account_id,
+                &query,
+                limit,
+                account.as_ref(),
+                event_sink,
+            )
+            .await;
+        }
+        CoreCommand::OpenMessage {
+            request_id,
+            key,
+            message_id,
+            num_before,
+            num_after,
+        } => {
+            open_message(
+                request_id,
+                key,
+                message_id,
+                num_before,
+                num_after,
+                account.as_ref(),
+                event_sink,
+            )
+            .await;
+        }
         CoreCommand::SendChannelMessage {
             request_id,
             account_id,
@@ -670,6 +758,106 @@ async fn load_older_messages(
             },
         }),
         Err(error) => emit_error(Some(request_id), error, event_sink),
+    }
+}
+
+async fn search_messages(
+    request_id: u64,
+    account_id: &str,
+    query: &str,
+    limit: u16,
+    account: Option<&AccountSession>,
+    event_sink: &Arc<dyn CoreEventSink>,
+) {
+    let Some(session) = account.filter(|item| item.account_id == account_id) else {
+        emit_no_session(request_id, event_sink);
+        return;
+    };
+    match session.messages.search_messages(query, limit).await {
+        Ok(messages) => {
+            let results = messages
+                .into_iter()
+                .map(|message| CoreSearchResult {
+                    key: conversation_key_for_message(
+                        &session.account_id,
+                        session.own_user_id,
+                        &message,
+                    ),
+                    message: message.into(),
+                })
+                .collect();
+            event_sink.handle_event(CoreEvent::SearchCompleted {
+                request_id,
+                account_id: account_id.to_owned(),
+                results,
+            });
+        }
+        Err(error) => emit_error(Some(request_id), error, event_sink),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn open_message(
+    request_id: u64,
+    key: CoreConversationKey,
+    message_id: i64,
+    num_before: u16,
+    num_after: u16,
+    account: Option<&AccountSession>,
+    event_sink: &Arc<dyn CoreEventSink>,
+) {
+    let Some(session) = account.filter(|item| item.account_id == key.account_id()) else {
+        emit_no_session(request_id, event_sink);
+        return;
+    };
+    match session
+        .messages
+        .fetch_message_context(key.target(), message_id, num_before, num_after)
+        .await
+    {
+        Ok(page) => event_sink.handle_event(CoreEvent::MessageFocused {
+            request_id,
+            message_id,
+            page: CoreConversationPage {
+                key,
+                messages: page.messages.into_iter().map(Into::into).collect(),
+                found_oldest: page.found_oldest,
+                found_newest: page.found_newest,
+            },
+        }),
+        Err(error) => emit_error(Some(request_id), error, event_sink),
+    }
+}
+
+fn conversation_key_for_message(
+    account_id: &str,
+    own_user_id: i64,
+    message: &MessageSummary,
+) -> CoreConversationKey {
+    if let Some(stream_id) = message.stream_id {
+        if let Some(topic) = &message.topic {
+            return CoreConversationKey::Topic {
+                account_id: account_id.to_owned(),
+                stream_id,
+                topic: topic.clone(),
+            };
+        }
+        return CoreConversationKey::Channel {
+            account_id: account_id.to_owned(),
+            stream_id,
+        };
+    }
+
+    let mut recipient_ids = message.recipient_ids.clone();
+    recipient_ids.retain(|user_id| *user_id > 0 && *user_id != own_user_id);
+    recipient_ids.sort_unstable();
+    recipient_ids.dedup();
+    if recipient_ids.is_empty() {
+        recipient_ids.push(own_user_id);
+    }
+    CoreConversationKey::DirectMessage {
+        account_id: account_id.to_owned(),
+        recipient_ids,
     }
 }
 
@@ -847,10 +1035,10 @@ async fn start_session(
     account: &mut Option<AccountSession>,
     event_sink: &Arc<dyn CoreEventSink>,
 ) {
-    if account_id.trim().is_empty() {
+    if account_id.trim().is_empty() || user_id <= 0 {
         event_sink.handle_event(CoreEvent::Failed {
             request_id: Some(request_id),
-            message: "enter a valid account identifier".to_owned(),
+            message: "enter valid account details".to_owned(),
         });
         return;
     }
@@ -904,6 +1092,7 @@ async fn start_session(
             let bridge_snapshot = CoreSnapshot::from_sync(snapshot, &topics);
             *account = Some(AccountSession {
                 account_id: account_id.clone(),
+                own_user_id: user_id,
                 messages,
                 sync,
                 topics,
@@ -1066,15 +1255,16 @@ mod tests {
         net::TcpListener,
         sync::{Arc, Mutex, mpsc},
         thread,
-        time::Duration,
+        time::{Duration, Instant as StdInstant},
     };
 
     use super::{
         CoreCommand, CoreConversationKey, CoreEvent, CoreEventSink, CoreSnapshot, RustCoreClient,
+        conversation_key_for_message,
     };
     use zulip_core::{
         messages::{ConversationTarget, TopicSummary},
-        sync::SyncSnapshot,
+        sync::{MessageSummary, SyncSnapshot},
     };
 
     #[derive(Default)]
@@ -1168,6 +1358,133 @@ mod tests {
         assert_eq!(snapshot.topics[0].stream_id, 5);
         assert_eq!(snapshot.topics[0].name, "macOS");
         assert_eq!(snapshot.topics[0].max_message_id, 44);
+    }
+
+    #[test]
+    fn search_results_map_to_stable_account_scoped_conversations() {
+        let topic_message = MessageSummary {
+            id: 42,
+            sender_id: 9,
+            sender_full_name: "Maya Chen".to_owned(),
+            timestamp: 1_770_000_000,
+            content_html: "<p>Search</p>".to_owned(),
+            stream_id: Some(5),
+            topic: Some("Rust core".to_owned()),
+            recipient_ids: Vec::new(),
+        };
+        assert_eq!(
+            conversation_key_for_message("account-1", 9, &topic_message),
+            CoreConversationKey::Topic {
+                account_id: "account-1".to_owned(),
+                stream_id: 5,
+                topic: "Rust core".to_owned(),
+            }
+        );
+
+        let group_direct_message = MessageSummary {
+            stream_id: None,
+            topic: None,
+            recipient_ids: vec![11, 9, 10, 11],
+            ..topic_message.clone()
+        };
+        assert_eq!(
+            conversation_key_for_message("account-1", 9, &group_direct_message),
+            CoreConversationKey::DirectMessage {
+                account_id: "account-1".to_owned(),
+                recipient_ids: vec![10, 11],
+            }
+        );
+
+        let self_direct_message = MessageSummary {
+            recipient_ids: vec![9],
+            ..group_direct_message
+        };
+        assert_eq!(
+            conversation_key_for_message("account-1", 9, &self_direct_message),
+            CoreConversationKey::DirectMessage {
+                account_id: "account-1".to_owned(),
+                recipient_ids: vec![9],
+            }
+        );
+    }
+
+    #[test]
+    fn actor_searches_and_focuses_a_correlated_result() {
+        let (server, requests) = spawn_search_actor_mock();
+        let (signal_sender, signal_receiver) = mpsc::channel();
+        let sink = Arc::new(RecordingSink {
+            events: Mutex::new(Vec::new()),
+            notifier: Mutex::new(Some(signal_sender)),
+        });
+        let client = RustCoreClient::new(sink.clone());
+
+        client.submit(CoreCommand::StartApiKeySession {
+            request_id: 20,
+            account_id: "account-search".to_owned(),
+            server_url: server,
+            email: "maya@example.com".to_owned(),
+            api_key: "fixture-key-do-not-log".to_owned(),
+        });
+        let _ = wait_for_event(&signal_receiver, &sink, |event| {
+            matches!(event, CoreEvent::SessionStarted { request_id: 20, .. })
+        });
+
+        client.submit(CoreCommand::SearchMessages {
+            request_id: 21,
+            account_id: "account-search".to_owned(),
+            query: "native macOS".to_owned(),
+            limit: 20,
+        });
+        let search = wait_for_event(&signal_receiver, &sink, |event| {
+            matches!(event, CoreEvent::SearchCompleted { request_id: 21, .. })
+        });
+        let CoreEvent::SearchCompleted {
+            account_id,
+            results,
+            ..
+        } = search
+        else {
+            unreachable!("search predicate only accepts search events");
+        };
+        assert_eq!(account_id, "account-search");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].message.message_id, 50);
+        assert_eq!(
+            results[0].key,
+            CoreConversationKey::Topic {
+                account_id: "account-search".to_owned(),
+                stream_id: 5,
+                topic: "macOS".to_owned(),
+            }
+        );
+
+        client.submit(CoreCommand::OpenMessage {
+            request_id: 22,
+            key: results[0].key.clone(),
+            message_id: 50,
+            num_before: 10,
+            num_after: 10,
+        });
+        let focused = wait_for_event(&signal_receiver, &sink, |event| {
+            matches!(event, CoreEvent::MessageFocused { request_id: 22, .. })
+        });
+        assert!(matches!(
+            focused,
+            CoreEvent::MessageFocused {
+                message_id: 50,
+                page,
+                ..
+            } if page.messages.iter().any(|message| message.message_id == 50)
+        ));
+
+        let observed = requests.try_iter().collect::<Vec<_>>();
+        assert!(observed.iter().any(|request| {
+            request.starts_with("GET /api/v1/messages?")
+                && request.contains("%22operator%22%3A%22search%22")
+        }));
+        assert!(observed.iter().any(|request| {
+            request.starts_with("GET /api/v1/messages?") && request.contains("anchor=50")
+        }));
     }
 
     #[test]
@@ -1308,6 +1625,90 @@ mod tests {
         (format!("http://{address}/"), receiver)
     }
 
+    fn spawn_search_actor_mock() -> (String, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let address = listener.local_addr().expect("listener address");
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let mut focused = false;
+            while !focused {
+                let (mut stream, _) = listener.accept().expect("accept request");
+                let request = read_request(&mut stream);
+                let request_line = request.lines().next().unwrap_or_default();
+                let _ = sender.send(request.clone());
+                let body = if request_line.starts_with("GET /api/v1/users/me HTTP") {
+                    r#"{"result":"success","email":"maya@example.com","full_name":"Maya Chen","user_id":9}"#
+                } else if request_line.starts_with("POST /api/v1/register HTTP") {
+                    r##"{
+                        "result":"success",
+                        "queue_id":"queue-search",
+                        "last_event_id":10,
+                        "event_queue_longpoll_timeout_seconds":5,
+                        "zulip_feature_level":481,
+                        "realm_users":[],
+                        "subscriptions":[{
+                            "stream_id":5,
+                            "name":"engineering",
+                            "color":"#76ce90",
+                            "is_muted":false
+                        }]
+                    }"##
+                } else if request_line.starts_with("GET /api/v1/users/me/5/topics?") {
+                    r#"{"result":"success","topics":[{"max_id":50,"name":"macOS"}]}"#
+                } else if request_line.starts_with("GET /api/v1/events?") {
+                    thread::sleep(Duration::from_millis(10));
+                    r#"{"result":"success","events":[{"id":11,"type":"heartbeat"}]}"#
+                } else if request_line.starts_with("GET /api/v1/messages?")
+                    && request.contains("anchor=50")
+                {
+                    focused = true;
+                    r#"{
+                        "result":"success",
+                        "found_oldest":false,
+                        "found_newest":false,
+                        "messages":[{
+                            "id":50,
+                            "sender_id":22,
+                            "sender_full_name":"Theo Martin",
+                            "timestamp":1770000050,
+                            "content":"<p>Native macOS result</p>",
+                            "type":"stream",
+                            "stream_id":5,
+                            "subject":"macOS",
+                            "display_recipient":"engineering"
+                        }]
+                    }"#
+                } else if request_line.starts_with("GET /api/v1/messages?") {
+                    r#"{
+                        "result":"success",
+                        "found_oldest":true,
+                        "found_newest":true,
+                        "messages":[{
+                            "id":50,
+                            "sender_id":22,
+                            "sender_full_name":"Theo Martin",
+                            "timestamp":1770000050,
+                            "content":"<p>Native macOS result</p>",
+                            "type":"stream",
+                            "stream_id":5,
+                            "subject":"macOS",
+                            "display_recipient":"engineering"
+                        }]
+                    }"#
+                } else {
+                    panic!("unexpected request: {request_line}");
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        (format!("http://{address}/"), receiver)
+    }
+
     fn spawn_password_session_mock() -> (String, mpsc::Receiver<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
         let address = listener.local_addr().expect("listener address");
@@ -1380,5 +1781,30 @@ mod tests {
             }
         }
         String::from_utf8_lossy(&request).into_owned()
+    }
+
+    fn wait_for_event(
+        receiver: &mpsc::Receiver<()>,
+        sink: &RecordingSink,
+        predicate: impl Fn(&CoreEvent) -> bool,
+    ) -> CoreEvent {
+        let deadline = StdInstant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(event) = sink
+                .events
+                .lock()
+                .expect("event lock poisoned")
+                .iter()
+                .find(|event| predicate(event))
+                .cloned()
+            {
+                return event;
+            }
+            let remaining = deadline.saturating_duration_since(StdInstant::now());
+            assert!(!remaining.is_zero(), "timed out waiting for actor event");
+            receiver
+                .recv_timeout(remaining)
+                .expect("actor event notification");
+        }
     }
 }

@@ -241,6 +241,7 @@ public struct ConversationPage: Equatable, Sendable {
     public let messages: [MessageViewData]
     public let beforeCursor: String?
     public let afterCursor: String?
+    public let focusedMessageID: Int64?
 
     public init(
         key: ConversationKey,
@@ -248,7 +249,8 @@ public struct ConversationPage: Equatable, Sendable {
         subtitle: String,
         messages: [MessageViewData],
         beforeCursor: String? = nil,
-        afterCursor: String? = nil
+        afterCursor: String? = nil,
+        focusedMessageID: Int64? = nil
     ) {
         self.key = key
         self.title = title
@@ -256,5 +258,6 @@ public struct ConversationPage: Equatable, Sendable {
         self.messages = messages
         self.beforeCursor = beforeCursor
         self.afterCursor = afterCursor
+        self.focusedMessageID = focusedMessageID
     }
 }

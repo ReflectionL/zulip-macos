@@ -264,6 +264,192 @@ struct LiveSessionTests {
         }
     }
 
+    @Test("Server search ignores stale responses and focuses the selected message")
+    func messageSearchAndFocus() async throws {
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(
+            client: core,
+            credentialStore: MemoryCredentialStore()
+        )
+        model.startObserving()
+        let accountID = "account-1"
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: accountID),
+                credential: StoredAPICredential(accountID: accountID, apiKey: "key"),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.connectionState == .connected }
+
+        model.searchMessages("   ")
+        #expect(model.messageSearchState == .idle)
+
+        model.searchMessages("cancelled query")
+        guard case let .searchMessages(cancelledRequestID, _, _, _) = core.commands.last else {
+            Issue.record("Expected cancellable search command")
+            return
+        }
+        model.clearMessageSearch()
+        core.emit(.failed(requestID: cancelledRequestID, message: "stale failure"))
+        await Task.yield()
+        #expect(model.messageSearchState == .idle)
+        #expect(model.connectionState == .connected)
+
+        model.searchMessages("first query")
+        guard case let .searchMessages(firstRequestID, _, firstQuery, firstLimit)
+            = core.commands.last
+        else {
+            Issue.record("Expected first search command")
+            return
+        }
+        #expect(firstQuery == "first query")
+        #expect(firstLimit == 20)
+
+        model.searchMessages("second query")
+        guard case let .searchMessages(
+            secondRequestID,
+            commandAccountID,
+            secondQuery,
+            secondLimit
+        ) = core.commands.last else {
+            Issue.record("Expected second search command")
+            return
+        }
+        #expect(commandAccountID == accountID)
+        #expect(secondQuery == "second query")
+        #expect(secondLimit == 20)
+
+        core.emit(
+            .searchCompleted(
+                requestID: firstRequestID,
+                accountID: accountID,
+                results: []
+            )
+        )
+        await Task.yield()
+        #expect(model.messageSearchState == .loading(query: "second query"))
+
+        let key = ConversationKey.topic(
+            accountID: accountID,
+            streamID: 5,
+            topic: "Search topic"
+        )
+        let matchingMessage = LiveMessageSnapshot(
+            messageID: 50,
+            senderID: 22,
+            senderFullName: "Theo Martin",
+            timestamp: Date(timeIntervalSince1970: 1_700_000_050),
+            contentHTML: "<p>Second query result</p>",
+            streamID: 5,
+            topic: "Search topic",
+            recipientIDs: []
+        )
+        core.emit(
+            .searchCompleted(
+                requestID: secondRequestID,
+                accountID: accountID,
+                results: [
+                    LiveSearchResult(key: key, message: matchingMessage),
+                    LiveSearchResult(key: key, message: matchingMessage),
+                ]
+            )
+        )
+        await eventually {
+            if case let .loaded(query, results) = model.messageSearchState {
+                return query == "second query"
+                    && results.count == 1
+                    && results.first?.accountID == accountID
+                    && results.first?.conversationKey == key
+                    && results.first?.title == "Search topic"
+                    && results.first?.subtitle == "#engineering"
+            }
+            return false
+        }
+
+        guard case let .loaded(_, results) = model.messageSearchState,
+              let result = results.first
+        else {
+            Issue.record("Expected mapped search result")
+            return
+        }
+        model.openSearchResult(result)
+        guard case let .openMessage(
+            focusRequestID,
+            focusKey,
+            messageID,
+            numBefore,
+            numAfter
+        ) = core.commands.last else {
+            Issue.record("Expected focused-message command")
+            return
+        }
+        #expect(focusKey == key)
+        #expect(messageID == 50)
+        #expect(numBefore == 10)
+        #expect(numAfter == 10)
+
+        core.emit(
+            .messageFocused(
+                requestID: focusRequestID,
+                messageID: 50,
+                page: LiveConversationPage(
+                    key: key,
+                    messages: [matchingMessage],
+                    foundOldest: false,
+                    foundNewest: false
+                )
+            )
+        )
+        await eventually {
+            guard case let .loaded(page) = model.conversationState else {
+                return false
+            }
+            return page.key == key
+                && page.focusedMessageID == 50
+                && page.messages.map(\.id) == [50]
+        }
+
+        core.emit(.snapshotUpdated(accountID: accountID, snapshot: snapshot))
+        await eventually {
+            core.commands.contains {
+                if case let .openConversation(_, commandKey, _) = $0 {
+                    return commandKey == key
+                }
+                return false
+            }
+        }
+        let refreshedMessage = LiveMessageSnapshot(
+            messageID: 51,
+            senderID: 9,
+            senderFullName: "Maya Chen",
+            timestamp: Date(timeIntervalSince1970: 1_700_000_051),
+            contentHTML: "<p>Newer message</p>",
+            streamID: 5,
+            topic: "Search topic",
+            recipientIDs: []
+        )
+        core.emit(
+            .conversationOpened(
+                requestID: 999,
+                page: LiveConversationPage(
+                    key: key,
+                    messages: [refreshedMessage],
+                    foundOldest: true,
+                    foundNewest: true
+                )
+            )
+        )
+        await eventually {
+            guard case let .loaded(page) = model.conversationState else {
+                return false
+            }
+            return page.focusedMessageID == 50
+                && page.messages.map(\.id) == [50, 51]
+        }
+    }
+
     private var snapshot: LiveSnapshot {
         LiveSnapshot(
             revision: 1,

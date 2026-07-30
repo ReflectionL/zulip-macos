@@ -168,6 +168,8 @@ private struct LiveWindowView: View {
 
     @State private var sidebarModel: SidebarViewModel
     @State private var navigation: NavigationStore
+    @State private var isMessageSearchPresented = false
+    @State private var suppressedSelectionOpen: ConversationKey?
 
     init(session: LiveSessionViewModel) {
         self.session = session
@@ -201,7 +203,7 @@ private struct LiveWindowView: View {
                         get: { navigation.selection },
                         set: { navigation.select($0) }
                     ),
-                    openCommandPalette: navigation.presentCommandPalette
+                    openCommandPalette: presentQuickSwitcher
                 )
             } content: {
                 liveConversation
@@ -221,16 +223,46 @@ private struct LiveWindowView: View {
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
 
+            if isMessageSearchPresented {
+                AppTheme.Colors.canvas
+                    .opacity(0.58)
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        dismissMessageSearch()
+                    }
+
+                MessageSearchView(
+                    session: session,
+                    openResult: openSearchResult,
+                    dismiss: dismissMessageSearch
+                )
+                .padding(.top, 74)
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
+
             Button("Open quick switcher") {
-                navigation.presentCommandPalette()
+                presentQuickSwitcher()
             }
             .keyboardShortcut("k", modifiers: .command)
             .frame(width: 0, height: 0)
             .opacity(0)
+
+            Button("Search messages") {
+                presentMessageSearch()
+            }
+            .keyboardShortcut("f", modifiers: .command)
+            .frame(width: 0, height: 0)
+            .opacity(0)
         }
         .animation(.snappy(duration: 0.2), value: navigation.isCommandPalettePresented)
+        .animation(.snappy(duration: 0.2), value: isMessageSearchPresented)
         .onChange(of: navigation.selection) {
             navigation.dismissCommandPalette()
+            if suppressedSelectionOpen == navigation.selection {
+                suppressedSelectionOpen = nil
+                return
+            }
             session.openConversation(navigation.selection)
         }
         .onChange(of: session.sidebarSnapshot) {
@@ -256,7 +288,8 @@ private struct LiveWindowView: View {
                 },
                 submitMessage: { content in
                     session.sendText(content, to: page.key)
-                }
+                },
+                openSearch: presentMessageSearch
             )
         case let .offline(page):
             ConversationSurface(
@@ -264,7 +297,8 @@ private struct LiveWindowView: View {
                 isOffline: true,
                 reconnect: {
                     session.openConversation(page.key)
-                }
+                },
+                openSearch: presentMessageSearch
             )
         case let .loading(title, subtitle):
             LivePlaceholder(
@@ -288,6 +322,35 @@ private struct LiveWindowView: View {
                 message: message
             )
         }
+    }
+
+    private func presentQuickSwitcher() {
+        dismissMessageSearch()
+        navigation.presentCommandPalette()
+    }
+
+    private func presentMessageSearch() {
+        navigation.dismissCommandPalette()
+        session.clearMessageSearch()
+        isMessageSearchPresented = true
+    }
+
+    private func dismissMessageSearch() {
+        isMessageSearchPresented = false
+        session.clearMessageSearch()
+    }
+
+    private func openSearchResult(_ result: MessageSearchResult) {
+        let changesSelection = navigation.selection != result.conversationKey
+        if changesSelection {
+            suppressedSelectionOpen = result.conversationKey
+        }
+        navigation.select(result.navigationDestination)
+        session.openSearchResult(result)
+        if !changesSelection {
+            suppressedSelectionOpen = nil
+        }
+        isMessageSearchPresented = false
     }
 }
 
