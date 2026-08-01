@@ -1,6 +1,8 @@
+import AppKit
+import Foundation
 import Testing
-@testable import ZulipMac
 import ZulipCoreBindings
+@testable import ZulipMac
 
 @Suite("Application identity")
 struct AppIdentityTests {
@@ -9,6 +11,27 @@ struct AppIdentityTests {
         #expect(AppIdentity.displayName == "Zulip Mac")
         #expect(AppIdentity.minimumSystem == "macOS 26")
         #expect(AppIdentity.bundleIdentifier.hasPrefix("io.github."))
+    }
+
+    @Test("The package declares a readable macOS application icon")
+    func applicationIcon() throws {
+        let appRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let resources = appRoot.appending(path: "Resources", directoryHint: .isDirectory)
+        let infoURL = resources.appending(path: "Info.plist")
+        let iconURL = resources.appending(path: "AppIcon.icns")
+        let propertyList = try #require(
+            PropertyListSerialization.propertyList(
+                from: Data(contentsOf: infoURL),
+                format: nil
+            ) as? [String: Any]
+        )
+
+        #expect(propertyList["CFBundleIconFile"] as? String == "AppIcon")
+        #expect(FileManager.default.fileExists(atPath: iconURL.path))
+        #expect(NSImage(contentsOf: iconURL) != nil)
     }
 
     @Test("Swift commands round-trip through the Rust core")

@@ -24,7 +24,7 @@ for project_document in AGENTS.md PLAN.md TRACKER.md; do
 done
 
 in_progress_count="$(
-  rg -c '^\| [A-Z]+-[0-9]+ .* \| in_progress \|$' PLAN.md || true
+  rg -c '^\| [A-Z]+-[0-9]+[A-Z]? .* \| in_progress \|$' PLAN.md || true
 )"
 
 if [[ "$in_progress_count" -gt 1 ]]; then

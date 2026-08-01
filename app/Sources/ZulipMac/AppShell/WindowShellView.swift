@@ -24,6 +24,7 @@ struct WindowShellView<Sidebar: View, Content: View>: View {
                     max: AppTheme.Metrics.sidebarMaximum
                 )
                 .background(AppTheme.Colors.sidebar)
+                .ignoresSafeArea(.container, edges: .top)
         } detail: {
             content
                 .background(AppTheme.Colors.canvas)
@@ -46,6 +47,8 @@ private struct PrototypeContent: View {
 }
 
 struct PrototypeWindowView: View {
+    var connectToZulip: (() -> Void)?
+
     @State private var sidebarModel = SidebarViewModel(snapshot: FixtureSidebar.snapshot)
     @State private var navigation = NavigationStore(
         directory: FixtureNavigation.directory,
@@ -65,6 +68,12 @@ struct PrototypeWindowView: View {
                     ),
                     openCommandPalette: {
                         navigation.presentCommandPalette()
+                    },
+                    sessionControl: connectToZulip.map { connectToZulip in
+                        SidebarSessionControl(
+                            action: .connect,
+                            perform: connectToZulip
+                        )
                     }
                 )
             } content: {

@@ -15,6 +15,7 @@ rm -rf "$bundle_path"
 mkdir -p "$contents_path/MacOS" "$contents_path/Resources"
 cp "$binary_path" "$contents_path/MacOS/ZulipMac"
 cp "$repository_root/app/Resources/Info.plist" "$contents_path/Info.plist"
+cp "$repository_root/app/Resources/AppIcon.icns" "$contents_path/Resources/AppIcon.icns"
 
 codesign --force --sign - "$bundle_path"
 echo "$bundle_path"

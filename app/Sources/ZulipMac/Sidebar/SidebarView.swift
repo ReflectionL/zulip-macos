@@ -1,17 +1,50 @@
 import SwiftUI
 import ZulipCoreBindings
 
+enum SidebarSessionAction: Equatable {
+    case connect
+    case disconnect
+
+    var title: String {
+        switch self {
+        case .connect:
+            "Connect to Zulip…"
+        case .disconnect:
+            "Disconnect"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .connect:
+            "bolt.horizontal.circle"
+        case .disconnect:
+            "rectangle.portrait.and.arrow.right"
+        }
+    }
+
+    var role: ButtonRole? {
+        self == .disconnect ? .destructive : nil
+    }
+}
+
+struct SidebarSessionControl {
+    let action: SidebarSessionAction
+    let perform: () -> Void
+}
+
 struct SidebarView: View {
     let model: SidebarViewModel
     @Binding var selection: ConversationKey
     let openCommandPalette: () -> Void
     var startNewTopic: (ChannelSnapshot) -> Void = { _ in }
+    var sessionControl: SidebarSessionControl?
 
     var body: some View {
         VStack(spacing: 0) {
             workspaceHeader
                 .padding(.horizontal, AppTheme.Spacing.medium)
-                .padding(.top, 42)
+                .padding(.top, AppTheme.Metrics.sidebarTopInset)
                 .padding(.bottom, AppTheme.Spacing.small)
 
             Button(action: openCommandPalette) {
@@ -214,27 +247,55 @@ struct SidebarView: View {
 
     private var profileRow: some View {
         HStack(spacing: AppTheme.Spacing.small) {
-            Text(model.snapshot.currentUserInitials)
-                .font(.system(size: 10, weight: .semibold))
-                .frame(width: 24, height: 24)
-                .background(AppTheme.Colors.hover)
-                .clipShape(Circle())
+            HStack(spacing: AppTheme.Spacing.small) {
+                Text(model.snapshot.currentUserInitials)
+                    .font(.system(size: 10, weight: .semibold))
+                    .frame(width: 24, height: 24)
+                    .background(AppTheme.Colors.hover)
+                    .clipShape(Circle())
 
-            Text(model.snapshot.currentUserName)
-                .font(AppTheme.Typography.sidebar)
-                .lineLimit(1)
+                Text(model.snapshot.currentUserName)
+                    .font(AppTheme.Typography.sidebar)
+                    .lineLimit(1)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Profile, \(model.snapshot.currentUserName)")
 
             Spacer()
 
-            Image(systemName: "gearshape")
-                .font(.system(size: 12))
-                .foregroundStyle(AppTheme.Colors.secondaryText)
+            Menu {
+                if let sessionControl {
+                    Button(role: sessionControl.action.role) {
+                        sessionControl.perform()
+                    } label: {
+                        Label(
+                            sessionControl.action.title,
+                            systemImage: sessionControl.action.systemImage
+                        )
+                    }
+
+                    Divider()
+                }
+
+                SettingsLink {
+                    Label("Settings…", systemImage: "gearshape")
+                }
+            } label: {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 12))
+                    .foregroundStyle(AppTheme.Colors.secondaryText)
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Profile and settings")
+            .accessibilityLabel("Profile and settings for \(model.snapshot.currentUserName)")
         }
         .padding(.horizontal, AppTheme.Spacing.small)
         .frame(height: 36)
         .contentShape(Rectangle())
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Profile and settings, \(model.snapshot.currentUserName)")
     }
 }
 

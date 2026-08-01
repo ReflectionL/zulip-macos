@@ -78,17 +78,14 @@ private struct ConversationPlaceholderShell<Content: View>: View {
     @ViewBuilder let content: () -> Content
 
     var body: some View {
-        VStack(spacing: 0) {
-            ConversationPathHeader(
+        content()
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(AppTheme.Colors.canvas)
+            .conversationToolbar(
                 title: title,
                 subtitle: subtitle,
                 isOffline: false
             )
-            Divider()
-            content()
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .background(AppTheme.Colors.canvas)
     }
 }
 

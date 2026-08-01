@@ -94,15 +94,6 @@ struct ConversationSurface: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ConversationPathHeader(
-                title: page.title,
-                subtitle: page.subtitle,
-                isOffline: isOffline,
-                openSearch: openSearch,
-                renameTopic: renameTopic
-            )
-            Divider()
-
             if isOffline {
                 HStack(spacing: AppTheme.Spacing.small) {
                     Image(systemName: "wifi.slash")
@@ -252,8 +243,6 @@ struct ConversationSurface: View {
                 }
             }
 
-            Divider()
-
             ComposerView(
                 conversationTitle: page.title,
                 draft: $draft,
@@ -268,6 +257,13 @@ struct ConversationSurface: View {
             )
         }
         .background(AppTheme.Colors.canvas)
+        .conversationToolbar(
+            title: page.title,
+            subtitle: page.subtitle,
+            isOffline: isOffline,
+            openSearch: openSearch,
+            renameTopic: renameTopic
+        )
         .overlay {
             Button("Focus message composer") {
                 isComposerFocused = true
@@ -390,78 +386,95 @@ private struct TimelineFocus: Hashable {
     let messageID: Int64?
 }
 
-struct ConversationPathHeader: View {
+extension View {
+    func conversationToolbar(
+        title: String,
+        subtitle: String,
+        isOffline: Bool,
+        openSearch: (() -> Void)? = nil,
+        renameTopic: (() -> Void)? = nil
+    ) -> some View {
+        modifier(
+            ConversationToolbarModifier(
+                title: title,
+                subtitle: subtitle,
+                isOffline: isOffline,
+                openSearch: openSearch,
+                renameTopic: renameTopic
+            )
+        )
+    }
+}
+
+private struct ConversationToolbarModifier: ViewModifier {
     let title: String
     let subtitle: String
     let isOffline: Bool
-    var openSearch: (() -> Void)? = nil
-    var renameTopic: (() -> Void)? = nil
+    let openSearch: (() -> Void)?
+    let renameTopic: (() -> Void)?
 
-    var body: some View {
-        HStack(spacing: AppTheme.Spacing.small) {
-            Text(subtitle)
-                .foregroundStyle(AppTheme.Colors.secondaryText)
+    func body(content: Content) -> some View {
+        content
+            .toolbar {
+                ToolbarItem(placement: .navigation) {
+                    HStack(spacing: AppTheme.Spacing.small) {
+                        Text(subtitle)
+                            .foregroundStyle(AppTheme.Colors.secondaryText)
 
-            Image(systemName: "chevron.right")
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(AppTheme.Colors.tertiaryText)
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(AppTheme.Colors.tertiaryText)
 
-            Text(title)
-                .fontWeight(.semibold)
-                .foregroundStyle(AppTheme.Colors.primaryText)
-
-            Spacer()
-
-            if isOffline {
-                Label("Offline", systemImage: "wifi.slash")
-                    .font(AppTheme.Typography.metadata)
-                    .foregroundStyle(AppTheme.Colors.warning)
-                    .padding(.horizontal, AppTheme.Spacing.small)
-                    .frame(height: 24)
-                    .background(AppTheme.Colors.warning.opacity(0.12))
-                    .clipShape(Capsule())
-            }
-
-            if let openSearch {
-                Button(action: openSearch) {
-                    Image(systemName: "magnifyingglass")
+                        Text(title)
+                            .fontWeight(.semibold)
+                            .foregroundStyle(AppTheme.Colors.primaryText)
+                    }
+                    .font(AppTheme.Typography.body)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel(
+                        "\(subtitle), \(title)\(isOffline ? ", offline" : "")"
+                    )
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(AppTheme.Colors.secondaryText)
-                .help("Search messages")
-                .accessibilityLabel("Search messages")
-            }
 
-            if let renameTopic {
-                Menu {
-                    Button("Rename topic…", action: renameTopic)
-                } label: {
-                    Image(systemName: "ellipsis.circle")
+                ToolbarItemGroup(placement: .primaryAction) {
+                    if isOffline {
+                        Label("Offline", systemImage: "wifi.slash")
+                            .font(AppTheme.Typography.metadata)
+                            .foregroundStyle(AppTheme.Colors.warning)
+                            .padding(.horizontal, AppTheme.Spacing.small)
+                            .frame(height: 24)
+                            .background(AppTheme.Colors.warning.opacity(0.12))
+                            .clipShape(Capsule())
+                    }
+
+                    if let openSearch {
+                        Button(action: openSearch) {
+                            Image(systemName: "magnifyingglass")
+                        }
+                        .help("Search messages")
+                        .accessibilityLabel("Search messages")
+                    }
+
+                    if let renameTopic {
+                        Menu {
+                            Button("Rename topic…", action: renameTopic)
+                        } label: {
+                            Image(systemName: "ellipsis.circle")
+                        }
+                        .menuIndicator(.hidden)
+                        .help("Topic actions")
+                        .accessibilityLabel("Topic actions")
+                    }
+
+                    Button {
+                        // Conversation details arrive with live membership data.
+                    } label: {
+                        Image(systemName: "info.circle")
+                    }
+                    .help("Conversation details")
+                    .accessibilityLabel("Conversation details")
                 }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .foregroundStyle(AppTheme.Colors.secondaryText)
-                .help("Topic actions")
-                .accessibilityLabel("Topic actions")
             }
-
-            Button {
-                // Conversation details arrive with live membership data.
-            } label: {
-                Image(systemName: "info.circle")
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(AppTheme.Colors.secondaryText)
-            .help("Conversation details")
-            .accessibilityLabel("Conversation details")
-        }
-        .font(AppTheme.Typography.body)
-        .padding(.horizontal, AppTheme.Spacing.large)
-        .frame(height: AppTheme.Metrics.headerHeight)
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel(
-            "\(subtitle), \(title)\(isOffline ? ", offline" : "")"
-        )
     }
 }
 

@@ -37,6 +37,7 @@ Last updated: 2026-08-01
 | MVP-003 | done | 2026-08-01 | 2026-08-01 | Added typed Rust edit/delete/reaction/read/star APIs, correlated UniFFI commands/events, server-derived flags/reactions, pending local sends, optimistic action state, failure rollback, explicit retry, native edit/delete/read actions, and an exact-target redacted live-action smoke. `./scripts/check.sh` passes with 34 Rust core, 8 FFI actor, and 34 Swift tests. The designated Cloud account passed disposable self-DM send, edit, reaction, star, unread/read, server reconciliation, and permanent deletion; prior disposable smoke data was also removed. | — | — |
 | MVP-005 | done | 2026-08-01 | 2026-08-01 | Added bounded browser-grade Rust fragment parsing and native recursive blocks for paragraphs, safe links, user mentions, Unicode/custom emoji, quotes, lists, code, Zulip image previews, and readable unsupported fallbacks. Executable tags and unsafe URL schemes are stripped; malformed, oversized, deep, or high-node-count input is safely recovered or capped. Replaced raw HTML in UniFFI/Swift snapshots with typed content and native plain-text search previews. `./scripts/check.sh` passes: 39 Rust core, 9 FFI, and 34 Swift tests, plus strict Clippy, formatting, generated bindings, and app build. Computer Use connected through the saved Keychain credential and verified a real Notification Bot message renders `@花海` and `#Zulip MacOS` as native text/link with no raw HTML tags. | — | — |
 | MVP-004 | done | 2026-08-01 | 2026-08-01 | Implemented 25 MiB multipart upload, server-normalized composer links, 32 MiB authenticated downloads, opaque account-partitioned atomic caching, original-image URL parsing, asynchronous FFI media tasks, a native file picker, visible retry state, composer insertion without auto-send, and off-main AppKit image decode. `./scripts/check.sh` passes with 45 Rust core, 10 FFI actor, and 37 Swift tests plus strict Clippy, binding regeneration, and app build. The designated Cloud account passed bounded PNG upload, disposable self-DM link send, server-rendered image parsing, authenticated download with exact byte validation, cache hit, and message/attachment-reference cleanup. | — | — |
+| MVP-004A | done | 2026-08-01 | 2026-08-01 | Tightened the sidebar into the titlebar safe area, moved conversation identity/actions into the released native toolbar position, relocated connect/disconnect to an accessible bottom-left gear menu, preserved native sidebar collapse, and removed the composer separator. Generated an original flat icon master, transparent-corner PNG, multi-resolution ICNS, Info.plist identity, package copy, and icon decode test. `./scripts/check.sh` passes with 45 Rust core, 10 FFI actor, and 40 Swift tests including light/dark shell renders. The ad-hoc signed bundle passed `plutil`, `codesign --verify --deep --strict`, running-app menu/layout/collapse smoke, and Finder icon inspection. | — | — |
 
 Later milestones remain defined in `PLAN.md` and will be added here when they
 become active; completed rows are never removed.
@@ -45,6 +46,31 @@ become active; completed rows are never removed.
 
 ### 2026-08-01
 
+- Closed `MVP-004A`. The conversation path and its search/topic/detail actions
+  now live in the native window toolbar where the former session button sat;
+  the sidebar extends safely into the titlebar region with a 28 pt top inset.
+- Replaced the passive profile gear with an accessible menu. Fixture mode
+  exposes `Connect to Zulip…` and live mode exposes destructive `Disconnect`;
+  both retain the native `Settings…` link. The root-level connect/disconnect
+  toolbar item was removed.
+- Removed the separator above the fixed composer while retaining the composer's
+  elevated rounded surface. The native sidebar toolbar control still collapses
+  and restores the sidebar in the running packaged app.
+- Generated the original minimalist threaded-conversation icon with the built-in
+  image generation path, removed its chroma-key exterior into transparent
+  corners, produced `AppIcon.png` and a multi-resolution `AppIcon.icns`, and
+  bundled it through `CFBundleIconFile`. Finder displayed the packaged icon and
+  the ad-hoc signed app passed strict code-signature verification.
+- `./scripts/check.sh` passes with 45 Rust core, 10 FFI actor, and 40 Swift
+  tests. Swift coverage includes light/dark full-shell rendering, session-menu
+  action mapping, spacing constraints, and readable icon/plist identity.
+- Running-app Computer Use verified the compact top spacing, toolbar title,
+  gear menu (`Connect to Zulip…`, `Settings…`), absent composer divider, and
+  sidebar collapse/restore. Marked `MVP-006` ready.
+- Began `MVP-004A` at the user's request before offline/draft work. The active
+  scope is limited to sidebar/titlebar spacing, session-control placement,
+  composer chrome, and an original minimalist packaged app icon; `MVP-006`
+  now depends on this visual polish step.
 - Implemented the complete local `MVP-004` slice. Rust accepts only bounded
   regular-file uploads and same-origin `/user_uploads/` message routes, uses
   Zulip's short-lived authenticated download URL immediately without forwarding

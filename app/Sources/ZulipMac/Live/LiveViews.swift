@@ -10,25 +10,8 @@ struct AppRootView: View {
             if session.identity != nil, session.sidebarSnapshot != nil {
                 LiveWindowView(session: session)
             } else {
-                PrototypeWindowView()
-            }
-        }
-        .toolbar {
-            ToolbarItem {
-                if session.identity == nil {
-                    Button {
-                        isLoginPresented = true
-                    } label: {
-                        Label("Connect to Zulip", systemImage: "bolt.horizontal.circle")
-                    }
-                    .help("Connect to a live Zulip organization")
-                } else {
-                    Button {
-                        session.disconnect()
-                    } label: {
-                        Label("Disconnect", systemImage: "rectangle.portrait.and.arrow.right")
-                    }
-                    .help("Disconnect the live account")
+                PrototypeWindowView {
+                    isLoginPresented = true
                 }
             }
         }
@@ -210,7 +193,11 @@ private struct LiveWindowView: View {
                             sidebarModel.toggleChannel(channel.streamID)
                         }
                         topicSheet = .new(channel: channel)
-                    }
+                    },
+                    sessionControl: SidebarSessionControl(
+                        action: .disconnect,
+                        perform: session.disconnect
+                    )
                 )
             } content: {
                 liveConversation
@@ -658,17 +645,18 @@ private struct LivePlaceholder: View {
     let message: String
 
     var body: some View {
-        VStack(spacing: 0) {
-            ConversationPathHeader(title: title, subtitle: subtitle, isOffline: false)
-            Divider()
-            ContentUnavailableView(
-                title,
-                systemImage: symbol,
-                description: Text(message)
-            )
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
+        ContentUnavailableView(
+            title,
+            systemImage: symbol,
+            description: Text(message)
+        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(AppTheme.Colors.canvas)
+        .conversationToolbar(
+            title: title,
+            subtitle: subtitle,
+            isOffline: false
+        )
     }
 }
 

@@ -1,6 +1,7 @@
+import SwiftUI
 import Testing
-@testable import ZulipMac
 import ZulipCoreBindings
+@testable import ZulipMac
 
 @Suite("Fixture sidebar")
 @MainActor
@@ -83,5 +84,36 @@ struct SidebarTests {
         #expect(FixtureSidebar.snapshot.quickLinks.allSatisfy { $0.unreadCount >= 0 })
         #expect(FixtureSidebar.snapshot.channels.allSatisfy { $0.unreadCount >= 0 })
         #expect(FixtureSidebar.snapshot.directMessages.allSatisfy { $0.unreadCount >= 0 })
+    }
+
+    @Test("Session controls expose the correct settings-menu actions")
+    func sessionControls() {
+        var didConnect = false
+        let control = SidebarSessionControl(action: .connect) {
+            didConnect = true
+        }
+
+        #expect(control.action.title == "Connect to Zulip…")
+        #expect(control.action.systemImage == "bolt.horizontal.circle")
+        #expect(control.action.role == nil)
+        control.perform()
+        #expect(didConnect)
+
+        #expect(SidebarSessionAction.disconnect.title == "Disconnect")
+        #expect(SidebarSessionAction.disconnect.role == .destructive)
+    }
+
+    @Test("The polished window shell renders in light and dark appearances")
+    func windowAppearanceMatrix() {
+        for colorScheme in [ColorScheme.light, .dark] {
+            let renderer = ImageRenderer(
+                content: PrototypeWindowView(connectToZulip: {})
+                    .frame(width: 1_080, height: 720)
+                    .preferredColorScheme(colorScheme)
+            )
+            renderer.scale = 1
+
+            #expect(renderer.nsImage != nil)
+        }
     }
 }
