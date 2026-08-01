@@ -9,6 +9,8 @@ struct ConversationSurface: View {
     var loadEarlier: (() -> Void)?
     var submitMessage: ((String) -> Bool)?
     var openSearch: (() -> Void)?
+    var renameTopic: (() -> Void)?
+    var moveMessage: ((MessageViewData) -> Void)?
 
     @State private var messages: [MessageViewData]
     @State private var draft = ""
@@ -22,7 +24,9 @@ struct ConversationSurface: View {
         reconnect: @escaping () -> Void = {},
         loadEarlier: (() -> Void)? = nil,
         submitMessage: ((String) -> Bool)? = nil,
-        openSearch: (() -> Void)? = nil
+        openSearch: (() -> Void)? = nil,
+        renameTopic: (() -> Void)? = nil,
+        moveMessage: ((MessageViewData) -> Void)? = nil
     ) {
         self.page = page
         self.isOffline = isOffline
@@ -31,6 +35,8 @@ struct ConversationSurface: View {
         self.loadEarlier = loadEarlier
         self.submitMessage = submitMessage
         self.openSearch = openSearch
+        self.renameTopic = renameTopic
+        self.moveMessage = moveMessage
         _messages = State(initialValue: page.messages)
     }
 
@@ -40,7 +46,8 @@ struct ConversationSurface: View {
                 title: page.title,
                 subtitle: page.subtitle,
                 isOffline: isOffline,
-                openSearch: openSearch
+                openSearch: openSearch,
+                renameTopic: renameTopic
             )
             Divider()
 
@@ -96,7 +103,10 @@ struct ConversationSurface: View {
                                     },
                                     toggleStar: {
                                         toggleStar(for: message.id)
-                                    }
+                                    },
+                                    moveToTopic: message.sourceStreamID == nil
+                                        ? nil
+                                        : { moveMessage?(message) }
                                 )
                                 .id(message.id)
                             }
@@ -247,6 +257,7 @@ struct ConversationPathHeader: View {
     let subtitle: String
     let isOffline: Bool
     var openSearch: (() -> Void)? = nil
+    var renameTopic: (() -> Void)? = nil
 
     var body: some View {
         HStack(spacing: AppTheme.Spacing.small) {
@@ -283,6 +294,19 @@ struct ConversationPathHeader: View {
                 .accessibilityLabel("Search messages")
             }
 
+            if let renameTopic {
+                Menu {
+                    Button("Rename topic…", action: renameTopic)
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .foregroundStyle(AppTheme.Colors.secondaryText)
+                .help("Topic actions")
+                .accessibilityLabel("Topic actions")
+            }
+
             Button {
                 // Conversation details arrive with live membership data.
             } label: {
@@ -308,6 +332,7 @@ private struct MessageRow: View {
     let isFocusedSearchResult: Bool
     let toggleReaction: () -> Void
     let toggleStar: () -> Void
+    let moveToTopic: (() -> Void)?
 
     @State private var isHovered = false
 
@@ -387,7 +412,8 @@ private struct MessageRow: View {
             MessageActions(
                 isStarred: message.isStarred,
                 toggleReaction: toggleReaction,
-                toggleStar: toggleStar
+                toggleStar: toggleStar,
+                moveToTopic: moveToTopic
             )
             .padding(.top, 4)
             .padding(.trailing, AppTheme.Spacing.small)
@@ -411,6 +437,7 @@ private struct MessageActions: View {
     let isStarred: Bool
     let toggleReaction: () -> Void
     let toggleStar: () -> Void
+    let moveToTopic: (() -> Void)?
 
     var body: some View {
         HStack(spacing: 0) {
@@ -427,6 +454,10 @@ private struct MessageActions: View {
             Menu {
                 Button("Reply") {}
                 Button("Copy link") {}
+                if let moveToTopic {
+                    Divider()
+                    Button("Move to topic…", action: moveToTopic)
+                }
             } label: {
                 Image(systemName: "ellipsis")
                     .frame(width: 30, height: 28)

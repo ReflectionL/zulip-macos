@@ -45,6 +45,39 @@ struct SidebarTests {
         #expect(model.areDirectMessagesExpanded == false)
     }
 
+    @Test("Channel topics expand independently and keep account-scoped routing")
+    func channelTopics() {
+        let topic = TopicSnapshot(streamID: 5, name: "macOS", maxMessageID: 44)
+        let snapshot = SidebarSnapshot(
+            accountID: "account-1",
+            organizationName: "Acme",
+            organizationHost: "acme.zulipchat.com",
+            quickLinks: [],
+            channels: [
+                ChannelSnapshot(
+                    streamID: 5,
+                    name: "engineering",
+                    colorHex: "#76ce90",
+                    topics: [topic]
+                ),
+            ],
+            directMessages: [],
+            currentUserName: "Maya Chen",
+            currentUserInitials: "MC"
+        )
+        let model = SidebarViewModel(snapshot: snapshot)
+
+        #expect(model.isChannelExpanded(5))
+        #expect(
+            model.key(for: topic)
+                == .topic(accountID: "account-1", streamID: 5, topic: "macOS")
+        )
+        model.toggleChannel(5)
+        #expect(!model.isChannelExpanded(5))
+        model.toggleChannel(5)
+        #expect(model.isChannelExpanded(5))
+    }
+
     @Test("Fixture unread counts are nonnegative")
     func unreadCounts() {
         #expect(FixtureSidebar.snapshot.quickLinks.allSatisfy { $0.unreadCount >= 0 })

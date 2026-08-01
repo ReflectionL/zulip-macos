@@ -1,11 +1,11 @@
 # Zulip Mac Development Tracker
 
-Last updated: 2026-07-31
+Last updated: 2026-08-01
 
 ## Current State
 
 - Milestone: MVP — daily use
-- Current step: none
+- Current step: —
 - Next step: `MVP-003` (`ready`)
 - Overall status: ready for the next step
 
@@ -33,15 +33,45 @@ Last updated: 2026-07-31
 | CORE-006 | done | 2026-07-30 | 2026-07-31 | Added bounded conversation fetch, channel/direct text send with local echo IDs, and read-flag APIs; replaced the bridge ping payload with typed account/conversation/write commands and immutable events; added a Tokio actor for continuous sync, recovery, sends, reads, and snapshots; added password and direct API-key session commands, verified own-user identity, one-time redacted API-key handoff, Keychain save/reload, a native SwiftUI login sheet, fixture/live switching, live sidebar/navigation/timeline mapping, safe non-executing HTML fallback, pending local sends, automatic conversation refresh, and mark-read submission. Added `live_smoke` using the production Rust clients and a stdin-only wrapper. Fixed API authentication to preserve the API login email instead of replacing it with a possibly different profile email. Added a file-based macOS Keychain fallback when an ad-hoc development build lacks data-protection Keychain entitlements. The designated Zulip Cloud organization passes password login, initial sync, Inbox fetch, self-DM send/receive, reopen, mark-read, Keychain save, disconnect, and password-free saved-key reconnect in the running app. Deterministic mocks cover authentication, registration, long polling, queue expiry, restart recovery, messages, and read state. `./scripts/check.sh`: 29 Rust core tests, 3 actor/FFI tests, 29 Swift tests, strict Clippy, formatting, builds, and docs pass. | — | initial commit; `922c16c`; `ce1cc64` |
 | MVP-001 | done | 2026-07-31 | 2026-07-31 | Added authenticated Inbox/Mentions/Starred/Unread narrows, bounded topic discovery, channel/topic/self-and-user DM navigation, stable account-scoped conversation keys, anchored older-message requests, duplicate-free ordered page merging, latest-page refresh, and loading UI. `./scripts/check.sh`: 31 Rust core tests, 4 FFI tests, 29 Swift tests, strict Clippy, formatting, builds, and docs pass. Real Cloud smoke opened every quick destination, a channel, a self-DM, and `#Zulip > 欢迎来到Zulip！`; loading history merged 6 older messages into an initial 10-message page without duplicates or reordering, preserved the viewport, and removed the load control at the oldest page. | — | — |
 | MVP-002 | done | 2026-07-31 | 2026-07-31 | Added bounded server-side `search` narrows, immutable account-scoped result keys, anchored context loading, and correlated Rust actor events. Added a native search overlay with debouncing, loading/empty/error states, stale-response suppression, `⌘F`, result routing, viewport positioning, visible target highlighting, and live-refresh preservation. `./scripts/check.sh`: 32 Rust core tests, 6 FFI actor tests, 31 Swift tests, strict Clippy, formatting, builds, and docs pass. Real Cloud smoke searched a unique existing message, returned one result, opened its self-DM context, highlighted the target, and confirmed `⌘F` transfers focus from the composer to search. | — | — |
-| MVP-003 | ready | — | — | Pending/error/retry behavior for daily message actions is next. | — | — |
+| MVP-002A | done | 2026-07-31 | 2026-08-01 | Implemented inline expandable channel topics, validated new-topic drafts, whole-topic rename via `change_all`, single-message moves via `change_one`, correlated success/failure state, and retry. `./scripts/check.sh` passes: 33 Rust core, 7 FFI actor, and 33 Swift tests; the mock write smoke verifies both PATCH propagation modes. Computer Use verified real-account topic discovery/routing, independent channel collapse/expand, rename and move dialogs, existing-topic choices, and a local new-topic draft with an empty timeline/composer; no live write was submitted. | — | — |
+| MVP-003 | ready | — | — | Pending/error/retry behavior for daily message actions follows the Topic workflow. | — | — |
 
 Later milestones remain defined in `PLAN.md` and will be added here when they
 become active; completed rows are never removed.
 
 ## Work Log
 
+### 2026-08-01
+
+- Completed the running-app `MVP-002A` smoke against the designated Cloud
+  account: all three channels exposed inline topics; channel topics collapsed
+  and expanded independently; selecting a topic loaded its stable route.
+- Opened and cancelled the whole-topic rename sheet and the single-message
+  move sheet. The move sheet listed the other existing topic in the channel.
+  No Rename or Move action was submitted, so the live organization was not
+  mutated.
+- Started the local `Codex UI smoke draft` topic from `#Zulip`; it appeared in
+  the sidebar and opened an empty timeline with its fixed composer. No message
+  was entered or sent, so Zulip did not create a server topic.
+- Closed `MVP-002A` after the prior full automated check (33 Rust core, 7 FFI
+  actor, 33 Swift tests) and the running-app smoke both passed. Marked
+  `MVP-003` ready.
+
 ### 2026-07-31
 
+- Implemented the full `MVP-002A` protocol and UI slice: Rust message-topic
+  updates, UniFFI commands/events, account-scoped topic snapshots, expandable
+  channel trees, new-topic drafts, rename and move sheets, and retryable errors.
+- `./scripts/check.sh` passes with 33 Rust core, 7 FFI actor, and 33 Swift
+  tests. The mock Zulip actor observed `change_all` for whole-topic rename and
+  `change_one` for a single-message move.
+- Built, ad-hoc signed, and launched `dist/Zulip Mac.app`; the required
+  running-app browse/create/dialog smoke remains pending because macOS locked
+  before Computer Use could inspect the window. The step remains
+  `in_progress`.
+- Added and began `MVP-002A` at the user's request, preserving existing stable
+  IDs while prioritizing inline topic browsing, topic creation, whole-topic
+  rename, and single-message moves before general message actions.
 - Began `MVP-002`; refined its acceptance criteria around server-side search,
   immutable account-scoped results, anchored conversation loading, visible
   target focus, stale-response handling, and off-main-actor transport.

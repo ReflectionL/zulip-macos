@@ -5,6 +5,7 @@ struct SidebarView: View {
     let model: SidebarViewModel
     @Binding var selection: ConversationKey
     let openCommandPalette: () -> Void
+    var startNewTopic: (ChannelSnapshot) -> Void = { _ in }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -63,18 +64,71 @@ struct SidebarView: View {
                     if model.areChannelsExpanded {
                         ForEach(model.snapshot.channels) { channel in
                             let key = model.key(for: channel)
-                            SidebarRow(
-                                title: channel.name,
-                                unreadCount: channel.unreadCount,
-                                isSelected: selection == key,
-                                isMuted: channel.isMuted,
-                                leading: {
-                                    Circle()
-                                        .fill(Color(hex: channel.colorHex))
-                                        .frame(width: 8, height: 8)
+                            HStack(spacing: 0) {
+                                Button {
+                                    model.toggleChannel(channel.streamID)
+                                } label: {
+                                    Image(systemName: "chevron.right")
+                                        .font(.system(size: 9, weight: .semibold))
+                                        .rotationEffect(
+                                            .degrees(
+                                                model.isChannelExpanded(channel.streamID)
+                                                    ? 90
+                                                    : 0
+                                            )
+                                        )
+                                        .frame(width: 22, height: 32)
                                 }
-                            ) {
-                                selection = key
+                                .buttonStyle(.plain)
+                                .foregroundStyle(AppTheme.Colors.tertiaryText)
+                                .help(
+                                    model.isChannelExpanded(channel.streamID)
+                                        ? "Collapse topics"
+                                        : "Expand topics"
+                                )
+                                .accessibilityLabel(
+                                    "\(model.isChannelExpanded(channel.streamID) ? "Collapse" : "Expand") \(channel.name) topics"
+                                )
+
+                                SidebarRow(
+                                    title: channel.name,
+                                    unreadCount: channel.unreadCount,
+                                    isSelected: selection == key,
+                                    isMuted: channel.isMuted,
+                                    leading: {
+                                        Circle()
+                                            .fill(Color(hex: channel.colorHex))
+                                            .frame(width: 8, height: 8)
+                                    }
+                                ) {
+                                    selection = key
+                                }
+
+                                Button {
+                                    startNewTopic(channel)
+                                } label: {
+                                    Image(systemName: "plus")
+                                        .font(.system(size: 10, weight: .semibold))
+                                        .frame(width: 24, height: 32)
+                                }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(AppTheme.Colors.tertiaryText)
+                                .help("Start a new topic in \(channel.name)")
+                                .accessibilityLabel("New topic in \(channel.name)")
+                            }
+
+                            if model.isChannelExpanded(channel.streamID) {
+                                ForEach(channel.topics) { topic in
+                                    let topicKey = model.key(for: topic)
+                                    SidebarRow(
+                                        title: topic.name.isEmpty ? "(no topic)" : topic.name,
+                                        systemImage: "text.bubble",
+                                        isSelected: selection == topicKey
+                                    ) {
+                                        selection = topicKey
+                                    }
+                                    .padding(.leading, 22)
+                                }
                             }
                         }
                     }

@@ -59,6 +59,17 @@ enum MessageSearchState: Equatable, Sendable {
     case failed(query: String, message: String)
 }
 
+enum TopicAction: Equatable, Sendable {
+    case rename(key: ConversationKey, messageID: Int64, newTopic: String)
+    case move(key: ConversationKey, messageID: Int64, newTopic: String)
+}
+
+enum TopicActionState: Equatable, Sendable {
+    case idle
+    case working(TopicAction)
+    case failed(action: TopicAction, message: String)
+}
+
 @MainActor
 @Observable
 final class LiveSessionViewModel {
@@ -82,6 +93,8 @@ final class LiveSessionViewModel {
     )
     private(set) var isLoadingOlderMessages = false
     private(set) var messageSearchState = MessageSearchState.idle
+    private(set) var topicActionState = TopicActionState.idle
+    private(set) var requestedTopicNavigation: ConversationKey?
 
     @ObservationIgnored private let client: any CoreClientProtocol
     @ObservationIgnored private let credentialStore: any CredentialStore
@@ -94,6 +107,7 @@ final class LiveSessionViewModel {
     private var issuedSearchRequestIDs = Set<UInt64>()
     private var pendingFocusedMessageRequestID: UInt64?
     private var issuedFocusedMessageRequestIDs = Set<UInt64>()
+    private var topicActionsByRequestID: [UInt64: TopicAction] = [:]
     private var knownTopics: [ConversationKey: LiveTopicSnapshot] = [:]
 
     init(
@@ -241,6 +255,86 @@ final class LiveSessionViewModel {
         pendingSearchRequestID = nil
         pendingSearchQuery = nil
         messageSearchState = .idle
+    }
+
+    func beginNewTopic(streamID: Int64, name: String) -> ConversationKey? {
+        guard let identity,
+              streamID > 0,
+              let topic = Self.validatedTopicName(name)
+        else {
+            notice = "Enter a valid topic name."
+            return nil
+        }
+        let key = ConversationKey.topic(
+            accountID: identity.accountID,
+            streamID: streamID,
+            topic: topic
+        )
+        knownTopics[key] = LiveTopicSnapshot(
+            streamID: streamID,
+            name: topic,
+            maxMessageID: knownTopics[key]?.maxMessageID ?? 0
+        )
+        rebuildPresentation()
+        return key
+    }
+
+    @discardableResult
+    func renameTopic(
+        _ key: ConversationKey,
+        anchorMessageID: Int64,
+        newName: String
+    ) -> Bool {
+        guard case let .topic(accountID, streamID, oldTopic) = key,
+              identity?.accountID == accountID,
+              streamID > 0,
+              anchorMessageID > 0,
+              let topic = Self.validatedTopicName(newName),
+              topic != oldTopic
+        else {
+            notice = "Choose a different valid topic name."
+            return false
+        }
+        return submitTopicAction(
+            .rename(key: key, messageID: anchorMessageID, newTopic: topic)
+        )
+    }
+
+    @discardableResult
+    func moveMessage(
+        _ message: MessageViewData,
+        to newName: String
+    ) -> Bool {
+        guard let identity,
+              message.accountID == identity.accountID,
+              message.id > 0,
+              let streamID = message.sourceStreamID,
+              let oldTopic = message.sourceTopic,
+              let topic = Self.validatedTopicName(newName),
+              topic != oldTopic
+        else {
+            notice = "Choose a different valid destination topic."
+            return false
+        }
+        let key = ConversationKey.topic(
+            accountID: identity.accountID,
+            streamID: streamID,
+            topic: oldTopic
+        )
+        return submitTopicAction(
+            .move(key: key, messageID: message.id, newTopic: topic)
+        )
+    }
+
+    func retryTopicAction() {
+        guard case let .failed(action, _) = topicActionState else {
+            return
+        }
+        _ = submitTopicAction(action)
+    }
+
+    func clearRequestedTopicNavigation() {
+        requestedTopicNavigation = nil
     }
 
     func openSearchResult(_ result: MessageSearchResult) {
@@ -449,6 +543,15 @@ final class LiveSessionViewModel {
                 refreshConversation(activeSelection)
             }
 
+        case let .topicUpdated(requestID, update):
+            guard let action = topicActionsByRequestID.removeValue(forKey: requestID),
+                  identity?.accountID == update.accountID
+            else {
+                return
+            }
+            topicActionState = .idle
+            applyTopicUpdate(update, action: action)
+
         case .messagesMarkedRead, .pong:
             break
 
@@ -466,8 +569,11 @@ final class LiveSessionViewModel {
             issuedSearchRequestIDs = []
             pendingFocusedMessageRequestID = nil
             issuedFocusedMessageRequestIDs = []
+            topicActionsByRequestID = [:]
             isLoadingOlderMessages = false
             messageSearchState = .idle
+            topicActionState = .idle
+            requestedTopicNavigation = nil
             knownTopics = [:]
             connectionState = .signedOut
 
@@ -496,6 +602,11 @@ final class LiveSessionViewModel {
                 pendingOlderRequestID = nil
                 isLoadingOlderMessages = false
                 notice = "Earlier messages could not be loaded: \(message)"
+            } else if let requestID,
+                      let action = topicActionsByRequestID.removeValue(forKey: requestID)
+            {
+                topicActionState = .failed(action: action, message: message)
+                notice = "Topic update failed: \(message)"
             } else {
                 connectionState = .failed(message: message)
             }
@@ -506,14 +617,14 @@ final class LiveSessionViewModel {
         guard let identity else {
             return
         }
-        let sidebar = Self.makeSidebar(snapshot: snapshot, identity: identity)
-        sidebarSnapshot = sidebar
         rememberTopics(from: snapshot.topics)
         rememberTopics(from: snapshot.messages)
-        navigationDirectory = Self.makeDirectory(
-            sidebar: sidebar,
+        sidebarSnapshot = Self.makeSidebar(
+            snapshot: snapshot,
+            identity: identity,
             topics: Array(knownTopics.values)
         )
+        rebuildPresentation()
     }
 
     private func makeConversationPage(
@@ -569,7 +680,9 @@ final class LiveSessionViewModel {
                 senderInitials: Self.initials(for: message.senderFullName),
                 timestamp: message.timestamp,
                 content: [.paragraph([.text(message.contentHTML)])],
-                isOwnMessage: message.senderID == identity?.userID
+                isOwnMessage: message.senderID == identity?.userID,
+                sourceStreamID: message.streamID,
+                sourceTopic: message.topic
             )
         }
     }
@@ -688,12 +801,117 @@ final class LiveSessionViewModel {
             )
         }
         rememberTopics(from: topics)
-        if let sidebarSnapshot {
-            navigationDirectory = Self.makeDirectory(
-                sidebar: sidebarSnapshot,
-                topics: Array(knownTopics.values)
+        rebuildPresentation()
+    }
+
+    private func submitTopicAction(_ action: TopicAction) -> Bool {
+        guard identity != nil else {
+            return false
+        }
+        let id = nextRequestID()
+        topicActionsByRequestID[id] = action
+        topicActionState = .working(action)
+        notice = nil
+        switch action {
+        case let .rename(key, messageID, newTopic):
+            client.submit(
+                .renameTopic(
+                    requestID: id,
+                    key: key,
+                    messageID: messageID,
+                    newTopic: newTopic
+                )
+            )
+        case let .move(key, messageID, newTopic):
+            client.submit(
+                .moveMessageToTopic(
+                    requestID: id,
+                    key: key,
+                    messageID: messageID,
+                    newTopic: newTopic
+                )
             )
         }
+        return true
+    }
+
+    private func applyTopicUpdate(_ update: LiveTopicUpdate, action _: TopicAction) {
+        let oldKey = ConversationKey.topic(
+            accountID: update.accountID,
+            streamID: update.streamID,
+            topic: update.oldTopic
+        )
+        let newKey = ConversationKey.topic(
+            accountID: update.accountID,
+            streamID: update.streamID,
+            topic: update.newTopic
+        )
+        if update.propagation == .changeAll {
+            let previous = knownTopics.removeValue(forKey: oldKey)
+            knownTopics[newKey] = LiveTopicSnapshot(
+                streamID: update.streamID,
+                name: update.newTopic,
+                maxMessageID: max(previous?.maxMessageID ?? 0, update.messageID)
+            )
+            rebuildPresentation()
+            if activeSelection == oldKey {
+                requestedTopicNavigation = newKey
+            }
+        } else {
+            knownTopics[newKey] = LiveTopicSnapshot(
+                streamID: update.streamID,
+                name: update.newTopic,
+                maxMessageID: max(knownTopics[newKey]?.maxMessageID ?? 0, update.messageID)
+            )
+            rebuildPresentation()
+            if let activeSelection {
+                refreshConversation(activeSelection)
+            }
+        }
+    }
+
+    private func rebuildPresentation() {
+        guard let sidebar = sidebarSnapshot else {
+            return
+        }
+        let topics = Array(knownTopics.values)
+        let channels = sidebar.channels.map { channel in
+            ChannelSnapshot(
+                streamID: channel.streamID,
+                name: channel.name,
+                colorHex: channel.colorHex,
+                unreadCount: channel.unreadCount,
+                isMuted: channel.isMuted,
+                topics: topics
+                    .filter { $0.streamID == channel.streamID }
+                    .sorted {
+                        if $0.maxMessageID == $1.maxMessageID {
+                            return $0.name.localizedCaseInsensitiveCompare($1.name)
+                                == .orderedAscending
+                        }
+                        return $0.maxMessageID > $1.maxMessageID
+                    }
+                    .map {
+                        TopicSnapshot(
+                            streamID: $0.streamID,
+                            name: $0.name,
+                            maxMessageID: $0.maxMessageID
+                        )
+                    }
+            )
+        }
+        let updated = SidebarSnapshot(
+            accountID: sidebar.accountID,
+            organizationName: sidebar.organizationName,
+            organizationHost: sidebar.organizationHost,
+            quickLinks: sidebar.quickLinks,
+            channels: channels,
+            directMessages: sidebar.directMessages,
+            currentUserName: sidebar.currentUserName,
+            currentUserInitials: sidebar.currentUserInitials
+        )
+        sidebarSnapshot = updated
+        navigationDirectory = Self.makeDirectory(sidebar: updated, topics: topics)
     }
 
     private var organizationName: String {
@@ -712,9 +930,21 @@ final class LiveSessionViewModel {
         return "\(normalizedServer)|\(email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())"
     }
 
+    private static func validatedTopicName(_ value: String) -> String? {
+        let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty,
+              value.utf8.count <= 1_024,
+              !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
+        else {
+            return nil
+        }
+        return value
+    }
+
     private static func makeSidebar(
         snapshot: LiveSnapshot,
-        identity: LiveSessionIdentity
+        identity: LiveSessionIdentity,
+        topics: [LiveTopicSnapshot]
     ) -> SidebarSnapshot {
         let host = URL(string: identity.serverURL)?.host ?? identity.serverURL
         let organization = host.split(separator: ".").first
@@ -765,12 +995,23 @@ final class LiveSessionViewModel {
                     systemImage: "circle.fill"
                 ),
             ],
-            channels: snapshot.channels.map {
-                ChannelSnapshot(
-                    streamID: $0.streamID,
-                    name: $0.name,
-                    colorHex: $0.colorHex,
-                    isMuted: $0.isMuted
+            channels: snapshot.channels.map { channel in
+                let channelTopics = topics
+                    .filter { $0.streamID == channel.streamID }
+                return ChannelSnapshot(
+                    streamID: channel.streamID,
+                    name: channel.name,
+                    colorHex: channel.colorHex,
+                    isMuted: channel.isMuted,
+                    topics: channelTopics
+                        .sorted { $0.maxMessageID > $1.maxMessageID }
+                        .map {
+                            TopicSnapshot(
+                                streamID: $0.streamID,
+                                name: $0.name,
+                                maxMessageID: $0.maxMessageID
+                            )
+                        }
                 )
             },
             directMessages: directMessages,

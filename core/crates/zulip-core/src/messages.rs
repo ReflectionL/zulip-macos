@@ -21,6 +21,7 @@ const MAX_WRITE_RESPONSE_BYTES: usize = 1_048_576;
 const MAX_FETCH_MESSAGES: u16 = 1_000;
 const MAX_SEARCH_MESSAGES: u16 = 100;
 const MAX_SEARCH_QUERY_BYTES: usize = 512;
+const MAX_TOPIC_NAME_BYTES: usize = 1_024;
 
 /// Stable server-side conversation selection.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -120,6 +121,24 @@ pub enum OutgoingMessage {
         /// Zulip-flavored Markdown content.
         content: String,
     },
+}
+
+/// Scope applied when changing a channel message's topic.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TopicPropagation {
+    /// Move only the selected message.
+    ChangeOne,
+    /// Rename every message in the selected message's current topic.
+    ChangeAll,
+}
+
+impl TopicPropagation {
+    const fn api_value(self) -> &'static str {
+        match self {
+            Self::ChangeOne => "change_one",
+            Self::ChangeAll => "change_all",
+        }
+    }
 }
 
 /// One fetched conversation page.
@@ -486,6 +505,39 @@ impl MessageClient {
             ))
     }
 
+    /// Changes the topic of one message or its entire current topic.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageApiError`] for invalid identifiers/topic names,
+    /// transport, rejection, size, or response failures.
+    pub async fn update_message_topic(
+        &self,
+        message_id: i64,
+        topic: &str,
+        propagation: TopicPropagation,
+    ) -> Result<(), MessageApiError> {
+        if message_id <= 0 {
+            return Err(MessageApiError::InvalidInput);
+        }
+        let topic = validate_topic_name(topic)?;
+        let path = format!("{MESSAGES_PATH}/{message_id}");
+        let response = self
+            .http
+            .patch(self.base_url.endpoint(&path))
+            .basic_auth(&self.email, Some(self.api_key.expose_secret()))
+            .form(&[
+                ("topic", topic),
+                ("propagate_mode", propagation.api_value()),
+            ])
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let document: ApiResultDocument =
+            decode_response(response, MAX_WRITE_RESPONSE_BYTES).await?;
+        document.validate_result()
+    }
+
     /// Adds the personal `read` flag to the supplied messages.
     ///
     /// # Errors
@@ -527,6 +579,16 @@ fn validate_content(content: &str) -> Result<(), MessageApiError> {
         Err(MessageApiError::InvalidInput)
     } else {
         Ok(())
+    }
+}
+
+fn validate_topic_name(topic: &str) -> Result<&str, MessageApiError> {
+    let topic = topic.trim();
+    if topic.is_empty() || topic.len() > MAX_TOPIC_NAME_BYTES || topic.chars().any(char::is_control)
+    {
+        Err(MessageApiError::InvalidInput)
+    } else {
+        Ok(topic)
     }
 }
 
@@ -727,7 +789,9 @@ mod tests {
 
     use reqwest::StatusCode;
 
-    use super::{ConversationTarget, MessageApiError, MessageClient, OutgoingMessage};
+    use super::{
+        ConversationTarget, MessageApiError, MessageClient, OutgoingMessage, TopicPropagation,
+    };
     use crate::auth::SecretString;
 
     const API_KEY: &str = "fixture-message-key-do-not-log";
@@ -826,6 +890,36 @@ mod tests {
         assert!(request.contains("type=direct"));
         assert!(request.contains("to=%5B9%2C10%5D"));
         assert!(!format!("{error:?} {error}").contains(API_KEY));
+    }
+
+    #[tokio::test]
+    async fn topic_updates_encode_the_requested_propagation() {
+        let responses = vec![
+            (StatusCode::OK, r#"{"result":"success"}"#.to_owned()),
+            (StatusCode::OK, r#"{"result":"success"}"#.to_owned()),
+        ];
+        let (server, requests) = spawn_mock(responses);
+        let client = MessageClient::new(&server, "maya@example.com", SecretString::new(API_KEY))
+            .expect("message client");
+
+        client
+            .update_message_topic(42, " macOS native ", TopicPropagation::ChangeAll)
+            .await
+            .expect("rename topic");
+        client
+            .update_message_topic(43, "UI polish", TopicPropagation::ChangeOne)
+            .await
+            .expect("move one message");
+
+        let rename = requests.recv().expect("rename request");
+        assert!(rename.starts_with("PATCH /api/v1/messages/42 HTTP/1.1"));
+        assert!(rename.contains("topic=macOS+native"));
+        assert!(rename.contains("propagate_mode=change_all"));
+
+        let moved = requests.recv().expect("move request");
+        assert!(moved.starts_with("PATCH /api/v1/messages/43 HTTP/1.1"));
+        assert!(moved.contains("topic=UI+polish"));
+        assert!(moved.contains("propagate_mode=change_one"));
     }
 
     #[tokio::test]
@@ -1031,6 +1125,18 @@ mod tests {
                 .is_err()
         );
         assert!(client.mark_read(&[]).await.is_err());
+        assert!(
+            client
+                .update_message_topic(0, "Topic", TopicPropagation::ChangeOne)
+                .await
+                .is_err()
+        );
+        assert!(
+            client
+                .update_message_topic(42, " \n ", TopicPropagation::ChangeAll)
+                .await
+                .is_err()
+        );
         assert!(
             client
                 .send_message(

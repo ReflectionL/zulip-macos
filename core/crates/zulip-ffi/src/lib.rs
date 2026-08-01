@@ -10,7 +10,9 @@ use tokio::{
 };
 use zulip_core::{
     auth::{AuthenticatedAccount, AuthenticationClient, SecretString},
-    messages::{ConversationTarget, MessageClient, OutgoingMessage, TopicSummary},
+    messages::{
+        ConversationTarget, MessageClient, OutgoingMessage, TopicPropagation, TopicSummary,
+    },
     sync::{
         EventQueueClient, MessageSummary, RecoveryPolicy, SyncCycle, SyncSession, SyncSnapshot,
         UserSummary,
@@ -210,6 +212,28 @@ pub enum CoreCommand {
         /// Stable local echo identifier.
         local_id: String,
     },
+    /// Renames every message in an existing channel topic.
+    RenameTopic {
+        /// Correlates the response.
+        request_id: u64,
+        /// Existing account-scoped topic.
+        key: CoreConversationKey,
+        /// Any server message currently in the topic.
+        message_id: i64,
+        /// Validated replacement topic name.
+        new_topic: String,
+    },
+    /// Moves one channel message to an existing or new topic.
+    MoveMessageToTopic {
+        /// Correlates the response.
+        request_id: u64,
+        /// Existing account-scoped topic containing the message.
+        key: CoreConversationKey,
+        /// Server message to move.
+        message_id: i64,
+        /// Validated destination topic name.
+        new_topic: String,
+    },
     /// Adds the personal `read` flag to messages.
     MarkRead {
         /// Correlates the response.
@@ -238,6 +262,8 @@ impl CoreCommand {
             | Self::OpenMessage { request_id, .. }
             | Self::SendChannelMessage { request_id, .. }
             | Self::SendDirectMessage { request_id, .. }
+            | Self::RenameTopic { request_id, .. }
+            | Self::MoveMessageToTopic { request_id, .. }
             | Self::MarkRead { request_id, .. }
             | Self::Disconnect { request_id } => *request_id,
         }
@@ -356,6 +382,15 @@ pub struct CoreSearchResult {
     pub message: CoreMessage,
 }
 
+/// Scope applied to a successful topic update.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum CoreTopicPropagation {
+    /// Only the selected message moved.
+    ChangeOne,
+    /// The selected message's entire former topic was renamed.
+    ChangeAll,
+}
+
 /// Typed events delivered from the Rust actor to Swift.
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Enum)]
 pub enum CoreEvent {
@@ -433,6 +468,23 @@ pub enum CoreEvent {
         local_id: String,
         /// Server-assigned message identifier.
         message_id: i64,
+    },
+    /// A correlated topic mutation succeeded.
+    TopicUpdated {
+        /// Originating request.
+        request_id: u64,
+        /// Active account partition.
+        account_id: String,
+        /// Channel containing the affected message.
+        stream_id: i64,
+        /// Topic name before the mutation.
+        old_topic: String,
+        /// Topic name after the mutation.
+        new_topic: String,
+        /// Anchor or moved message.
+        message_id: i64,
+        /// Update scope accepted by Zulip.
+        propagation: CoreTopicPropagation,
     },
     /// A read-state write succeeded.
     MessagesMarkedRead {
@@ -704,6 +756,40 @@ async fn handle_command(
             )
             .await;
         }
+        CoreCommand::RenameTopic {
+            request_id,
+            key,
+            message_id,
+            new_topic,
+        } => {
+            update_topic(
+                request_id,
+                key,
+                message_id,
+                new_topic,
+                TopicPropagation::ChangeAll,
+                account.as_mut(),
+                event_sink,
+            )
+            .await;
+        }
+        CoreCommand::MoveMessageToTopic {
+            request_id,
+            key,
+            message_id,
+            new_topic,
+        } => {
+            update_topic(
+                request_id,
+                key,
+                message_id,
+                new_topic,
+                TopicPropagation::ChangeOne,
+                account.as_mut(),
+                event_sink,
+            )
+            .await;
+        }
         CoreCommand::MarkRead {
             request_id,
             account_id,
@@ -908,6 +994,96 @@ async fn send_message(
         .send_message(outgoing, Some((&queue_id, &local_id)))
         .await;
     emit_send_result(result, request_id, local_id, event_sink);
+}
+
+async fn update_topic(
+    request_id: u64,
+    key: CoreConversationKey,
+    message_id: i64,
+    new_topic: String,
+    propagation: TopicPropagation,
+    account: Option<&mut AccountSession>,
+    event_sink: &Arc<dyn CoreEventSink>,
+) {
+    let CoreConversationKey::Topic {
+        account_id,
+        stream_id,
+        topic: old_topic,
+    } = key
+    else {
+        emit_error(
+            Some(request_id),
+            zulip_core::messages::MessageApiError::InvalidInput,
+            event_sink,
+        );
+        return;
+    };
+    let Some(session) = account.filter(|item| item.account_id == account_id) else {
+        emit_no_session(request_id, event_sink);
+        return;
+    };
+    let new_topic = new_topic.trim().to_owned();
+    match session
+        .messages
+        .update_message_topic(message_id, &new_topic, propagation)
+        .await
+    {
+        Ok(()) => {
+            if propagation == TopicPropagation::ChangeAll {
+                let mut renamed = false;
+                for topic in &mut session.topics {
+                    if topic.stream_id == stream_id && topic.name == old_topic {
+                        topic.name.clone_from(&new_topic);
+                        topic.max_message_id = topic.max_message_id.max(message_id);
+                        renamed = true;
+                    }
+                }
+                if !renamed {
+                    session.topics.push(TopicSummary {
+                        stream_id,
+                        name: new_topic.clone(),
+                        max_message_id: message_id,
+                    });
+                }
+            } else {
+                session.topics.push(TopicSummary {
+                    stream_id,
+                    name: new_topic.clone(),
+                    max_message_id: message_id,
+                });
+            }
+            normalize_topics(&mut session.topics);
+            event_sink.handle_event(CoreEvent::TopicUpdated {
+                request_id,
+                account_id,
+                stream_id,
+                old_topic,
+                new_topic,
+                message_id,
+                propagation: match propagation {
+                    TopicPropagation::ChangeOne => CoreTopicPropagation::ChangeOne,
+                    TopicPropagation::ChangeAll => CoreTopicPropagation::ChangeAll,
+                },
+            });
+        }
+        Err(error) => emit_error(Some(request_id), error, event_sink),
+    }
+}
+
+fn normalize_topics(topics: &mut Vec<TopicSummary>) {
+    topics.sort_by(|left, right| {
+        left.stream_id
+            .cmp(&right.stream_id)
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| right.max_message_id.cmp(&left.max_message_id))
+    });
+    topics.dedup_by(|left, right| left.stream_id == right.stream_id && left.name == right.name);
+    topics.sort_by(|left, right| {
+        left.stream_id
+            .cmp(&right.stream_id)
+            .then_with(|| right.max_message_id.cmp(&left.max_message_id))
+            .then_with(|| left.name.cmp(&right.name))
+    });
 }
 
 async fn mark_read(
@@ -1259,8 +1435,8 @@ mod tests {
     };
 
     use super::{
-        CoreCommand, CoreConversationKey, CoreEvent, CoreEventSink, CoreSnapshot, RustCoreClient,
-        conversation_key_for_message,
+        CoreCommand, CoreConversationKey, CoreEvent, CoreEventSink, CoreSnapshot,
+        CoreTopicPropagation, RustCoreClient, conversation_key_for_message,
     };
     use zulip_core::{
         messages::{ConversationTarget, TopicSummary},
@@ -1484,6 +1660,88 @@ mod tests {
         }));
         assert!(observed.iter().any(|request| {
             request.starts_with("GET /api/v1/messages?") && request.contains("anchor=50")
+        }));
+    }
+
+    #[test]
+    fn actor_renames_topics_and_moves_one_message_with_correlated_events() {
+        let (server, requests) = spawn_topic_actor_mock();
+        let (signal_sender, signal_receiver) = mpsc::channel();
+        let sink = Arc::new(RecordingSink {
+            events: Mutex::new(Vec::new()),
+            notifier: Mutex::new(Some(signal_sender)),
+        });
+        let client = RustCoreClient::new(sink.clone());
+        client.submit(CoreCommand::StartApiKeySession {
+            request_id: 30,
+            account_id: "account-topic".to_owned(),
+            server_url: server,
+            email: "maya@example.com".to_owned(),
+            api_key: "fixture-key-do-not-log".to_owned(),
+        });
+        let _ = wait_for_event(&signal_receiver, &sink, |event| {
+            matches!(event, CoreEvent::SessionStarted { request_id: 30, .. })
+        });
+
+        client.submit(CoreCommand::RenameTopic {
+            request_id: 31,
+            key: CoreConversationKey::Topic {
+                account_id: "account-topic".to_owned(),
+                stream_id: 5,
+                topic: "macOS".to_owned(),
+            },
+            message_id: 50,
+            new_topic: "Native Mac".to_owned(),
+        });
+        let renamed = wait_for_event(&signal_receiver, &sink, |event| {
+            matches!(event, CoreEvent::TopicUpdated { request_id: 31, .. })
+        });
+        assert!(matches!(
+            renamed,
+            CoreEvent::TopicUpdated {
+                account_id,
+                stream_id: 5,
+                old_topic,
+                new_topic,
+                message_id: 50,
+                propagation: CoreTopicPropagation::ChangeAll,
+                ..
+            } if account_id == "account-topic"
+                && old_topic == "macOS"
+                && new_topic == "Native Mac"
+        ));
+
+        client.submit(CoreCommand::MoveMessageToTopic {
+            request_id: 32,
+            key: CoreConversationKey::Topic {
+                account_id: "account-topic".to_owned(),
+                stream_id: 5,
+                topic: "Native Mac".to_owned(),
+            },
+            message_id: 51,
+            new_topic: "UI polish".to_owned(),
+        });
+        let moved = wait_for_event(&signal_receiver, &sink, |event| {
+            matches!(event, CoreEvent::TopicUpdated { request_id: 32, .. })
+        });
+        assert!(matches!(
+            moved,
+            CoreEvent::TopicUpdated {
+                old_topic,
+                new_topic,
+                propagation: CoreTopicPropagation::ChangeOne,
+                ..
+            } if old_topic == "Native Mac" && new_topic == "UI polish"
+        ));
+
+        let observed = requests.try_iter().collect::<Vec<_>>();
+        assert!(observed.iter().any(|request| {
+            request.starts_with("PATCH /api/v1/messages/50 HTTP/1.1")
+                && request.contains("propagate_mode=change_all")
+        }));
+        assert!(observed.iter().any(|request| {
+            request.starts_with("PATCH /api/v1/messages/51 HTTP/1.1")
+                && request.contains("propagate_mode=change_one")
         }));
     }
 
@@ -1745,6 +2003,56 @@ mod tests {
                 stream
                     .write_all(response.as_bytes())
                     .expect("write response");
+            }
+        });
+        (format!("http://{address}/"), receiver)
+    }
+
+    fn spawn_topic_actor_mock() -> (String, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let address = listener.local_addr().expect("listener address");
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let mut updates = 0;
+            while updates < 2 {
+                let (mut stream, _) = listener.accept().expect("accept request");
+                let request = read_request(&mut stream);
+                let request_line = request.lines().next().unwrap_or_default();
+                let _ = sender.send(request.clone());
+                let body = if request_line.starts_with("GET /api/v1/users/me HTTP") {
+                    r#"{"result":"success","email":"maya@example.com","full_name":"Maya Chen","user_id":9}"#
+                } else if request_line.starts_with("POST /api/v1/register HTTP") {
+                    r##"{
+                        "result":"success",
+                        "queue_id":"queue-topic",
+                        "last_event_id":10,
+                        "event_queue_longpoll_timeout_seconds":5,
+                        "zulip_feature_level":481,
+                        "realm_users":[],
+                        "subscriptions":[{
+                            "stream_id":5,
+                            "name":"engineering",
+                            "color":"#76ce90",
+                            "is_muted":false
+                        }]
+                    }"##
+                } else if request_line.starts_with("GET /api/v1/users/me/5/topics?") {
+                    r#"{"result":"success","topics":[{"max_id":50,"name":"macOS"}]}"#
+                } else if request_line.starts_with("GET /api/v1/events?") {
+                    thread::sleep(Duration::from_millis(10));
+                    r#"{"result":"success","events":[{"id":11,"type":"heartbeat"}]}"#
+                } else if request_line.starts_with("PATCH /api/v1/messages/") {
+                    updates += 1;
+                    r#"{"result":"success"}"#
+                } else {
+                    panic!("unexpected request: {request_line}");
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
             }
         });
         (format!("http://{address}/"), receiver)

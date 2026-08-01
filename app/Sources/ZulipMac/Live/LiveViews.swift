@@ -170,6 +170,7 @@ private struct LiveWindowView: View {
     @State private var navigation: NavigationStore
     @State private var isMessageSearchPresented = false
     @State private var suppressedSelectionOpen: ConversationKey?
+    @State private var topicSheet: LiveTopicSheetContext?
 
     init(session: LiveSessionViewModel) {
         self.session = session
@@ -203,7 +204,13 @@ private struct LiveWindowView: View {
                         get: { navigation.selection },
                         set: { navigation.select($0) }
                     ),
-                    openCommandPalette: presentQuickSwitcher
+                    openCommandPalette: presentQuickSwitcher,
+                    startNewTopic: { channel in
+                        if !sidebarModel.isChannelExpanded(channel.streamID) {
+                            sidebarModel.toggleChannel(channel.streamID)
+                        }
+                        topicSheet = .new(channel: channel)
+                    }
                 )
             } content: {
                 liveConversation
@@ -269,10 +276,36 @@ private struct LiveWindowView: View {
             guard let snapshot = session.sidebarSnapshot else {
                 return
             }
-            sidebarModel.snapshot = snapshot
+            sidebarModel.replaceSnapshot(snapshot)
         }
         .onChange(of: session.navigationDirectory) {
             navigation.replaceDirectory(session.navigationDirectory)
+        }
+        .onChange(of: session.requestedTopicNavigation) {
+            guard let key = session.requestedTopicNavigation,
+                  let destination = session.navigationDirectory.destination(for: key)
+            else {
+                return
+            }
+            navigation.select(destination)
+            session.clearRequestedTopicNavigation()
+        }
+        .onChange(of: session.topicActionState) {
+            if session.topicActionState == .idle,
+               topicSheet?.isServerMutation == true
+            {
+                topicSheet = nil
+            }
+        }
+        .sheet(item: $topicSheet) { context in
+            LiveTopicActionSheet(
+                session: session,
+                context: context,
+                beginTopic: beginTopic,
+                dismiss: {
+                    topicSheet = nil
+                }
+            )
         }
     }
 
@@ -289,7 +322,11 @@ private struct LiveWindowView: View {
                 submitMessage: { content in
                     session.sendText(content, to: page.key)
                 },
-                openSearch: presentMessageSearch
+                openSearch: presentMessageSearch,
+                renameTopic: renameAction(for: page),
+                moveMessage: { message in
+                    topicSheet = .move(message: message)
+                }
             )
         case let .offline(page):
             ConversationSurface(
@@ -351,6 +388,234 @@ private struct LiveWindowView: View {
             suppressedSelectionOpen = nil
         }
         isMessageSearchPresented = false
+    }
+
+    private func renameAction(for page: ConversationPage) -> (() -> Void)? {
+        guard case .topic = page.key,
+              let anchor = page.messages.last(where: { $0.id > 0 })?.id
+        else {
+            return nil
+        }
+        return {
+            topicSheet = .rename(key: page.key, anchorMessageID: anchor)
+        }
+    }
+
+    private func beginTopic(_ streamID: Int64, _ name: String) {
+        guard let key = session.beginNewTopic(streamID: streamID, name: name),
+              let destination = session.navigationDirectory.destination(for: key)
+        else {
+            return
+        }
+        navigation.select(destination)
+        topicSheet = nil
+    }
+}
+
+private enum LiveTopicSheetContext: Identifiable {
+    case new(channel: ChannelSnapshot)
+    case rename(key: ConversationKey, anchorMessageID: Int64)
+    case move(message: MessageViewData)
+
+    var id: String {
+        switch self {
+        case let .new(channel):
+            "new-\(channel.streamID)"
+        case let .rename(key, anchorMessageID):
+            "rename-\(key)-\(anchorMessageID)"
+        case let .move(message):
+            "move-\(message.id)"
+        }
+    }
+
+    var isServerMutation: Bool {
+        switch self {
+        case .new:
+            false
+        case .rename, .move:
+            true
+        }
+    }
+}
+
+private struct LiveTopicActionSheet: View {
+    @Bindable var session: LiveSessionViewModel
+    let context: LiveTopicSheetContext
+    let beginTopic: (Int64, String) -> Void
+    let dismiss: () -> Void
+
+    @State private var topicName: String
+
+    init(
+        session: LiveSessionViewModel,
+        context: LiveTopicSheetContext,
+        beginTopic: @escaping (Int64, String) -> Void,
+        dismiss: @escaping () -> Void
+    ) {
+        self.session = session
+        self.context = context
+        self.beginTopic = beginTopic
+        self.dismiss = dismiss
+        switch context {
+        case .new:
+            _topicName = State(initialValue: "")
+        case let .rename(key, _):
+            if case let .topic(_, _, topic) = key {
+                _topicName = State(initialValue: topic)
+            } else {
+                _topicName = State(initialValue: "")
+            }
+        case .move:
+            _topicName = State(initialValue: "")
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppTheme.Spacing.large) {
+            VStack(alignment: .leading, spacing: AppTheme.Spacing.extraSmall) {
+                Text(title)
+                    .font(AppTheme.Typography.title)
+                Text(explanation)
+                    .font(AppTheme.Typography.metadata)
+                    .foregroundStyle(AppTheme.Colors.secondaryText)
+            }
+
+            TextField("Topic name", text: $topicName)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit(submit)
+
+            if !suggestions.isEmpty, case .move = context {
+                Menu("Choose an existing topic") {
+                    ForEach(suggestions) { topic in
+                        Button(topic.name.isEmpty ? "(no topic)" : topic.name) {
+                            topicName = topic.name
+                        }
+                    }
+                }
+            }
+
+            if case let .failed(_, message) = session.topicActionState,
+               context.isServerMutation
+            {
+                Label(message, systemImage: "exclamationmark.triangle")
+                    .font(AppTheme.Typography.metadata)
+                    .foregroundStyle(AppTheme.Colors.destructive)
+                Button("Retry last request") {
+                    session.retryTopicAction()
+                }
+            }
+
+            HStack {
+                Button("Cancel", action: dismiss)
+                    .keyboardShortcut(.cancelAction)
+                Spacer()
+                if isWorking {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+                Button(actionTitle, action: submit)
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(trimmedTopic.isEmpty || isWorking)
+            }
+        }
+        .padding(28)
+        .frame(width: 440)
+        .interactiveDismissDisabled(isWorking)
+    }
+
+    private var title: String {
+        switch context {
+        case let .new(channel):
+            "New topic in #\(channel.name)"
+        case .rename:
+            "Rename topic"
+        case .move:
+            "Move message to topic"
+        }
+    }
+
+    private var explanation: String {
+        switch context {
+        case .new:
+            "The topic is created on Zulip when you send its first message."
+        case .rename:
+            "Every message in the current topic will use the new name."
+        case .move:
+            "Only this message moves. Enter an existing or new topic name."
+        }
+    }
+
+    private var actionTitle: String {
+        switch context {
+        case .new:
+            "Start topic"
+        case .rename:
+            "Rename"
+        case .move:
+            "Move"
+        }
+    }
+
+    private var trimmedTopic: String {
+        topicName.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var isWorking: Bool {
+        if case .working = session.topicActionState {
+            return true
+        }
+        return false
+    }
+
+    private var suggestions: [TopicSnapshot] {
+        let streamID: Int64?
+        switch context {
+        case let .new(channel):
+            streamID = channel.streamID
+        case let .rename(key, _):
+            if case let .topic(_, value, _) = key {
+                streamID = value
+            } else {
+                streamID = nil
+            }
+        case let .move(message):
+            streamID = message.sourceStreamID
+        }
+        return session.sidebarSnapshot?.channels
+            .first(where: { $0.streamID == streamID })?
+            .topics
+            .filter { $0.name != currentTopic } ?? []
+    }
+
+    private var currentTopic: String? {
+        switch context {
+        case .new:
+            nil
+        case let .rename(key, _):
+            if case let .topic(_, _, topic) = key {
+                topic
+            } else {
+                nil
+            }
+        case let .move(message):
+            message.sourceTopic
+        }
+    }
+
+    private func submit() {
+        switch context {
+        case let .new(channel):
+            beginTopic(channel.streamID, trimmedTopic)
+        case let .rename(key, anchorMessageID):
+            _ = session.renameTopic(
+                key,
+                anchorMessageID: anchorMessageID,
+                newName: trimmedTopic
+            )
+        case let .move(message):
+            _ = session.moveMessage(message, to: trimmedTopic)
+        }
     }
 }
 

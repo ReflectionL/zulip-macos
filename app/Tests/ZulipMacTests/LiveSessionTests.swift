@@ -264,6 +264,129 @@ struct LiveSessionTests {
         }
     }
 
+    @Test("Topic drafts, rename, move, and retry keep correlated state")
+    func topicWorkflow() async throws {
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(
+            client: core,
+            credentialStore: MemoryCredentialStore()
+        )
+        model.startObserving()
+        let accountID = "account-1"
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: accountID),
+                credential: StoredAPICredential(accountID: accountID, apiKey: "key"),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.connectionState == .connected }
+
+        let draftKey = try #require(model.beginNewTopic(streamID: 5, name: " UI polish "))
+        #expect(
+            draftKey
+                == .topic(accountID: accountID, streamID: 5, topic: "UI polish")
+        )
+        #expect(
+            model.sidebarSnapshot?.channels.first?.topics
+                .contains(where: { $0.name == "UI polish" }) == true
+        )
+
+        let oldKey = ConversationKey.topic(
+            accountID: accountID,
+            streamID: 5,
+            topic: "macOS"
+        )
+        #expect(model.renameTopic(oldKey, anchorMessageID: 40, newName: "Native Mac"))
+        guard case let .renameTopic(renameID, renameKey, messageID, newTopic)
+            = core.commands.last
+        else {
+            Issue.record("Expected rename topic command")
+            return
+        }
+        #expect(renameKey == oldKey)
+        #expect(messageID == 40)
+        #expect(newTopic == "Native Mac")
+        core.emit(
+            .topicUpdated(
+                requestID: renameID,
+                update: LiveTopicUpdate(
+                    accountID: accountID,
+                    streamID: 5,
+                    oldTopic: "macOS",
+                    newTopic: "Native Mac",
+                    messageID: 40,
+                    propagation: .changeAll
+                )
+            )
+        )
+        await eventually {
+            model.topicActionState == .idle
+                && model.sidebarSnapshot?.channels.first?.topics
+                    .contains(where: { $0.name == "Native Mac" }) == true
+        }
+
+        let message = MessageViewData(
+            id: 40,
+            accountID: accountID,
+            conversationKey: oldKey,
+            senderID: 22,
+            senderName: "Theo Martin",
+            senderInitials: "TM",
+            timestamp: Date(timeIntervalSince1970: 1_700_000_000),
+            content: [.paragraph([.text("Move me")])],
+            isOwnMessage: false,
+            sourceStreamID: 5,
+            sourceTopic: "Native Mac"
+        )
+        #expect(model.moveMessage(message, to: "UI polish"))
+        guard case let .moveMessageToTopic(moveID, moveKey, movedID, destination)
+            = core.commands.last
+        else {
+            Issue.record("Expected move message command")
+            return
+        }
+        #expect(
+            moveKey
+                == .topic(
+                    accountID: accountID,
+                    streamID: 5,
+                    topic: "Native Mac"
+                )
+        )
+        #expect(movedID == 40)
+        #expect(destination == "UI polish")
+
+        core.emit(.failed(requestID: moveID, message: "temporary mock failure"))
+        await eventually {
+            if case .failed = model.topicActionState {
+                return true
+            }
+            return false
+        }
+        model.retryTopicAction()
+        guard case let .moveMessageToTopic(retryID, _, _, _) = core.commands.last else {
+            Issue.record("Expected retry command")
+            return
+        }
+        #expect(retryID != moveID)
+        core.emit(
+            .topicUpdated(
+                requestID: retryID,
+                update: LiveTopicUpdate(
+                    accountID: accountID,
+                    streamID: 5,
+                    oldTopic: "Native Mac",
+                    newTopic: "UI polish",
+                    messageID: 40,
+                    propagation: .changeOne
+                )
+            )
+        )
+        await eventually { model.topicActionState == .idle }
+    }
+
     @Test("Server search ignores stale responses and focuses the selected message")
     func messageSearchAndFocus() async throws {
         let core = RecordingCoreClient()

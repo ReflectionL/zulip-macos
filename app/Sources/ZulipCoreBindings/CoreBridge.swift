@@ -140,6 +140,36 @@ public struct LiveSearchResult: Equatable, Sendable {
     }
 }
 
+public enum LiveTopicPropagation: Equatable, Sendable {
+    case changeOne
+    case changeAll
+}
+
+public struct LiveTopicUpdate: Equatable, Sendable {
+    public let accountID: String
+    public let streamID: Int64
+    public let oldTopic: String
+    public let newTopic: String
+    public let messageID: Int64
+    public let propagation: LiveTopicPropagation
+
+    public init(
+        accountID: String,
+        streamID: Int64,
+        oldTopic: String,
+        newTopic: String,
+        messageID: Int64,
+        propagation: LiveTopicPropagation
+    ) {
+        self.accountID = accountID
+        self.streamID = streamID
+        self.oldTopic = oldTopic
+        self.newTopic = newTopic
+        self.messageID = messageID
+        self.propagation = propagation
+    }
+}
+
 /// Authenticated identity used by the live presentation layer.
 public struct LiveSessionIdentity: Equatable, Sendable {
     public let accountID: String
@@ -217,6 +247,18 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
         content: String,
         localID: String
     )
+    case renameTopic(
+        requestID: UInt64,
+        key: ConversationKey,
+        messageID: Int64,
+        newTopic: String
+    )
+    case moveMessageToTopic(
+        requestID: UInt64,
+        key: ConversationKey,
+        messageID: Int64,
+        newTopic: String
+    )
     case markRead(requestID: UInt64, accountID: String, messageIDs: [Int64])
     case disconnect(requestID: UInt64)
 
@@ -236,6 +278,8 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
              let .openMessage(requestID, _, _, _, _),
              let .sendChannelMessage(requestID, _, _, _, _, _),
              let .sendDirectMessage(requestID, _, _, _, _),
+             let .renameTopic(requestID, _, _, _),
+             let .moveMessageToTopic(requestID, _, _, _),
              let .markRead(requestID, _, _),
              let .disconnect(requestID):
             requestID
@@ -262,6 +306,10 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
             "BridgeCommand.sendChannelMessage"
         case .sendDirectMessage:
             "BridgeCommand.sendDirectMessage"
+        case .renameTopic:
+            "BridgeCommand.renameTopic"
+        case .moveMessageToTopic:
+            "BridgeCommand.moveMessageToTopic"
         case .markRead:
             "BridgeCommand.markRead"
         case .disconnect:
@@ -349,6 +397,20 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
                 content: content,
                 localId: localID
             )
+        case let .renameTopic(requestID, key, messageID, newTopic):
+            .renameTopic(
+                requestId: requestID,
+                key: try key.ffiValue(),
+                messageId: messageID,
+                newTopic: newTopic
+            )
+        case let .moveMessageToTopic(requestID, key, messageID, newTopic):
+            .moveMessageToTopic(
+                requestId: requestID,
+                key: try key.ffiValue(),
+                messageId: messageID,
+                newTopic: newTopic
+            )
         case let .markRead(requestID, accountID, messageIDs):
             .markRead(
                 requestId: requestID,
@@ -389,6 +451,7 @@ public enum BridgeEvent:
         page: LiveConversationPage
     )
     case messageSent(requestID: UInt64, localID: String, messageID: Int64)
+    case topicUpdated(requestID: UInt64, update: LiveTopicUpdate)
     case messagesMarkedRead(requestID: UInt64, messageIDs: [Int64])
     case retryScheduled(accountID: String, delayMilliseconds: UInt64)
     case disconnected(requestID: UInt64)
@@ -403,6 +466,7 @@ public enum BridgeEvent:
              let .searchCompleted(requestID, _, _),
              let .messageFocused(requestID, _, _),
              let .messageSent(requestID, _, _),
+             let .topicUpdated(requestID, _),
              let .messagesMarkedRead(requestID, _),
              let .disconnected(requestID):
             requestID
@@ -431,6 +495,8 @@ public enum BridgeEvent:
             "Message focused"
         case .messageSent:
             "Message sent"
+        case .topicUpdated:
+            "Topic updated"
         case .messagesMarkedRead:
             "Messages marked read"
         case .retryScheduled:
@@ -684,6 +750,26 @@ private extension BridgeEvent {
                 requestID: requestID,
                 localID: localID,
                 messageID: messageID
+            )
+        case let .topicUpdated(
+            requestID,
+            accountID,
+            streamID,
+            oldTopic,
+            newTopic,
+            messageID,
+            propagation
+        ):
+            self = .topicUpdated(
+                requestID: requestID,
+                update: LiveTopicUpdate(
+                    accountID: accountID,
+                    streamID: streamID,
+                    oldTopic: oldTopic,
+                    newTopic: newTopic,
+                    messageID: messageID,
+                    propagation: propagation == .changeAll ? .changeAll : .changeOne
+                )
             )
         case let .messagesMarkedRead(requestID, messageIDs):
             self = .messagesMarkedRead(

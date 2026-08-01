@@ -47,12 +47,37 @@ public struct QuickLinkSnapshot: Identifiable, Equatable, Sendable {
     }
 }
 
+public struct TopicSnapshot: Identifiable, Equatable, Sendable {
+    public struct ID: Hashable, Sendable {
+        public let streamID: Int64
+        public let name: String
+
+        public init(streamID: Int64, name: String) {
+            self.streamID = streamID
+            self.name = name
+        }
+    }
+
+    public let streamID: Int64
+    public let name: String
+    public let maxMessageID: Int64
+
+    public var id: ID { ID(streamID: streamID, name: name) }
+
+    public init(streamID: Int64, name: String, maxMessageID: Int64) {
+        self.streamID = streamID
+        self.name = name
+        self.maxMessageID = maxMessageID
+    }
+}
+
 public struct ChannelSnapshot: Identifiable, Equatable, Sendable {
     public let streamID: Int64
     public let name: String
     public let colorHex: String
     public let unreadCount: Int
     public let isMuted: Bool
+    public let topics: [TopicSnapshot]
 
     public var id: Int64 { streamID }
 
@@ -61,13 +86,15 @@ public struct ChannelSnapshot: Identifiable, Equatable, Sendable {
         name: String,
         colorHex: String,
         unreadCount: Int = 0,
-        isMuted: Bool = false
+        isMuted: Bool = false,
+        topics: [TopicSnapshot] = []
     ) {
         self.streamID = streamID
         self.name = name
         self.colorHex = colorHex
         self.unreadCount = unreadCount
         self.isMuted = isMuted
+        self.topics = topics
     }
 }
 
@@ -197,6 +224,8 @@ public struct MessageViewData: Identifiable, Equatable, Sendable {
     public let timestamp: Date
     public let content: [ContentBlock]
     public let isOwnMessage: Bool
+    public let sourceStreamID: Int64?
+    public let sourceTopic: String?
     public var isStarred: Bool
     public var reactionCount: Int
     public var deliveryState: MessageDeliveryState
@@ -211,6 +240,8 @@ public struct MessageViewData: Identifiable, Equatable, Sendable {
         timestamp: Date,
         content: [ContentBlock],
         isOwnMessage: Bool,
+        sourceStreamID: Int64? = nil,
+        sourceTopic: String? = nil,
         isStarred: Bool = false,
         reactionCount: Int = 0,
         deliveryState: MessageDeliveryState = .sent
@@ -224,6 +255,8 @@ public struct MessageViewData: Identifiable, Equatable, Sendable {
         self.timestamp = timestamp
         self.content = content
         self.isOwnMessage = isOwnMessage
+        self.sourceStreamID = sourceStreamID
+        self.sourceTopic = sourceTopic
         self.isStarred = isStarred
         self.reactionCount = reactionCount
         self.deliveryState = deliveryState
