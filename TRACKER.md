@@ -38,6 +38,7 @@ Last updated: 2026-08-01
 | MVP-005 | done | 2026-08-01 | 2026-08-01 | Added bounded browser-grade Rust fragment parsing and native recursive blocks for paragraphs, safe links, user mentions, Unicode/custom emoji, quotes, lists, code, Zulip image previews, and readable unsupported fallbacks. Executable tags and unsafe URL schemes are stripped; malformed, oversized, deep, or high-node-count input is safely recovered or capped. Replaced raw HTML in UniFFI/Swift snapshots with typed content and native plain-text search previews. `./scripts/check.sh` passes: 39 Rust core, 9 FFI, and 34 Swift tests, plus strict Clippy, formatting, generated bindings, and app build. Computer Use connected through the saved Keychain credential and verified a real Notification Bot message renders `@花海` and `#Zulip MacOS` as native text/link with no raw HTML tags. | — | — |
 | MVP-004 | done | 2026-08-01 | 2026-08-01 | Implemented 25 MiB multipart upload, server-normalized composer links, 32 MiB authenticated downloads, opaque account-partitioned atomic caching, original-image URL parsing, asynchronous FFI media tasks, a native file picker, visible retry state, composer insertion without auto-send, and off-main AppKit image decode. `./scripts/check.sh` passes with 45 Rust core, 10 FFI actor, and 37 Swift tests plus strict Clippy, binding regeneration, and app build. The designated Cloud account passed bounded PNG upload, disposable self-DM link send, server-rendered image parsing, authenticated download with exact byte validation, cache hit, and message/attachment-reference cleanup. | — | — |
 | MVP-004A | done | 2026-08-01 | 2026-08-01 | Tightened the sidebar into the titlebar safe area, moved conversation identity/actions into the released native toolbar position, relocated connect/disconnect to an accessible bottom-left gear menu, preserved native sidebar collapse, and removed the composer separator. Generated an original flat icon master, transparent-corner PNG, multi-resolution ICNS, Info.plist identity, package copy, and icon decode test. `./scripts/check.sh` passes with 45 Rust core, 10 FFI actor, and 40 Swift tests including light/dark shell renders. The ad-hoc signed bundle passed `plutil`, `codesign --verify --deep --strict`, running-app menu/layout/collapse smoke, and Finder icon inspection. | — | — |
+| MVP-004B | done | 2026-08-01 | 2026-08-01 | Restored the sidebar's titlebar safe area; replaced the macOS-generated glass sidebar toggle with one compact flat 13 pt control and a hover-only background; preserved mouse and `⌃⌘S` collapse/expand; restored the flat conversation breadcrumb; and forced search, topic actions, and details to the far-right group. `./scripts/check.sh` passes with 45 Rust core, 10 FFI actor, and 41 Swift tests, including a native-toolbar suppression regression test and light/dark shell renders. The ad-hoc packaged app passed real-account Inbox/topic visual smoke at 1348×768, 1081×721, and 824×612, with all three topic controls visible and no title/sidebar collision. | — | — |
 
 Later milestones remain defined in `PLAN.md` and will be added here when they
 become active; completed rows are never removed.
@@ -46,6 +47,19 @@ become active; completed rows are never removed.
 
 ### 2026-08-01
 
+- Closed `MVP-004B`. Fresh packaged-app screenshots, rather than accessibility
+  output alone, verified the corrected standard, compact, and near-minimum live
+  topic layouts. The sidebar control is now a single flat icon with hover-only
+  feedback; the breadcrumb is plain typography; and search, topic actions, and
+  details remain grouped at the far right. Mouse and `⌃⌘S` both collapse and
+  restore the sidebar. Full verification passes with 45 Rust core, 10 FFI, and
+  41 Swift tests; `MVP-006` is now ready.
+- Began `MVP-004B` after the user's screenshot review rejected the prior visual
+  result. Acceptance now explicitly requires fresh screenshots: traffic lights,
+  sidebar control, and workspace identity must not collide; the oversized glass
+  sidebar toggle must become a compact flat control; the breadcrumb must use its
+  original flat style without a glass capsule; conversation actions must sit at
+  the far right at both standard and compact widths.
 - Closed `MVP-004A`. The conversation path and its search/topic/detail actions
   now live in the native window toolbar where the former session button sat;
   the sidebar extends safely into the titlebar region with a 28 pt top inset.

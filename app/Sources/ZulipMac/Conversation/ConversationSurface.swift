@@ -435,6 +435,9 @@ private struct ConversationToolbarModifier: ViewModifier {
                         "\(subtitle), \(title)\(isOffline ? ", offline" : "")"
                     )
                 }
+                .sharedBackgroundVisibility(.hidden)
+
+                ToolbarSpacer(.flexible)
 
                 ToolbarItemGroup(placement: .primaryAction) {
                     if isOffline {

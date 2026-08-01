@@ -8,8 +8,7 @@ struct DesignTokenTests {
         #expect(AppTheme.Metrics.sidebarMinimum < AppTheme.Metrics.sidebarIdeal)
         #expect(AppTheme.Metrics.sidebarIdeal < AppTheme.Metrics.sidebarMaximum)
         #expect(AppTheme.Metrics.minimumWindowWidth > AppTheme.Metrics.sidebarMaximum)
-        #expect(AppTheme.Metrics.sidebarTopInset > AppTheme.Spacing.extraLarge)
-        #expect(AppTheme.Metrics.sidebarTopInset < AppTheme.Spacing.section)
+        #expect(AppTheme.Metrics.sidebarTopInset == AppTheme.Spacing.small)
     }
 
     @Test("Spacing follows a monotonic scale")
