@@ -6,7 +6,7 @@ Last updated: 2026-08-01
 
 - Milestone: MVP — daily use
 - Current step: none
-- Next step: `MVP-005` (`ready`)
+- Next step: `MVP-004` (`ready`)
 - Overall status: in progress
 
 ## Step Status
@@ -35,7 +35,7 @@ Last updated: 2026-08-01
 | MVP-002 | done | 2026-07-31 | 2026-07-31 | Added bounded server-side `search` narrows, immutable account-scoped result keys, anchored context loading, and correlated Rust actor events. Added a native search overlay with debouncing, loading/empty/error states, stale-response suppression, `⌘F`, result routing, viewport positioning, visible target highlighting, and live-refresh preservation. `./scripts/check.sh`: 32 Rust core tests, 6 FFI actor tests, 31 Swift tests, strict Clippy, formatting, builds, and docs pass. Real Cloud smoke searched a unique existing message, returned one result, opened its self-DM context, highlighted the target, and confirmed `⌘F` transfers focus from the composer to search. | — | — |
 | MVP-002A | done | 2026-07-31 | 2026-08-01 | Implemented inline expandable channel topics, validated new-topic drafts, whole-topic rename via `change_all`, single-message moves via `change_one`, correlated success/failure state, and retry. `./scripts/check.sh` passes: 33 Rust core, 7 FFI actor, and 33 Swift tests; the mock write smoke verifies both PATCH propagation modes. Computer Use verified real-account topic discovery/routing, independent channel collapse/expand, rename and move dialogs, existing-topic choices, and a local new-topic draft with an empty timeline/composer; no live write was submitted. | — | — |
 | MVP-003 | done | 2026-08-01 | 2026-08-01 | Added typed Rust edit/delete/reaction/read/star APIs, correlated UniFFI commands/events, server-derived flags/reactions, pending local sends, optimistic action state, failure rollback, explicit retry, native edit/delete/read actions, and an exact-target redacted live-action smoke. `./scripts/check.sh` passes with 34 Rust core, 8 FFI actor, and 34 Swift tests. The designated Cloud account passed disposable self-DM send, edit, reaction, star, unread/read, server reconciliation, and permanent deletion; prior disposable smoke data was also removed. | — | — |
-| MVP-005 | ready | — | — | Reprioritized native Zulip HTML parsing immediately after message actions at the user's request; dependency is now complete. | — | — |
+| MVP-005 | done | 2026-08-01 | 2026-08-01 | Added bounded browser-grade Rust fragment parsing and native recursive blocks for paragraphs, safe links, user mentions, Unicode/custom emoji, quotes, lists, code, Zulip image previews, and readable unsupported fallbacks. Executable tags and unsafe URL schemes are stripped; malformed, oversized, deep, or high-node-count input is safely recovered or capped. Replaced raw HTML in UniFFI/Swift snapshots with typed content and native plain-text search previews. `./scripts/check.sh` passes: 39 Rust core, 9 FFI, and 34 Swift tests, plus strict Clippy, formatting, generated bindings, and app build. Computer Use connected through the saved Keychain credential and verified a real Notification Bot message renders `@花海` and `#Zulip MacOS` as native text/link with no raw HTML tags. | — | — |
 
 Later milestones remain defined in `PLAN.md` and will be added here when they
 become active; completed rows are never removed.
@@ -44,6 +44,26 @@ become active; completed rows are never removed.
 
 ### 2026-08-01
 
+- Closed `MVP-005`: live messages now cross UniFFI only as sanitized native
+  content blocks; raw Zulip HTML no longer enters Swift snapshots or search
+  previews.
+- Added current Zulip-format coverage for span/image emoji, `codehilite`
+  language metadata, nested uploaded-image previews and dimensions, plus
+  malformed markup, unsafe schemes, executable tags, output limits, and every
+  recursive FFI block kind.
+- `./scripts/check.sh` passes with 39 Rust core tests, 9 FFI tests, and 34 Swift
+  tests, strict Clippy, formatting, binding regeneration, and the debug app
+  build.
+- In the running app, the designated Cloud account reconnected using its saved
+  Keychain API key. A real Notification Bot message displayed `@花海` and
+  `#Zulip MacOS` natively with an accessible channel hyperlink and no `<p>`,
+  `<a>`, or other raw HTML text. The smoke was read-only.
+- Marked `MVP-004` ready; authenticated media upload/download/cache is the next
+  step.
+- Began `MVP-005` after the independently verified and pushed `MVP-003`
+  changeset. The active scope is bounded Rust parsing, typed FFI blocks, native
+  Swift rendering, adversarial fallback behavior, and a running-app rich-message
+  smoke.
 - Closed `MVP-003`: real sends now use view-model-owned pending local echoes;
   edits, deletes, `thumbs_up` reactions, stars, and read/unread writes cross the
   typed actor boundary with correlated success or sanitized failure. Optimistic
@@ -250,8 +270,9 @@ become active; completed rows are never removed.
   conditional for the beta release.
 - `REL-005` must pass one real standard HTTPS self-hosted smoke target before
   a GitHub Beta can be published; the Zulip Cloud target already passes.
-- Live message bodies currently display inert server HTML text; native
-  sanitized `ContentBlock` parsing remains scheduled for `MVP-005`.
+- Uploaded/external image references are sanitized into native image blocks,
+  but the live timeline intentionally shows a non-fetching placeholder until
+  `MVP-004` adds authenticated, account-isolated media loading and caching.
 
 ## Open Decisions
 

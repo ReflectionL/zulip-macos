@@ -14,8 +14,10 @@ rust-version = "1.95"
 
 [workspace.dependencies]
 futures-util = { version = "=0.3.32", default-features = false, features = ["std"] }
+ego-tree = "0.11.0"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "stream"] }
 rusqlite = { version = "0.40.1", features = ["bundled"] }
+scraper = { version = "0.27.0", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

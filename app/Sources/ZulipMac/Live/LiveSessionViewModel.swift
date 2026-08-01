@@ -860,7 +860,7 @@ final class LiveSessionViewModel {
                 senderName: message.senderFullName,
                 senderInitials: Self.initials(for: message.senderFullName),
                 timestamp: message.timestamp,
-                content: [.paragraph([.text(message.contentHTML)])],
+                content: message.content,
                 isOwnMessage: message.senderID == identity?.userID,
                 sourceStreamID: message.streamID,
                 sourceTopic: message.topic,
@@ -1110,7 +1110,9 @@ final class LiveSessionViewModel {
             messageID: result.message.messageID,
             senderName: result.message.senderFullName,
             timestamp: result.message.timestamp,
-            contentPreview: result.message.contentHTML,
+            contentPreview: result.message.content
+                .map(\.plainText)
+                .joined(separator: "\n"),
             title: title,
             subtitle: subtitle,
             systemImage: systemImage

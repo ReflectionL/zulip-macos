@@ -1,6 +1,7 @@
 #![doc = "Domain core for the native Zulip macOS client."]
 
 pub mod auth;
+pub mod content;
 pub mod database;
 pub mod messages;
 pub mod server;

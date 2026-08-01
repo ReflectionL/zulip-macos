@@ -154,7 +154,7 @@ struct LiveSessionTests {
                             senderID: 22,
                             senderFullName: "Theo Martin",
                             timestamp: Date(timeIntervalSince1970: 1_700_000_000),
-                            contentHTML: "<p>Hello <strong>world</strong></p>",
+                            content: [.paragraph([.text("Hello "), .text("world")])],
                             streamID: 5,
                             topic: "macOS",
                             recipientIDs: []
@@ -167,8 +167,7 @@ struct LiveSessionTests {
         )
         await eventually {
             if case let .loaded(page) = model.conversationState {
-                return page.messages.first?.plainText
-                    == "<p>Hello <strong>world</strong></p>"
+                return page.messages.first?.plainText == "Hello world"
             }
             return false
         }
@@ -245,7 +244,7 @@ struct LiveSessionTests {
                             senderID: 22,
                             senderFullName: "Theo Martin",
                             timestamp: Date(timeIntervalSince1970: 1_699_999_900),
-                            contentHTML: "<p>Earlier</p>",
+                            content: [.paragraph([.text("Earlier")])],
                             streamID: 5,
                             topic: "macOS",
                             recipientIDs: []
@@ -255,7 +254,7 @@ struct LiveSessionTests {
                             senderID: 22,
                             senderFullName: "Theo Martin",
                             timestamp: Date(timeIntervalSince1970: 1_700_000_000),
-                            contentHTML: "<p>Hello <strong>world</strong></p>",
+                            content: [.paragraph([.text("Hello world")])],
                             streamID: 5,
                             topic: "macOS",
                             recipientIDs: []
@@ -311,7 +310,7 @@ struct LiveSessionTests {
                             senderID: 9,
                             senderFullName: "Maya Chen",
                             timestamp: Date(timeIntervalSince1970: 1_700_000_000),
-                            contentHTML: "Original",
+                            content: [.paragraph([.text("Original")])],
                             streamID: 5,
                             topic: "macOS",
                             recipientIDs: [],
@@ -601,7 +600,7 @@ struct LiveSessionTests {
             senderID: 22,
             senderFullName: "Theo Martin",
             timestamp: Date(timeIntervalSince1970: 1_700_000_050),
-            contentHTML: "<p>Second query result</p>",
+            content: [.paragraph([.text("Second query result")])],
             streamID: 5,
             topic: "Search topic",
             recipientIDs: []
@@ -622,6 +621,7 @@ struct LiveSessionTests {
                     && results.count == 1
                     && results.first?.accountID == accountID
                     && results.first?.conversationKey == key
+                    && results.first?.contentPreview == "Second query result"
                     && results.first?.title == "Search topic"
                     && results.first?.subtitle == "#engineering"
             }
@@ -685,7 +685,7 @@ struct LiveSessionTests {
             senderID: 9,
             senderFullName: "Maya Chen",
             timestamp: Date(timeIntervalSince1970: 1_700_000_051),
-            contentHTML: "<p>Newer message</p>",
+            content: [.paragraph([.text("Newer message")])],
             streamID: 5,
             topic: "Search topic",
             recipientIDs: []
@@ -751,7 +751,7 @@ struct LiveSessionTests {
                     senderID: 22,
                     senderFullName: "Theo Martin",
                     timestamp: Date(timeIntervalSince1970: 1_700_000_000),
-                    contentHTML: "<p>Initial</p>",
+                    content: [.paragraph([.text("Initial")])],
                     streamID: 5,
                     topic: "macOS",
                     recipientIDs: []

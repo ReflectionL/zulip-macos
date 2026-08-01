@@ -10,6 +10,9 @@ use tokio::{
 };
 use zulip_core::{
     auth::{AuthenticatedAccount, AuthenticationClient, SecretString},
+    content::{
+        ContentBlock as NativeContentBlock, InlineContent as NativeInlineContent, parse_zulip_html,
+    },
     messages::{
         ConversationTarget, MessageClient, MessageFlag, MessageWriteOperation, OutgoingMessage,
         TopicPropagation, TopicSummary,
@@ -402,8 +405,8 @@ pub struct CoreMessage {
     pub sender_full_name: String,
     /// Unix timestamp in seconds.
     pub timestamp: i64,
-    /// Untrusted rendered Zulip HTML for Rust content normalization.
-    pub content_html: String,
+    /// Sanitized native content parsed by Rust from rendered Zulip HTML.
+    pub content: Vec<CoreContentBlock>,
     /// Channel identifier for channel messages.
     pub stream_id: Option<i64>,
     /// Topic name for channel messages.
@@ -414,6 +417,89 @@ pub struct CoreMessage {
     pub flags: Vec<String>,
     /// Reactions currently attached to the message.
     pub reactions: Vec<CoreReaction>,
+}
+
+/// Sanitized inline content crossing the application bridge.
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum CoreInlineContent {
+    /// Plain display text.
+    Text {
+        /// Text value.
+        value: String,
+    },
+    /// A safe native link.
+    Link {
+        /// Visible label.
+        label: String,
+        /// Sanitized destination.
+        url: String,
+    },
+    /// A Zulip user mention.
+    Mention {
+        /// Display name without Zulip markup.
+        display_name: String,
+        /// Zulip user identifier.
+        user_id: i64,
+    },
+    /// A rendered emoji or readable custom-emoji placeholder.
+    Emoji {
+        /// Stable Zulip emoji name.
+        name: String,
+        /// Readable fallback value.
+        value: String,
+    },
+}
+
+/// One list item containing recursively nested native blocks.
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct CoreContentListItem {
+    /// Blocks within this item.
+    pub blocks: Vec<CoreContentBlock>,
+}
+
+/// Sanitized native block content crossing the application bridge.
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum CoreContentBlock {
+    /// Paragraph or heading content.
+    Paragraph {
+        /// Inline values in display order.
+        content: Vec<CoreInlineContent>,
+    },
+    /// Nested quotation.
+    Quote {
+        /// Quoted blocks.
+        blocks: Vec<CoreContentBlock>,
+    },
+    /// Ordered or unordered list.
+    List {
+        /// List items.
+        items: Vec<CoreContentListItem>,
+        /// Numeric instead of bullet markers.
+        ordered: bool,
+    },
+    /// Preformatted code.
+    Code {
+        /// Optional language hint.
+        language: Option<String>,
+        /// Exact readable code value.
+        value: String,
+    },
+    /// Safe image reference awaiting account-aware media loading.
+    Image {
+        /// Sanitized source.
+        url: String,
+        /// Alternative text.
+        alt: String,
+        /// Optional width hint.
+        width: Option<u32>,
+        /// Optional height hint.
+        height: Option<u32>,
+    },
+    /// Readable unsupported/unsafe fallback.
+    Unsupported {
+        /// Sanitized summary.
+        summary: String,
+    },
 }
 
 /// One reaction attached to a bridge message.
@@ -1679,12 +1765,16 @@ impl From<UserSummary> for CoreUser {
 
 impl From<MessageSummary> for CoreMessage {
     fn from(message: MessageSummary) -> Self {
+        let content = parse_zulip_html(&message.content_html)
+            .into_iter()
+            .map(CoreContentBlock::from)
+            .collect();
         Self {
             message_id: message.id,
             sender_id: message.sender_id,
             sender_full_name: message.sender_full_name,
             timestamp: message.timestamp,
-            content_html: message.content_html,
+            content,
             stream_id: message.stream_id,
             topic: message.topic,
             recipient_ids: message.recipient_ids,
@@ -1697,6 +1787,58 @@ impl From<MessageSummary> for CoreMessage {
                     user_id: reaction.user_id,
                 })
                 .collect(),
+        }
+    }
+}
+
+impl From<NativeInlineContent> for CoreInlineContent {
+    fn from(content: NativeInlineContent) -> Self {
+        match content {
+            NativeInlineContent::Text(value) => Self::Text { value },
+            NativeInlineContent::Link { label, url } => Self::Link { label, url },
+            NativeInlineContent::Mention {
+                display_name,
+                user_id,
+            } => Self::Mention {
+                display_name,
+                user_id,
+            },
+            NativeInlineContent::Emoji { name, value } => Self::Emoji { name, value },
+        }
+    }
+}
+
+impl From<NativeContentBlock> for CoreContentBlock {
+    fn from(block: NativeContentBlock) -> Self {
+        match block {
+            NativeContentBlock::Paragraph(content) => Self::Paragraph {
+                content: content.into_iter().map(CoreInlineContent::from).collect(),
+            },
+            NativeContentBlock::Quote(blocks) => Self::Quote {
+                blocks: blocks.into_iter().map(Self::from).collect(),
+            },
+            NativeContentBlock::List { items, ordered } => Self::List {
+                items: items
+                    .into_iter()
+                    .map(|blocks| CoreContentListItem {
+                        blocks: blocks.into_iter().map(Self::from).collect(),
+                    })
+                    .collect(),
+                ordered,
+            },
+            NativeContentBlock::Code { language, value } => Self::Code { language, value },
+            NativeContentBlock::Image {
+                url,
+                alt,
+                width,
+                height,
+            } => Self::Image {
+                url,
+                alt,
+                width,
+                height,
+            },
+            NativeContentBlock::Unsupported { summary } => Self::Unsupported { summary },
         }
     }
 }
@@ -1744,8 +1886,9 @@ mod tests {
     };
 
     use super::{
-        CoreCommand, CoreConversationKey, CoreEvent, CoreEventSink, CoreMessageFlag, CoreSnapshot,
-        CoreTopicPropagation, RustCoreClient, conversation_key_for_message,
+        CoreCommand, CoreContentBlock, CoreConversationKey, CoreEvent, CoreEventSink,
+        CoreInlineContent, CoreMessage, CoreMessageFlag, CoreSnapshot, CoreTopicPropagation,
+        RustCoreClient, conversation_key_for_message,
     };
     use zulip_core::{
         messages::{ConversationTarget, TopicSummary},
@@ -1893,6 +2036,89 @@ mod tests {
                 recipient_ids: vec![9],
             }
         );
+    }
+
+    #[test]
+    fn message_content_maps_to_sanitized_typed_blocks() {
+        let message = MessageSummary {
+            id: 42,
+            sender_id: 9,
+            sender_full_name: "Maya Chen".to_owned(),
+            timestamp: 1_770_000_000,
+            content_html: r#"<p>Hello <a href="https://zulip.com">Zulip</a>
+                <span class="user-mention" data-user-id="42">@Maya</span>
+                <span class="emoji emoji-1f44b" title="wave">:wave:</span>
+                <a href="javascript:alert(1)">unsafe label</a></p>
+                <blockquote><p>Quoted</p></blockquote>
+                <ul><li>First</li></ul>
+                <div class="codehilite" data-code-language="rust"><pre>fn main() {}</pre></div>
+                <div class="message_inline_image"><img src="/user_uploads/image.png"
+                    alt="Preview" data-original-dimensions="640x360"></div>
+                <script>unsafe()</script>"#
+                .to_owned(),
+            stream_id: Some(5),
+            topic: Some("Rust core".to_owned()),
+            recipient_ids: Vec::new(),
+            flags: vec!["read".to_owned()],
+            reactions: Vec::new(),
+        };
+
+        let mapped = CoreMessage::from(message);
+        let CoreContentBlock::Paragraph { content } = &mapped.content[0] else {
+            panic!("expected a paragraph, got {:?}", mapped.content);
+        };
+        assert!(content.iter().any(|item| matches!(
+            item,
+            CoreInlineContent::Link { label, url }
+                if label == "Zulip" && url == "https://zulip.com"
+        )));
+        assert!(content.iter().any(|item| matches!(
+            item,
+            CoreInlineContent::Mention { display_name, user_id: 42 }
+                if display_name == "Maya"
+        )));
+        assert!(content.iter().any(|item| matches!(
+            item,
+            CoreInlineContent::Emoji { name, value }
+                if name == "wave" && value == ":wave:"
+        )));
+        assert!(content.iter().any(|item| matches!(
+            item,
+            CoreInlineContent::Text { value } if value.contains("unsafe label")
+        )));
+        assert!(
+            mapped
+                .content
+                .iter()
+                .any(|block| matches!(block, CoreContentBlock::Quote { .. }))
+        );
+        assert!(
+            mapped
+                .content
+                .iter()
+                .any(|block| matches!(block, CoreContentBlock::List { .. }))
+        );
+        assert!(mapped.content.iter().any(|block| matches!(
+            block,
+            CoreContentBlock::Code { language: Some(language), value }
+                if language == "rust" && value == "fn main() {}"
+        )));
+        assert!(mapped.content.iter().any(|block| matches!(
+            block,
+            CoreContentBlock::Image {
+                url,
+                alt,
+                width: Some(640),
+                height: Some(360),
+            } if url == "/user_uploads/image.png" && alt == "Preview"
+        )));
+        assert!(
+            mapped
+                .content
+                .iter()
+                .any(|block| matches!(block, CoreContentBlock::Unsupported { .. }))
+        );
+        assert!(!format!("{:?}", mapped.content).contains("javascript:"));
     }
 
     #[test]

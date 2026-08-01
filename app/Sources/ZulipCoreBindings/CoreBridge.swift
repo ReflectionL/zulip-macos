@@ -51,13 +51,13 @@ public struct LiveTopicSnapshot: Equatable, Sendable {
     }
 }
 
-/// A normalized live message whose untrusted HTML still requires Rust content parsing.
+/// A live message whose untrusted HTML has already been normalized by Rust.
 public struct LiveMessageSnapshot: Equatable, Sendable {
     public let messageID: Int64
     public let senderID: Int64
     public let senderFullName: String
     public let timestamp: Date
-    public let contentHTML: String
+    public let content: [ContentBlock]
     public let streamID: Int64?
     public let topic: String?
     public let recipientIDs: [Int64]
@@ -69,7 +69,7 @@ public struct LiveMessageSnapshot: Equatable, Sendable {
         senderID: Int64,
         senderFullName: String,
         timestamp: Date,
-        contentHTML: String,
+        content: [ContentBlock],
         streamID: Int64?,
         topic: String?,
         recipientIDs: [Int64],
@@ -80,7 +80,7 @@ public struct LiveMessageSnapshot: Equatable, Sendable {
         self.senderID = senderID
         self.senderFullName = senderFullName
         self.timestamp = timestamp
-        self.contentHTML = contentHTML
+        self.content = content
         self.streamID = streamID
         self.topic = topic
         self.recipientIDs = recipientIDs
@@ -774,13 +774,55 @@ private extension LiveMessageSnapshot {
         senderID = message.senderId
         senderFullName = message.senderFullName
         timestamp = Date(timeIntervalSince1970: TimeInterval(message.timestamp))
-        contentHTML = message.contentHtml
+        content = message.content.map(ContentBlock.init)
         streamID = message.streamId
         topic = message.topic
         recipientIDs = message.recipientIds
         flags = message.flags
         reactions = message.reactions.map {
             LiveReactionSnapshot(emojiName: $0.emojiName, userID: $0.userId)
+        }
+    }
+}
+
+private extension InlineContent {
+    init(_ content: CoreInlineContent) {
+        switch content {
+        case let .text(value):
+            self = .text(value)
+        case let .link(label, url):
+            self = .link(label: label, url: url)
+        case let .mention(displayName, userID):
+            self = .mention(displayName: displayName, userID: userID)
+        case let .emoji(name, value):
+            self = .emoji(name: name, value: value)
+        }
+    }
+}
+
+private extension ContentBlock {
+    init(_ block: CoreContentBlock) {
+        switch block {
+        case let .paragraph(content):
+            self = .paragraph(content.map(InlineContent.init))
+        case let .quote(blocks):
+            self = .quote(blocks.map(ContentBlock.init))
+        case let .list(items, ordered):
+            self = .list(
+                items: items.map { $0.blocks.map(ContentBlock.init) },
+                ordered: ordered
+            )
+        case let .code(language, value):
+            self = .code(language: language, value: value)
+        case let .image(url, alt, width, height):
+            self = .image(
+                url: url,
+                alt: alt,
+                width: width.map(Int.init),
+                height: height.map(Int.init)
+            )
+        case let .unsupported(summary):
+            self = .unsupported(summary: summary)
         }
     }
 }
