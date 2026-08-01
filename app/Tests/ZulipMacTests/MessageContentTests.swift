@@ -1,3 +1,5 @@
+import AppKit
+import Foundation
 import SwiftUI
 import Testing
 import ZulipCoreBindings
@@ -40,5 +42,23 @@ struct MessageContentTests {
         #expect(darkRenderer.nsImage?.size.width == 672)
         #expect((lightRenderer.nsImage?.size.height ?? 0) > 400)
         #expect((darkRenderer.nsImage?.size.height ?? 0) > 400)
+    }
+
+    @Test("Cache-owned file URLs decode natively off the main actor")
+    @MainActor
+    func nativeImageDecode() async throws {
+        let png = try #require(
+            Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+        )
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("zulip-native-image-\(UUID().uuidString).png")
+        try png.write(to: fileURL, options: .atomic)
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+
+        let decoded = await NativeImageDecoder.load(fileURL)
+        #expect(decoded.image != nil)
+        #expect(decoded.image?.size.width == 1)
+        let rejected = await NativeImageDecoder.load(URL(string: "https://example.com/a.png")!)
+        #expect(rejected.image == nil)
     }
 }

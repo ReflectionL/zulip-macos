@@ -200,6 +200,9 @@ struct LiveSessionTests {
         #expect(streamID == 5)
         #expect(topic == "macOS")
         #expect(content == "A reply")
+        let refreshCountBeforeSendCompletion = core.commands.filter {
+            if case .openConversation = $0 { true } else { false }
+        }.count
         core.emit(
             .messageSent(
                 requestID: sendRequestID,
@@ -209,7 +212,11 @@ struct LiveSessionTests {
         )
         await eventually {
             guard case let .loaded(page) = model.conversationState else { return false }
+            let refreshCount = core.commands.filter {
+                if case .openConversation = $0 { true } else { false }
+            }.count
             return page.messages.allSatisfy { $0.deliveryState == .sent }
+                && refreshCount > refreshCountBeforeSendCompletion
         }
 
         model.loadOlderMessages(for: key)
@@ -273,6 +280,145 @@ struct LiveSessionTests {
                 && page.beforeCursor == nil
                 && !model.isLoadingOlderMessages
         }
+    }
+
+    @Test("Attachment upload inserts Markdown without sending and remains retryable")
+    func attachmentUploadState() async throws {
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(
+            client: core,
+            credentialStore: MemoryCredentialStore()
+        )
+        model.startObserving()
+        let accountID = "account-media"
+        let key = ConversationKey.topic(
+            accountID: accountID,
+            streamID: 5,
+            topic: "macOS"
+        )
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: accountID),
+                credential: StoredAPICredential(accountID: accountID, apiKey: "key"),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.connectionState == .connected }
+        model.openConversation(key)
+
+        let fileURL = URL(fileURLWithPath: "/tmp/fixture image.png")
+        model.uploadAttachment(fileURL, to: key)
+        let upload = try #require(core.commands.last {
+            if case .uploadAttachment = $0 { true } else { false }
+        })
+        guard case let .uploadAttachment(
+            uploadID,
+            commandAccountID,
+            localPath,
+            filename
+        ) = upload else {
+            Issue.record("Expected upload command")
+            return
+        }
+        #expect(commandAccountID == accountID)
+        #expect(localPath == "/tmp/fixture image.png")
+        #expect(filename == "fixture image.png")
+        #expect(model.attachmentUploadState == .uploading(filename: filename))
+
+        core.emit(
+            .attachmentUploaded(
+                requestID: uploadID,
+                attachment: LiveUploadedAttachment(
+                    accountID: accountID,
+                    filename: filename,
+                    url: "/user_uploads/1/ab/fixture.png",
+                    markdown: "[fixture image.png](/user_uploads/1/ab/fixture.png)"
+                )
+            )
+        )
+        await eventually { model.attachmentInsertion?.id == uploadID }
+        #expect(model.attachmentInsertion?.key == key)
+        #expect(
+            model.attachmentInsertion?.markdown
+                == "[fixture image.png](/user_uploads/1/ab/fixture.png)"
+        )
+        #expect(!core.commands.contains { if case .sendChannelMessage = $0 { true } else { false } })
+        model.consumeAttachmentInsertion(id: uploadID)
+        #expect(model.attachmentInsertion == nil)
+
+        model.uploadAttachment(fileURL, to: key)
+        guard case let .uploadAttachment(failedID, _, _, _) = core.commands.last else {
+            Issue.record("Expected second upload command")
+            return
+        }
+        core.emit(.failed(requestID: failedID, message: "fixture upload failure"))
+        await eventually {
+            model.attachmentUploadState
+                == .failed(filename: filename, message: "fixture upload failure")
+        }
+        model.retryAttachmentUpload()
+        #expect(model.attachmentUploadState == .uploading(filename: filename))
+        #expect(core.commands.filter { if case .uploadAttachment = $0 { true } else { false } }.count == 3)
+    }
+
+    @Test("Media requests deduplicate, cache local URLs, and retry failures")
+    func mediaState() async throws {
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(
+            client: core,
+            credentialStore: MemoryCredentialStore()
+        )
+        model.startObserving()
+        let accountID = "account-media"
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: accountID),
+                credential: StoredAPICredential(accountID: accountID, apiKey: "key"),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.connectionState == .connected }
+
+        let remoteURL = "/user_uploads/1/ab/image.png"
+        model.loadMedia(remoteURL)
+        model.loadMedia(remoteURL)
+        let requests = core.commands.filter { if case .loadMedia = $0 { true } else { false } }
+        #expect(requests.count == 1)
+        guard case let .loadMedia(requestID, commandAccountID, requestedURL) = requests[0] else {
+            Issue.record("Expected media request")
+            return
+        }
+        #expect(commandAccountID == accountID)
+        #expect(requestedURL == remoteURL)
+        core.emit(
+            .mediaReady(
+                requestID: requestID,
+                media: LiveCachedMedia(
+                    accountID: accountID,
+                    remoteURL: remoteURL,
+                    localURL: "file:///tmp/private-cache.media",
+                    contentType: "image/png",
+                    byteCount: 12,
+                    cacheHit: false
+                )
+            )
+        )
+        await eventually { model.mediaLocalURLs[remoteURL] != nil }
+        #expect(model.mediaLocalURLs[remoteURL] == "file:///tmp/private-cache.media")
+
+        let failedURL = "/user_uploads/1/ab/missing.png"
+        model.loadMedia(failedURL)
+        guard case let .loadMedia(failedID, _, _) = core.commands.last else {
+            Issue.record("Expected failing media request")
+            return
+        }
+        core.emit(.failed(requestID: failedID, message: "fixture media failure"))
+        await eventually { model.mediaFailures[failedURL] == "fixture media failure" }
+        model.retryMedia(failedURL)
+        #expect(model.mediaFailures[failedURL] == nil)
+        #expect(core.commands.filter { if case .loadMedia = $0 { true } else { false } }.count == 3)
     }
 
     @Test("Message actions expose pending, rollback, retry, and success states")

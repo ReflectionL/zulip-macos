@@ -70,6 +70,23 @@ enum TopicActionState: Equatable, Sendable {
     case failed(action: TopicAction, message: String)
 }
 
+enum AttachmentUploadState: Equatable, Sendable {
+    case idle
+    case uploading(filename: String)
+    case failed(filename: String, message: String)
+
+    var isUploading: Bool {
+        if case .uploading = self { true } else { false }
+    }
+}
+
+struct ComposerAttachmentInsertion: Equatable, Sendable {
+    let id: UInt64
+    let key: ConversationKey
+    let filename: String
+    let markdown: String
+}
+
 private enum MessageAction: Equatable, Sendable {
     case edit(messageID: Int64, content: String)
     case delete(messageID: Int64)
@@ -108,6 +125,22 @@ private struct PendingSend: Sendable {
     let localMessageID: Int64
 }
 
+private struct PendingAttachmentUpload: Sendable {
+    let key: ConversationKey
+    let fileURL: URL
+    let filename: String
+    let accessedSecurityScope: Bool
+
+    func withoutSecurityScope() -> Self {
+        Self(
+            key: key,
+            fileURL: fileURL,
+            filename: filename,
+            accessedSecurityScope: false
+        )
+    }
+}
+
 @MainActor
 @Observable
 final class LiveSessionViewModel {
@@ -133,6 +166,10 @@ final class LiveSessionViewModel {
     private(set) var messageSearchState = MessageSearchState.idle
     private(set) var topicActionState = TopicActionState.idle
     private(set) var requestedTopicNavigation: ConversationKey?
+    private(set) var attachmentUploadState = AttachmentUploadState.idle
+    private(set) var attachmentInsertion: ComposerAttachmentInsertion?
+    private(set) var mediaLocalURLs: [String: String] = [:]
+    private(set) var mediaFailures: [String: String] = [:]
 
     @ObservationIgnored private let client: any CoreClientProtocol
     @ObservationIgnored private let credentialStore: any CredentialStore
@@ -150,6 +187,10 @@ final class LiveSessionViewModel {
     private var failedMessageActions: [Int64: MessageAction] = [:]
     private var sendsByRequestID: [UInt64: PendingSend] = [:]
     private var failedSends: [Int64: PendingSend] = [:]
+    private var attachmentUploadsByRequestID: [UInt64: PendingAttachmentUpload] = [:]
+    private var failedAttachmentUpload: PendingAttachmentUpload?
+    private var mediaRequestsByRequestID: [UInt64: String] = [:]
+    private var pendingMediaURLs = Set<String>()
     private var knownTopics: [ConversationKey: LiveTopicSnapshot] = [:]
 
     init(
@@ -560,6 +601,80 @@ final class LiveSessionViewModel {
         }
     }
 
+    func uploadAttachment(_ fileURL: URL, to key: ConversationKey) {
+        guard let identity,
+              identity.accountID == key.accountID,
+              activeSelection == key,
+              fileURL.isFileURL,
+              !attachmentUploadState.isUploading
+        else {
+            notice = "Connect to a conversation before adding an attachment."
+            return
+        }
+        let filename = fileURL.lastPathComponent
+        guard !filename.isEmpty else {
+            attachmentUploadState = .failed(
+                filename: "Attachment",
+                message: "The selected file has no usable name."
+            )
+            return
+        }
+
+        let accessedSecurityScope = fileURL.startAccessingSecurityScopedResource()
+        let pending = PendingAttachmentUpload(
+            key: key,
+            fileURL: fileURL,
+            filename: filename,
+            accessedSecurityScope: accessedSecurityScope
+        )
+        let id = nextRequestID()
+        attachmentUploadsByRequestID[id] = pending
+        failedAttachmentUpload = nil
+        attachmentUploadState = .uploading(filename: filename)
+        client.submit(
+            .uploadAttachment(
+                requestID: id,
+                accountID: identity.accountID,
+                localPath: fileURL.path,
+                filename: filename
+            )
+        )
+    }
+
+    func retryAttachmentUpload() {
+        guard let failedAttachmentUpload else { return }
+        uploadAttachment(failedAttachmentUpload.fileURL, to: failedAttachmentUpload.key)
+    }
+
+    func consumeAttachmentInsertion(id: UInt64) {
+        guard attachmentInsertion?.id == id else { return }
+        attachmentInsertion = nil
+    }
+
+    func loadMedia(_ remoteURL: String) {
+        guard let identity,
+              !remoteURL.isEmpty,
+              mediaLocalURLs[remoteURL] == nil,
+              !pendingMediaURLs.contains(remoteURL)
+        else { return }
+        let id = nextRequestID()
+        pendingMediaURLs.insert(remoteURL)
+        mediaRequestsByRequestID[id] = remoteURL
+        mediaFailures.removeValue(forKey: remoteURL)
+        client.submit(
+            .loadMedia(
+                requestID: id,
+                accountID: identity.accountID,
+                remoteURL: remoteURL
+            )
+        )
+    }
+
+    func retryMedia(_ remoteURL: String) {
+        mediaFailures.removeValue(forKey: remoteURL)
+        loadMedia(remoteURL)
+    }
+
     func disconnect() {
         client.submit(.disconnect(requestID: nextRequestID()))
     }
@@ -677,6 +792,31 @@ final class LiveSessionViewModel {
                 refreshConversation(activeSelection)
             }
 
+        case let .attachmentUploaded(requestID, attachment):
+            guard let pending = attachmentUploadsByRequestID.removeValue(forKey: requestID) else {
+                return
+            }
+            stopSecurityScope(for: pending)
+            guard identity?.accountID == attachment.accountID else { return }
+            attachmentUploadState = .idle
+            failedAttachmentUpload = nil
+            attachmentInsertion = ComposerAttachmentInsertion(
+                id: requestID,
+                key: pending.key,
+                filename: attachment.filename,
+                markdown: attachment.markdown
+            )
+
+        case let .mediaReady(requestID, media):
+            guard let requestedURL = mediaRequestsByRequestID.removeValue(forKey: requestID) else {
+                return
+            }
+            pendingMediaURLs.remove(requestedURL)
+            guard identity?.accountID == media.accountID else { return }
+            mediaLocalURLs[requestedURL] = media.localURL
+            mediaLocalURLs[media.remoteURL] = media.localURL
+            mediaFailures.removeValue(forKey: requestedURL)
+
         case let .messageEdited(requestID, messageID, _):
             completeMessageAction(requestID: requestID, messageID: messageID)
             if let activeSelection {
@@ -721,6 +861,7 @@ final class LiveSessionViewModel {
             connectionState = .retrying(delayMilliseconds: delayMilliseconds)
 
         case .disconnected:
+            attachmentUploadsByRequestID.values.forEach(stopSecurityScope)
             identity = nil
             sidebarSnapshot = nil
             navigationDirectory = NavigationDirectory(destinations: [])
@@ -736,6 +877,14 @@ final class LiveSessionViewModel {
             failedMessageActions = [:]
             sendsByRequestID = [:]
             failedSends = [:]
+            attachmentUploadsByRequestID = [:]
+            failedAttachmentUpload = nil
+            attachmentUploadState = .idle
+            attachmentInsertion = nil
+            mediaRequestsByRequestID = [:]
+            pendingMediaURLs = []
+            mediaLocalURLs = [:]
+            mediaFailures = [:]
             isLoadingOlderMessages = false
             messageSearchState = .idle
             topicActionState = .idle
@@ -744,7 +893,19 @@ final class LiveSessionViewModel {
             connectionState = .signedOut
 
         case let .failed(requestID, message):
-            if let requestID, issuedSearchRequestIDs.remove(requestID) != nil {
+            if let requestID,
+               let pending = attachmentUploadsByRequestID.removeValue(forKey: requestID)
+            {
+                stopSecurityScope(for: pending)
+                failedAttachmentUpload = pending.withoutSecurityScope()
+                attachmentUploadState = .failed(filename: pending.filename, message: message)
+                notice = "Attachment upload failed. You can retry it."
+            } else if let requestID,
+                      let remoteURL = mediaRequestsByRequestID.removeValue(forKey: requestID)
+            {
+                pendingMediaURLs.remove(remoteURL)
+                mediaFailures[remoteURL] = message
+            } else if let requestID, issuedSearchRequestIDs.remove(requestID) != nil {
                 guard pendingSearchRequestID == requestID else {
                     return
                 }
@@ -790,6 +951,12 @@ final class LiveSessionViewModel {
             } else {
                 connectionState = .failed(message: message)
             }
+        }
+    }
+
+    private func stopSecurityScope(for pending: PendingAttachmentUpload) {
+        if pending.accessedSecurityScope {
+            pending.fileURL.stopAccessingSecurityScopedResource()
         }
     }
 

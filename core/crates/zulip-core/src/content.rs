@@ -272,11 +272,19 @@ impl ContentParser {
     }
 
     fn parse_image(&mut self, element: &Element) -> Vec<ContentBlock> {
-        let Some(url) = element.attr("src").and_then(safe_url) else {
+        let Some(url) = element
+            .attr("data-original-src")
+            .or_else(|| element.attr("src"))
+            .and_then(safe_url)
+        else {
             return self.block(ContentBlock::Unsupported {
                 summary: "Unsafe image was omitted".to_owned(),
             });
         };
+        self.parse_image_with_url(element, url)
+    }
+
+    fn parse_image_with_url(&mut self, element: &Element, url: String) -> Vec<ContentBlock> {
         let alt = element.attr("alt").unwrap_or("Image").trim().to_owned();
         let (width, height) = image_dimensions(element);
         self.record_text(&alt);
@@ -290,17 +298,25 @@ impl ContentParser {
 
     fn parse_inline_image(&mut self, node: NodeRef<'_, Node>) -> Vec<ContentBlock> {
         let image = node.descendants().find_map(|descendant| {
-            descendant
-                .value()
-                .as_element()
-                .filter(|element| element.name() == "img" && !is_emoji(element))
+            let element = descendant.value().as_element()?;
+            (element.name() == "img" && !is_emoji(element)).then_some(element)
         });
-        let Some(element) = image else {
+        let Some(image) = image else {
             return self.block(ContentBlock::Unsupported {
                 summary: "Unsupported image preview".to_owned(),
             });
         };
-        self.parse_image(element)
+        let original_url = node.descendants().find_map(|descendant| {
+            let element = descendant.value().as_element()?;
+            (element.name() == "a")
+                .then(|| element.attr("href"))
+                .flatten()
+                .and_then(safe_url)
+        });
+        match original_url {
+            Some(url) => self.parse_image_with_url(image, url),
+            None => self.parse_image(image),
+        }
     }
 
     fn parse_inline_children(
@@ -713,7 +729,7 @@ mod tests {
                 alt,
                 width: Some(1920),
                 height: Some(1080),
-            } if url == "/user_uploads/thumbnail.webp" && alt == "Preview"
+            } if url == "/user_uploads/original.png" && alt == "Preview"
         ));
     }
 

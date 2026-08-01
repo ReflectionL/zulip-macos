@@ -1,13 +1,24 @@
+import AppKit
 import SwiftUI
 import ZulipCoreBindings
 
 struct MessageContentView: View {
     let blocks: [ContentBlock]
+    var mediaLocalURLs: [String: String] = [:]
+    var mediaFailures: [String: String] = [:]
+    var requestMedia: ((String) -> Void)?
+    var retryMedia: ((String) -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppTheme.Spacing.small) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
-                ContentBlockView(block: block)
+                ContentBlockView(
+                    block: block,
+                    mediaLocalURLs: mediaLocalURLs,
+                    mediaFailures: mediaFailures,
+                    requestMedia: requestMedia,
+                    retryMedia: retryMedia
+                )
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -17,6 +28,10 @@ struct MessageContentView: View {
 
 private struct ContentBlockView: View {
     let block: ContentBlock
+    let mediaLocalURLs: [String: String]
+    let mediaFailures: [String: String]
+    let requestMedia: ((String) -> Void)?
+    let retryMedia: ((String) -> Void)?
 
     @ViewBuilder
     var body: some View {
@@ -30,7 +45,15 @@ private struct ContentBlockView: View {
                     .fill(AppTheme.Colors.accent.opacity(0.7))
                     .frame(width: 3)
 
-                AnyView(MessageContentView(blocks: blocks))
+                AnyView(
+                    MessageContentView(
+                        blocks: blocks,
+                        mediaLocalURLs: mediaLocalURLs,
+                        mediaFailures: mediaFailures,
+                        requestMedia: requestMedia,
+                        retryMedia: retryMedia
+                    )
+                )
                     .foregroundStyle(AppTheme.Colors.secondaryText)
             }
             .padding(.vertical, AppTheme.Spacing.extraSmall)
@@ -45,7 +68,15 @@ private struct ContentBlockView: View {
                             .foregroundStyle(AppTheme.Colors.secondaryText)
                             .frame(width: 20, alignment: .trailing)
 
-                        AnyView(MessageContentView(blocks: item))
+                        AnyView(
+                            MessageContentView(
+                                blocks: item,
+                                mediaLocalURLs: mediaLocalURLs,
+                                mediaFailures: mediaFailures,
+                                requestMedia: requestMedia,
+                                retryMedia: retryMedia
+                            )
+                        )
                     }
                 }
             }
@@ -92,7 +123,11 @@ private struct ContentBlockView: View {
                 url: url,
                 alt: alt,
                 width: width,
-                height: height
+                height: height,
+                localURL: mediaLocalURLs[url],
+                failure: mediaFailures[url],
+                requestMedia: requestMedia,
+                retryMedia: retryMedia
             )
 
         case let .unsupported(summary):
@@ -151,28 +186,60 @@ private struct NativeImageBlock: View {
     let alt: String
     let width: Int?
     let height: Int?
+    let localURL: String?
+    let failure: String?
+    let requestMedia: ((String) -> Void)?
+    let retryMedia: ((String) -> Void)?
+
+    @State private var nativeImage: NSImage?
+    @State private var decodeFailed = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppTheme.Spacing.small) {
             ZStack {
-                LinearGradient(
-                    colors: [
-                        AppTheme.Colors.accent.opacity(0.75),
-                        AppTheme.Colors.sidebar,
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
+                if let nativeImage {
+                    Image(nsImage: nativeImage)
+                        .resizable()
+                        .scaledToFit()
+                } else {
+                    LinearGradient(
+                        colors: [
+                            AppTheme.Colors.accent.opacity(0.45),
+                            AppTheme.Colors.sidebar,
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
 
-                VStack(spacing: AppTheme.Spacing.medium) {
-                    Image(systemName: url.hasPrefix("fixture://") ? "macwindow" : "photo")
-                        .font(.system(size: 34, weight: .light))
-                    Text("Zulip Mac")
-                        .font(.system(size: 20, weight: .semibold))
-                    Text("Native conversation surface")
+                    if url.hasPrefix("fixture://") {
+                        VStack(spacing: AppTheme.Spacing.medium) {
+                            Image(systemName: "macwindow")
+                                .font(.system(size: 34, weight: .light))
+                            Text("Zulip Mac")
+                                .font(.system(size: 20, weight: .semibold))
+                            Text("Native conversation surface")
+                                .font(AppTheme.Typography.metadata)
+                        }
+                        .foregroundStyle(AppTheme.Colors.primaryText)
+                    } else if let failure {
+                        VStack(spacing: AppTheme.Spacing.small) {
+                            Image(systemName: "exclamationmark.triangle")
+                            Text(failure).lineLimit(2)
+                            Button("Retry") { retryMedia?(url) }
+                                .buttonStyle(.borderless)
+                        }
                         .font(AppTheme.Typography.metadata)
+                        .foregroundStyle(AppTheme.Colors.destructive)
+                        .padding()
+                    } else if decodeFailed {
+                        Label("Image could not be decoded", systemImage: "photo.badge.exclamationmark")
+                            .font(AppTheme.Typography.metadata)
+                            .foregroundStyle(AppTheme.Colors.secondaryText)
+                    } else {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
                 }
-                .foregroundStyle(AppTheme.Colors.primaryText)
             }
             .aspectRatio(aspectRatio, contentMode: .fit)
             .frame(maxWidth: 520)
@@ -196,6 +263,21 @@ private struct NativeImageBlock: View {
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Image, \(alt)")
+        .task(id: localURL) {
+            guard !url.hasPrefix("fixture://") else { return }
+            guard let localURL,
+                  let fileURL = URL(string: localURL),
+                  fileURL.isFileURL
+            else {
+                requestMedia?(url)
+                return
+            }
+            decodeFailed = false
+            let decoded = await NativeImageDecoder.load(fileURL)
+            guard !Task.isCancelled else { return }
+            nativeImage = decoded.image
+            decodeFailed = decoded.image == nil
+        }
     }
 
     private var aspectRatio: CGFloat {
@@ -203,6 +285,21 @@ private struct NativeImageBlock: View {
             return 16 / 9
         }
         return CGFloat(width) / CGFloat(height)
+    }
+}
+
+struct SendableNativeImage: @unchecked Sendable {
+    let image: NSImage?
+}
+
+enum NativeImageDecoder {
+    nonisolated static func load(_ fileURL: URL) async -> SendableNativeImage {
+        await Task.detached(priority: .utility) {
+            guard fileURL.isFileURL else {
+                return SendableNativeImage(image: nil)
+            }
+            return SendableNativeImage(image: NSImage(contentsOf: fileURL))
+        }.value
     }
 }
 

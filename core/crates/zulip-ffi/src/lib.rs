@@ -1,6 +1,10 @@
 #![doc = "Swift-facing actor boundary for the native Zulip macOS client."]
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use tokio::{
     runtime::Runtime,
@@ -13,6 +17,7 @@ use zulip_core::{
     content::{
         ContentBlock as NativeContentBlock, InlineContent as NativeInlineContent, parse_zulip_html,
     },
+    media::MediaClient,
     messages::{
         ConversationTarget, MessageClient, MessageFlag, MessageWriteOperation, OutgoingMessage,
         TopicPropagation, TopicSummary,
@@ -284,6 +289,26 @@ pub enum CoreCommand {
         /// Validated destination topic name.
         new_topic: String,
     },
+    /// Uploads one picker-selected file without sending a message.
+    UploadAttachment {
+        /// Correlates the response.
+        request_id: u64,
+        /// Client-owned account partition.
+        account_id: String,
+        /// Absolute security-scoped local file path.
+        local_path: String,
+        /// User-visible filename selected by Swift.
+        filename: String,
+    },
+    /// Resolves one same-origin protected upload into the private cache.
+    LoadMedia {
+        /// Correlates the response.
+        request_id: u64,
+        /// Client-owned account partition.
+        account_id: String,
+        /// Same-origin `/user_uploads/` message URL.
+        remote_url: String,
+    },
     /// Adds the personal `read` flag to messages.
     MarkRead {
         /// Correlates the response.
@@ -318,6 +343,8 @@ impl CoreCommand {
             | Self::UpdateMessageFlag { request_id, .. }
             | Self::RenameTopic { request_id, .. }
             | Self::MoveMessageToTopic { request_id, .. }
+            | Self::UploadAttachment { request_id, .. }
+            | Self::LoadMedia { request_id, .. }
             | Self::MarkRead { request_id, .. }
             | Self::Disconnect { request_id } => *request_id,
         }
@@ -637,6 +664,36 @@ pub enum CoreEvent {
         /// Server-assigned message identifier.
         message_id: i64,
     },
+    /// A picker-selected file was uploaded and is ready for composer insertion.
+    AttachmentUploaded {
+        /// Originating request.
+        request_id: u64,
+        /// Active account partition.
+        account_id: String,
+        /// Server-normalized filename.
+        filename: String,
+        /// Same-origin uploaded-file route.
+        url: String,
+        /// Markdown link to insert without automatically sending.
+        markdown: String,
+    },
+    /// Protected uploaded media is available at a cache-owned local URL.
+    MediaReady {
+        /// Originating request.
+        request_id: u64,
+        /// Active account partition.
+        account_id: String,
+        /// Same-origin route found in message content.
+        remote_url: String,
+        /// Cache-owned `file:` URL.
+        local_url: String,
+        /// Sanitized response MIME type, if present.
+        content_type: Option<String>,
+        /// Number of cached bytes.
+        byte_count: u64,
+        /// Whether this request was served without a network download.
+        cache_hit: bool,
+    },
     /// A correlated content edit succeeded.
     MessageEdited {
         /// Originating request.
@@ -744,10 +801,14 @@ impl RustCoreClient {
     /// Panics only if the process cannot initialize Tokio's built-in worker
     /// runtime, in which case no core operation can be performed.
     #[uniffi::constructor]
-    pub fn new(event_sink: Arc<dyn CoreEventSink>) -> Arc<Self> {
+    pub fn new(event_sink: Arc<dyn CoreEventSink>, media_cache_root_path: String) -> Arc<Self> {
         let runtime = Runtime::new().expect("the built-in Tokio runtime initializes");
         let (sender, receiver) = unbounded_channel();
-        runtime.spawn(run_actor(receiver, Arc::clone(&event_sink)));
+        runtime.spawn(run_actor(
+            receiver,
+            Arc::clone(&event_sink),
+            PathBuf::from(media_cache_root_path),
+        ));
         Arc::new(Self {
             sender,
             event_sink,
@@ -772,6 +833,7 @@ struct AccountSession {
     account_id: String,
     own_user_id: i64,
     messages: Arc<MessageClient>,
+    media: Arc<MediaClient>,
     sync: SyncSession,
     topics: Vec<TopicSummary>,
 }
@@ -784,6 +846,7 @@ enum ActorInput {
 async fn run_actor(
     mut receiver: UnboundedReceiver<CoreCommand>,
     event_sink: Arc<dyn CoreEventSink>,
+    media_cache_root: PathBuf,
 ) {
     let mut account: Option<AccountSession> = None;
     let mut poll_not_before = Instant::now();
@@ -812,7 +875,7 @@ async fn run_actor(
                         | CoreCommand::Disconnect { .. }
                 );
                 let previous_account = account.as_ref().map(|session| session.account_id.clone());
-                handle_command(command, &mut account, &event_sink).await;
+                handle_command(command, &mut account, &event_sink, &media_cache_root).await;
                 let current_account = account.as_ref().map(|session| session.account_id.as_str());
                 if resets_poll || previous_account.as_deref() != current_account {
                     poll_not_before = Instant::now();
@@ -835,6 +898,7 @@ async fn handle_command(
     command: CoreCommand,
     account: &mut Option<AccountSession>,
     event_sink: &Arc<dyn CoreEventSink>,
+    media_cache_root: &Path,
 ) {
     match command {
         CoreCommand::Ping {
@@ -849,7 +913,14 @@ async fn handle_command(
             api_key,
         } => {
             start_api_key_session(
-                request_id, account_id, server_url, email, api_key, account, event_sink,
+                request_id,
+                account_id,
+                server_url,
+                email,
+                api_key,
+                account,
+                event_sink,
+                media_cache_root,
             )
             .await;
         }
@@ -861,7 +932,14 @@ async fn handle_command(
             password,
         } => {
             start_password_session(
-                request_id, account_id, server_url, username, password, account, event_sink,
+                request_id,
+                account_id,
+                server_url,
+                username,
+                password,
+                account,
+                event_sink,
+                media_cache_root,
             )
             .await;
         }
@@ -1062,6 +1140,30 @@ async fn handle_command(
             )
             .await;
         }
+        CoreCommand::UploadAttachment {
+            request_id,
+            account_id,
+            local_path,
+            filename,
+        } => upload_attachment(
+            request_id,
+            account_id,
+            local_path,
+            filename,
+            account.as_ref(),
+            event_sink,
+        ),
+        CoreCommand::LoadMedia {
+            request_id,
+            account_id,
+            remote_url,
+        } => load_media(
+            request_id,
+            account_id,
+            remote_url,
+            account.as_ref(),
+            event_sink,
+        ),
         CoreCommand::MarkRead {
             request_id,
             account_id,
@@ -1078,6 +1180,63 @@ async fn handle_command(
         }
         CoreCommand::Disconnect { request_id } => disconnect(request_id, account, event_sink),
     }
+}
+
+fn upload_attachment(
+    request_id: u64,
+    account_id: String,
+    local_path: String,
+    filename: String,
+    account: Option<&AccountSession>,
+    event_sink: &Arc<dyn CoreEventSink>,
+) {
+    let Some(session) = account.filter(|item| item.account_id == account_id) else {
+        emit_no_session(request_id, event_sink);
+        return;
+    };
+    let media = Arc::clone(&session.media);
+    let event_sink = Arc::clone(event_sink);
+    tokio::spawn(async move {
+        match media.upload_file(Path::new(&local_path), &filename).await {
+            Ok(uploaded) => event_sink.handle_event(CoreEvent::AttachmentUploaded {
+                request_id,
+                account_id,
+                filename: uploaded.filename,
+                url: uploaded.url,
+                markdown: uploaded.markdown,
+            }),
+            Err(error) => emit_error(Some(request_id), error, &event_sink),
+        }
+    });
+}
+
+fn load_media(
+    request_id: u64,
+    account_id: String,
+    remote_url: String,
+    account: Option<&AccountSession>,
+    event_sink: &Arc<dyn CoreEventSink>,
+) {
+    let Some(session) = account.filter(|item| item.account_id == account_id) else {
+        emit_no_session(request_id, event_sink);
+        return;
+    };
+    let media = Arc::clone(&session.media);
+    let event_sink = Arc::clone(event_sink);
+    tokio::spawn(async move {
+        match media.load_media(&remote_url).await {
+            Ok(cached) => event_sink.handle_event(CoreEvent::MediaReady {
+                request_id,
+                account_id,
+                remote_url: cached.remote_url,
+                local_url: cached.local_url,
+                content_type: cached.content_type,
+                byte_count: cached.byte_count,
+                cache_hit: cached.cache_hit,
+            }),
+            Err(error) => emit_error(Some(request_id), error, &event_sink),
+        }
+    });
 }
 
 async fn edit_message(
@@ -1512,6 +1671,7 @@ async fn start_api_key_session(
     api_key: String,
     account: &mut Option<AccountSession>,
     event_sink: &Arc<dyn CoreEventSink>,
+    media_cache_root: &Path,
 ) {
     let authentication = match AuthenticationClient::new() {
         Ok(client) => client,
@@ -1530,7 +1690,15 @@ async fn start_api_key_session(
             return;
         }
     };
-    start_authenticated_session(request_id, account_id, authenticated, account, event_sink).await;
+    start_authenticated_session(
+        request_id,
+        account_id,
+        authenticated,
+        account,
+        event_sink,
+        media_cache_root,
+    )
+    .await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1542,6 +1710,7 @@ async fn start_password_session(
     password: String,
     account: &mut Option<AccountSession>,
     event_sink: &Arc<dyn CoreEventSink>,
+    media_cache_root: &Path,
 ) {
     let authentication = match AuthenticationClient::new() {
         Ok(client) => client,
@@ -1560,7 +1729,15 @@ async fn start_password_session(
             return;
         }
     };
-    start_authenticated_session(request_id, account_id, authenticated, account, event_sink).await;
+    start_authenticated_session(
+        request_id,
+        account_id,
+        authenticated,
+        account,
+        event_sink,
+        media_cache_root,
+    )
+    .await;
 }
 
 async fn start_authenticated_session(
@@ -1569,6 +1746,7 @@ async fn start_authenticated_session(
     authenticated: AuthenticatedAccount,
     account: &mut Option<AccountSession>,
     event_sink: &Arc<dyn CoreEventSink>,
+    media_cache_root: &Path,
 ) {
     let api_key = authenticated.api_key.expose_secret().to_owned();
     start_session(
@@ -1581,6 +1759,7 @@ async fn start_authenticated_session(
         api_key,
         account,
         event_sink,
+        media_cache_root,
     )
     .await;
 }
@@ -1596,6 +1775,7 @@ async fn start_session(
     api_key: String,
     account: &mut Option<AccountSession>,
     event_sink: &Arc<dyn CoreEventSink>,
+    media_cache_root: &Path,
 ) {
     if account_id.trim().is_empty() || user_id <= 0 {
         event_sink.handle_event(CoreEvent::Failed {
@@ -1619,6 +1799,19 @@ async fn start_session(
         &server_url,
         email.clone(),
         SecretString::new(api_key.clone()),
+    ) {
+        Ok(client) => Arc::new(client),
+        Err(error) => {
+            emit_error(Some(request_id), error, event_sink);
+            return;
+        }
+    };
+    let media = match MediaClient::new(
+        &server_url,
+        email.clone(),
+        SecretString::new(api_key.clone()),
+        media_cache_root,
+        &account_id,
     ) {
         Ok(client) => Arc::new(client),
         Err(error) => {
@@ -1656,6 +1849,7 @@ async fn start_session(
                 account_id: account_id.clone(),
                 own_user_id: user_id,
                 messages,
+                media,
                 sync,
                 topics,
             });
@@ -1890,6 +2084,7 @@ mod tests {
         CoreInlineContent, CoreMessage, CoreMessageFlag, CoreSnapshot, CoreTopicPropagation,
         RustCoreClient, conversation_key_for_message,
     };
+    use tempfile::TempDir;
     use zulip_core::{
         messages::{ConversationTarget, TopicSummary},
         sync::{MessageSummary, SyncSnapshot},
@@ -1922,7 +2117,7 @@ mod tests {
             events: Mutex::new(Vec::new()),
             notifier: Mutex::new(Some(signal_sender)),
         });
-        let client = RustCoreClient::new(sink.clone());
+        let client = RustCoreClient::new(sink.clone(), "/tmp/zulip-ffi-tests".to_owned());
 
         client.submit(CoreCommand::Ping {
             request_id: 42,
@@ -2129,7 +2324,7 @@ mod tests {
             events: Mutex::new(Vec::new()),
             notifier: Mutex::new(Some(signal_sender)),
         });
-        let client = RustCoreClient::new(sink.clone());
+        let client = RustCoreClient::new(sink.clone(), "/tmp/zulip-ffi-tests".to_owned());
 
         client.submit(CoreCommand::StartApiKeySession {
             request_id: 20,
@@ -2208,7 +2403,7 @@ mod tests {
             events: Mutex::new(Vec::new()),
             notifier: Mutex::new(Some(signal_sender)),
         });
-        let client = RustCoreClient::new(sink.clone());
+        let client = RustCoreClient::new(sink.clone(), "/tmp/zulip-ffi-tests".to_owned());
         client.submit(CoreCommand::StartApiKeySession {
             request_id: 30,
             account_id: "account-topic".to_owned(),
@@ -2290,7 +2485,7 @@ mod tests {
             events: Mutex::new(Vec::new()),
             notifier: Mutex::new(Some(signal_sender)),
         });
-        let client = RustCoreClient::new(sink.clone());
+        let client = RustCoreClient::new(sink.clone(), "/tmp/zulip-ffi-tests".to_owned());
         client.submit(CoreCommand::StartApiKeySession {
             request_id: 40,
             account_id: "account-actions".to_owned(),
@@ -2388,6 +2583,89 @@ mod tests {
     }
 
     #[test]
+    fn actor_correlates_attachment_upload_and_cached_media_results() {
+        let (server, requests) = spawn_media_actor_mock();
+        let fixture = TempDir::new().expect("media fixture directory");
+        let selected_file = fixture.path().join("fixture image.png");
+        std::fs::write(&selected_file, b"upload fixture").expect("write upload fixture");
+        let cache_root = fixture.path().join("cache");
+        let (signal_sender, signal_receiver) = mpsc::channel();
+        let sink = Arc::new(RecordingSink {
+            events: Mutex::new(Vec::new()),
+            notifier: Mutex::new(Some(signal_sender)),
+        });
+        let client = RustCoreClient::new(sink.clone(), cache_root.to_string_lossy().into_owned());
+        client.submit(CoreCommand::StartApiKeySession {
+            request_id: 50,
+            account_id: "account-media".to_owned(),
+            server_url: server,
+            email: "maya@example.com".to_owned(),
+            api_key: "fixture-key-do-not-log".to_owned(),
+        });
+        let _ = wait_for_event(&signal_receiver, &sink, |event| {
+            matches!(event, CoreEvent::SessionStarted { request_id: 50, .. })
+        });
+
+        client.submit(CoreCommand::UploadAttachment {
+            request_id: 51,
+            account_id: "account-media".to_owned(),
+            local_path: selected_file.to_string_lossy().into_owned(),
+            filename: "fixture image.png".to_owned(),
+        });
+        let uploaded = wait_for_event(&signal_receiver, &sink, |event| {
+            matches!(event, CoreEvent::AttachmentUploaded { request_id: 51, .. })
+        });
+        assert!(matches!(
+            uploaded,
+            CoreEvent::AttachmentUploaded {
+                account_id,
+                filename,
+                url,
+                markdown,
+                ..
+            } if account_id == "account-media"
+                && filename == "fixture image.png"
+                && url == "/user_uploads/1/ab/fixture-image.png"
+                && markdown.contains("fixture image.png")
+        ));
+
+        client.submit(CoreCommand::LoadMedia {
+            request_id: 52,
+            account_id: "account-media".to_owned(),
+            remote_url: "/user_uploads/1/ab/fixture-image.png".to_owned(),
+        });
+        let ready = wait_for_event(&signal_receiver, &sink, |event| {
+            matches!(event, CoreEvent::MediaReady { request_id: 52, .. })
+        });
+        assert!(matches!(
+            ready,
+            CoreEvent::MediaReady {
+                account_id,
+                remote_url,
+                local_url,
+                byte_count: 13,
+                cache_hit: false,
+                ..
+            } if account_id == "account-media"
+                && remote_url == "/user_uploads/1/ab/fixture-image.png"
+                && local_url.starts_with("file:///")
+        ));
+
+        let observed = requests.try_iter().collect::<Vec<_>>();
+        assert!(observed.iter().any(|request| {
+            request.starts_with("POST /api/v1/user_uploads HTTP/1.1")
+                && request.contains("upload fixture")
+        }));
+        assert!(observed.iter().any(|request| {
+            request.starts_with("GET /api/v1/user_uploads/1/ab/fixture-image.png HTTP/1.1")
+        }));
+        assert!(observed.iter().any(|request| {
+            request.starts_with("GET /user_uploads/temporary/token/fixture-image.png HTTP/1.1")
+                && !request.to_ascii_lowercase().contains("authorization:")
+        }));
+    }
+
+    #[test]
     fn api_key_session_registers_off_the_calling_thread() {
         let (server, request) = spawn_register_mock();
         let (signal_sender, signal_receiver) = mpsc::channel();
@@ -2395,7 +2673,7 @@ mod tests {
             events: Mutex::new(Vec::new()),
             notifier: Mutex::new(Some(signal_sender)),
         });
-        let client = RustCoreClient::new(sink.clone());
+        let client = RustCoreClient::new(sink.clone(), "/tmp/zulip-ffi-tests".to_owned());
 
         client.submit(CoreCommand::StartApiKeySession {
             request_id: 7,
@@ -2438,7 +2716,7 @@ mod tests {
             events: Mutex::new(Vec::new()),
             notifier: Mutex::new(Some(signal_sender)),
         });
-        let client = RustCoreClient::new(sink.clone());
+        let client = RustCoreClient::new(sink.clone(), "/tmp/zulip-ffi-tests".to_owned());
 
         client.submit(CoreCommand::StartPasswordSession {
             request_id: 8,
@@ -2535,6 +2813,9 @@ mod tests {
                 let (mut stream, _) = listener.accept().expect("accept request");
                 let request = read_request(&mut stream);
                 let request_line = request.lines().next().unwrap_or_default();
+                if request_line.is_empty() {
+                    continue;
+                }
                 let _ = sender.send(request.clone());
                 let body = if request_line.starts_with("GET /api/v1/users/me HTTP") {
                     r#"{"result":"success","email":"maya@example.com","full_name":"Maya Chen","user_id":9}"#
@@ -2740,6 +3021,75 @@ mod tests {
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                     body.len(),
                     body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        (format!("http://{address}/"), receiver)
+    }
+
+    fn spawn_media_actor_mock() -> (String, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let address = listener.local_addr().expect("listener address");
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let mut media_downloaded = false;
+            while !media_downloaded {
+                let (mut stream, _) = listener.accept().expect("accept request");
+                let request = read_request(&mut stream);
+                let request_line = request.lines().next().unwrap_or_default();
+                if request_line.is_empty() {
+                    continue;
+                }
+                let _ = sender.send(request.clone());
+                let (content_type, body) = if request_line.starts_with("GET /api/v1/users/me HTTP")
+                {
+                    (
+                        "application/json",
+                        r#"{"result":"success","email":"maya@example.com","full_name":"Maya Chen","user_id":9}"#,
+                    )
+                } else if request_line.starts_with("POST /api/v1/register HTTP") {
+                    (
+                        "application/json",
+                        r#"{
+                            "result":"success",
+                            "queue_id":"queue-media",
+                            "last_event_id":10,
+                            "event_queue_longpoll_timeout_seconds":5,
+                            "zulip_feature_level":481,
+                            "realm_users":[],
+                            "subscriptions":[]
+                        }"#,
+                    )
+                } else if request_line.starts_with("GET /api/v1/events?") {
+                    thread::sleep(Duration::from_millis(10));
+                    (
+                        "application/json",
+                        r#"{"result":"success","events":[{"id":11,"type":"heartbeat"}]}"#,
+                    )
+                } else if request_line.starts_with("POST /api/v1/user_uploads HTTP") {
+                    (
+                        "application/json",
+                        r#"{"result":"success","filename":"fixture image.png","url":"/user_uploads/1/ab/fixture-image.png"}"#,
+                    )
+                } else if request_line
+                    .starts_with("GET /api/v1/user_uploads/1/ab/fixture-image.png HTTP")
+                {
+                    (
+                        "application/json",
+                        r#"{"result":"success","url":"/user_uploads/temporary/token/fixture-image.png"}"#,
+                    )
+                } else if request_line
+                    .starts_with("GET /user_uploads/temporary/token/fixture-image.png HTTP")
+                {
+                    media_downloaded = true;
+                    ("image/png", "fixture-image")
+                } else {
+                    panic!("unexpected request: {request_line}");
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
                 );
                 let _ = stream.write_all(response.as_bytes());
             }

@@ -15,13 +15,14 @@ rust-version = "1.95"
 [workspace.dependencies]
 futures-util = { version = "=0.3.32", default-features = false, features = ["std"] }
 ego-tree = "0.11.0"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["multipart", "rustls-tls-native-roots", "stream"] }
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 scraper = { version = "0.27.0", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+sha2 = "0.10"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
 uniffi = "0.32.0"
 url = "2"
 zeroize = "1"

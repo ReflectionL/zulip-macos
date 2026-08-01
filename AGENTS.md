@@ -89,6 +89,7 @@ land:
 ./scripts/test.sh
 ./scripts/check.sh
 ./scripts/live-smoke.sh
+./scripts/live-media-smoke-keychain.sh SERVER EMAIL
 ```
 
 `live-smoke.sh` reads server URL, email, and password as three stdin lines with
@@ -96,6 +97,12 @@ terminal echo disabled. It must print only redacted step results; never pass
 credentials as command arguments or environment variables. Run it from a
 local interactive terminal; do not inject credentials through an automation
 channel unless that channel is known not to mirror stdin.
+
+`live-media-smoke-keychain.sh` reads the existing account API key directly
+from macOS Keychain and passes it only to the Rust smoke process over local
+stdin. It uploads a tiny image, sends it to the authenticated user, verifies
+server rendering plus authenticated cache download, and deletes the disposable
+message. Never add credential output or shell tracing to this script.
 
 Until a script exists, use the step-specific commands recorded in `PLAN.md`.
 

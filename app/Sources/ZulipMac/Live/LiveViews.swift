@@ -347,7 +347,18 @@ private struct LiveWindowView: View {
                 },
                 retrySend: { message in
                     session.retrySend(message)
-                }
+                },
+                attachmentUploadState: session.attachmentUploadState,
+                attachmentInsertion: session.attachmentInsertion,
+                uploadAttachment: { url in
+                    session.uploadAttachment(url, to: page.key)
+                },
+                retryAttachmentUpload: session.retryAttachmentUpload,
+                consumeAttachmentInsertion: session.consumeAttachmentInsertion,
+                mediaLocalURLs: session.mediaLocalURLs,
+                mediaFailures: session.mediaFailures,
+                requestMedia: session.loadMedia,
+                retryMedia: session.retryMedia
             )
         case let .offline(page):
             ConversationSurface(

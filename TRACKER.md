@@ -5,8 +5,8 @@ Last updated: 2026-08-01
 ## Current State
 
 - Milestone: MVP — daily use
-- Current step: none
-- Next step: `MVP-004` (`ready`)
+- Current step: `none` (no step selected)
+- Next step: `MVP-006` (`ready`)
 - Overall status: in progress
 
 ## Step Status
@@ -36,6 +36,7 @@ Last updated: 2026-08-01
 | MVP-002A | done | 2026-07-31 | 2026-08-01 | Implemented inline expandable channel topics, validated new-topic drafts, whole-topic rename via `change_all`, single-message moves via `change_one`, correlated success/failure state, and retry. `./scripts/check.sh` passes: 33 Rust core, 7 FFI actor, and 33 Swift tests; the mock write smoke verifies both PATCH propagation modes. Computer Use verified real-account topic discovery/routing, independent channel collapse/expand, rename and move dialogs, existing-topic choices, and a local new-topic draft with an empty timeline/composer; no live write was submitted. | — | — |
 | MVP-003 | done | 2026-08-01 | 2026-08-01 | Added typed Rust edit/delete/reaction/read/star APIs, correlated UniFFI commands/events, server-derived flags/reactions, pending local sends, optimistic action state, failure rollback, explicit retry, native edit/delete/read actions, and an exact-target redacted live-action smoke. `./scripts/check.sh` passes with 34 Rust core, 8 FFI actor, and 34 Swift tests. The designated Cloud account passed disposable self-DM send, edit, reaction, star, unread/read, server reconciliation, and permanent deletion; prior disposable smoke data was also removed. | — | — |
 | MVP-005 | done | 2026-08-01 | 2026-08-01 | Added bounded browser-grade Rust fragment parsing and native recursive blocks for paragraphs, safe links, user mentions, Unicode/custom emoji, quotes, lists, code, Zulip image previews, and readable unsupported fallbacks. Executable tags and unsafe URL schemes are stripped; malformed, oversized, deep, or high-node-count input is safely recovered or capped. Replaced raw HTML in UniFFI/Swift snapshots with typed content and native plain-text search previews. `./scripts/check.sh` passes: 39 Rust core, 9 FFI, and 34 Swift tests, plus strict Clippy, formatting, generated bindings, and app build. Computer Use connected through the saved Keychain credential and verified a real Notification Bot message renders `@花海` and `#Zulip MacOS` as native text/link with no raw HTML tags. | — | — |
+| MVP-004 | done | 2026-08-01 | 2026-08-01 | Implemented 25 MiB multipart upload, server-normalized composer links, 32 MiB authenticated downloads, opaque account-partitioned atomic caching, original-image URL parsing, asynchronous FFI media tasks, a native file picker, visible retry state, composer insertion without auto-send, and off-main AppKit image decode. `./scripts/check.sh` passes with 45 Rust core, 10 FFI actor, and 37 Swift tests plus strict Clippy, binding regeneration, and app build. The designated Cloud account passed bounded PNG upload, disposable self-DM link send, server-rendered image parsing, authenticated download with exact byte validation, cache hit, and message/attachment-reference cleanup. | — | — |
 
 Later milestones remain defined in `PLAN.md` and will be added here when they
 become active; completed rows are never removed.
@@ -44,6 +45,31 @@ become active; completed rows are never removed.
 
 ### 2026-08-01
 
+- Implemented the complete local `MVP-004` slice. Rust accepts only bounded
+  regular-file uploads and same-origin `/user_uploads/` message routes, uses
+  Zulip's short-lived authenticated download URL immediately without forwarding
+  Basic auth, and writes cache files atomically under SHA-256 account/path
+  partitions. Swift owns the file picker and security scope, inserts returned
+  Markdown without sending, deduplicates media requests, and decodes only
+  cache-owned file URLs off the main actor.
+- Added adversarial and correlation coverage for multipart authentication,
+  limits, unsafe/cross-origin paths, account isolation, cache hits, oversized
+  cleanup, temporary-URL credential separation, actor events, Swift upload and
+  media retry state, no-auto-send insertion, and native image decode. The local
+  suites pass with 45 Rust core, 10 FFI, and 37 Swift tests; strict Clippy and
+  the debug app build also pass.
+- Added `live-media-smoke-keychain.sh`, which retrieves the existing API key
+  only from macOS Keychain into local stdin, then uploads a 1×1 PNG, sends a
+  disposable self-DM, parses the server-rendered image, verifies authenticated
+  download/cache bytes, and deletes the message. The designated Cloud account
+  passed every phase without printing or placing the API key in
+  arguments/environment; the disposable message and its final attachment
+  reference were deleted afterward.
+- Closed `MVP-004` after the exact Cloud smoke and final `./scripts/check.sh`
+  passed. Marked `MVP-006` ready as the next dependency-unblocked step.
+- Began `MVP-004`. The active scope is bounded attachment upload, authenticated
+  account-isolated media download/cache, safe local file references over FFI,
+  and native Swift file selection/rendering without main-actor I/O.
 - Closed `MVP-005`: live messages now cross UniFFI only as sanitized native
   content blocks; raw Zulip HTML no longer enters Swift snapshots or search
   previews.
@@ -270,9 +296,8 @@ become active; completed rows are never removed.
   conditional for the beta release.
 - `REL-005` must pass one real standard HTTPS self-hosted smoke target before
   a GitHub Beta can be published; the Zulip Cloud target already passes.
-- Uploaded/external image references are sanitized into native image blocks,
-  but the live timeline intentionally shows a non-fetching placeholder until
-  `MVP-004` adds authenticated, account-isolated media loading and caching.
+- The media cache has a strict 32 MiB per-file bound but no aggregate LRU quota
+  yet; aggregate eviction belongs in `REL-001` performance/cache work.
 
 ## Open Decisions
 

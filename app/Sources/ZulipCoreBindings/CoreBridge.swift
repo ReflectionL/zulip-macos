@@ -191,6 +191,45 @@ public struct LiveTopicUpdate: Equatable, Sendable {
     }
 }
 
+public struct LiveUploadedAttachment: Equatable, Sendable {
+    public let accountID: String
+    public let filename: String
+    public let url: String
+    public let markdown: String
+
+    public init(accountID: String, filename: String, url: String, markdown: String) {
+        self.accountID = accountID
+        self.filename = filename
+        self.url = url
+        self.markdown = markdown
+    }
+}
+
+public struct LiveCachedMedia: Equatable, Sendable {
+    public let accountID: String
+    public let remoteURL: String
+    public let localURL: String
+    public let contentType: String?
+    public let byteCount: UInt64
+    public let cacheHit: Bool
+
+    public init(
+        accountID: String,
+        remoteURL: String,
+        localURL: String,
+        contentType: String?,
+        byteCount: UInt64,
+        cacheHit: Bool
+    ) {
+        self.accountID = accountID
+        self.remoteURL = remoteURL
+        self.localURL = localURL
+        self.contentType = contentType
+        self.byteCount = byteCount
+        self.cacheHit = cacheHit
+    }
+}
+
 /// Authenticated identity used by the live presentation layer.
 public struct LiveSessionIdentity: Equatable, Sendable {
     public let accountID: String
@@ -301,6 +340,13 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
         messageID: Int64,
         newTopic: String
     )
+    case uploadAttachment(
+        requestID: UInt64,
+        accountID: String,
+        localPath: String,
+        filename: String
+    )
+    case loadMedia(requestID: UInt64, accountID: String, remoteURL: String)
     case markRead(requestID: UInt64, accountID: String, messageIDs: [Int64])
     case disconnect(requestID: UInt64)
 
@@ -326,6 +372,8 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
              let .updateMessageFlag(requestID, _, _, _, _),
              let .renameTopic(requestID, _, _, _),
              let .moveMessageToTopic(requestID, _, _, _),
+             let .uploadAttachment(requestID, _, _, _),
+             let .loadMedia(requestID, _, _),
              let .markRead(requestID, _, _),
              let .disconnect(requestID):
             requestID
@@ -364,6 +412,10 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
             "BridgeCommand.renameTopic"
         case .moveMessageToTopic:
             "BridgeCommand.moveMessageToTopic"
+        case .uploadAttachment:
+            "BridgeCommand.uploadAttachment(localPath: [REDACTED])"
+        case .loadMedia:
+            "BridgeCommand.loadMedia"
         case .markRead:
             "BridgeCommand.markRead"
         case .disconnect:
@@ -494,6 +546,19 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
                 messageId: messageID,
                 newTopic: newTopic
             )
+        case let .uploadAttachment(requestID, accountID, localPath, filename):
+            .uploadAttachment(
+                requestId: requestID,
+                accountId: accountID,
+                localPath: localPath,
+                filename: filename
+            )
+        case let .loadMedia(requestID, accountID, remoteURL):
+            .loadMedia(
+                requestId: requestID,
+                accountId: accountID,
+                remoteUrl: remoteURL
+            )
         case let .markRead(requestID, accountID, messageIDs):
             .markRead(
                 requestId: requestID,
@@ -534,6 +599,8 @@ public enum BridgeEvent:
         page: LiveConversationPage
     )
     case messageSent(requestID: UInt64, localID: String, messageID: Int64)
+    case attachmentUploaded(requestID: UInt64, attachment: LiveUploadedAttachment)
+    case mediaReady(requestID: UInt64, media: LiveCachedMedia)
     case messageEdited(requestID: UInt64, messageID: Int64, content: String)
     case messageDeleted(requestID: UInt64, messageID: Int64)
     case reactionUpdated(
@@ -563,6 +630,8 @@ public enum BridgeEvent:
              let .searchCompleted(requestID, _, _),
              let .messageFocused(requestID, _, _),
              let .messageSent(requestID, _, _),
+             let .attachmentUploaded(requestID, _),
+             let .mediaReady(requestID, _),
              let .messageEdited(requestID, _, _),
              let .messageDeleted(requestID, _),
              let .reactionUpdated(requestID, _, _, _),
@@ -596,6 +665,10 @@ public enum BridgeEvent:
             "Message focused"
         case .messageSent:
             "Message sent"
+        case .attachmentUploaded:
+            "Attachment uploaded"
+        case .mediaReady:
+            "Media ready"
         case .messageEdited:
             "Message edited"
         case .messageDeleted:
@@ -666,7 +739,15 @@ public final class LiveCoreClient: CoreClientProtocol, @unchecked Sendable {
 
         events = streamPair.stream
         self.eventRelay = eventRelay
-        rustClient = RustCoreClient(eventSink: eventRelay)
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        let mediaCacheRoot = caches
+            .appendingPathComponent("io.github.huahai.ZulipMac", isDirectory: true)
+            .appendingPathComponent("Media", isDirectory: true)
+        rustClient = RustCoreClient(
+            eventSink: eventRelay,
+            mediaCacheRootPath: mediaCacheRoot.path
+        )
     }
 
     public func submit(_ command: BridgeCommand) {
@@ -905,6 +986,36 @@ private extension BridgeEvent {
                 requestID: requestID,
                 localID: localID,
                 messageID: messageID
+            )
+        case let .attachmentUploaded(requestID, accountID, filename, url, markdown):
+            self = .attachmentUploaded(
+                requestID: requestID,
+                attachment: LiveUploadedAttachment(
+                    accountID: accountID,
+                    filename: filename,
+                    url: url,
+                    markdown: markdown
+                )
+            )
+        case let .mediaReady(
+            requestID,
+            accountID,
+            remoteURL,
+            localURL,
+            contentType,
+            byteCount,
+            cacheHit
+        ):
+            self = .mediaReady(
+                requestID: requestID,
+                media: LiveCachedMedia(
+                    accountID: accountID,
+                    remoteURL: remoteURL,
+                    localURL: localURL,
+                    contentType: contentType,
+                    byteCount: byteCount,
+                    cacheHit: cacheHit
+                )
             )
         case let .messageEdited(requestID, messageID, content):
             self = .messageEdited(

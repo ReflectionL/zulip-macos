@@ -37,6 +37,7 @@ current_step="$(
 )"
 
 if [[ -n "$current_step" ]] &&
+  [[ "$current_step" != "none" ]] &&
   ! rg -q "^\| ${current_step} .* \| in_progress \|$" PLAN.md; then
   echo "TRACKER.md current step is not in progress in PLAN.md: $current_step" >&2
   exit 1

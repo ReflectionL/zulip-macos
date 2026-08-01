@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 import ZulipCoreBindings
 
 struct ConversationSurface: View {
@@ -18,12 +19,22 @@ struct ConversationSurface: View {
     var setMessageRead: ((MessageViewData, Bool) -> Bool)?
     var retryMessageAction: ((MessageViewData) -> Void)?
     var retrySend: ((MessageViewData) -> Void)?
+    var attachmentUploadState = AttachmentUploadState.idle
+    var attachmentInsertion: ComposerAttachmentInsertion?
+    var uploadAttachment: ((URL) -> Void)?
+    var retryAttachmentUpload: (() -> Void)?
+    var consumeAttachmentInsertion: ((UInt64) -> Void)?
+    var mediaLocalURLs: [String: String] = [:]
+    var mediaFailures: [String: String] = [:]
+    var requestMedia: ((String) -> Void)?
+    var retryMedia: ((String) -> Void)?
 
     @State private var messages: [MessageViewData]
     @State private var draft = ""
     @State private var followsNewest = true
     @State private var editingMessage: MessageViewData?
     @State private var deletingMessage: MessageViewData?
+    @State private var isChoosingAttachment = false
     @FocusState private var isComposerFocused: Bool
 
     init(
@@ -42,7 +53,16 @@ struct ConversationSurface: View {
         starMessage: ((MessageViewData) -> Bool)? = nil,
         setMessageRead: ((MessageViewData, Bool) -> Bool)? = nil,
         retryMessageAction: ((MessageViewData) -> Void)? = nil,
-        retrySend: ((MessageViewData) -> Void)? = nil
+        retrySend: ((MessageViewData) -> Void)? = nil,
+        attachmentUploadState: AttachmentUploadState = .idle,
+        attachmentInsertion: ComposerAttachmentInsertion? = nil,
+        uploadAttachment: ((URL) -> Void)? = nil,
+        retryAttachmentUpload: (() -> Void)? = nil,
+        consumeAttachmentInsertion: ((UInt64) -> Void)? = nil,
+        mediaLocalURLs: [String: String] = [:],
+        mediaFailures: [String: String] = [:],
+        requestMedia: ((String) -> Void)? = nil,
+        retryMedia: ((String) -> Void)? = nil
     ) {
         self.page = page
         self.isOffline = isOffline
@@ -60,6 +80,15 @@ struct ConversationSurface: View {
         self.setMessageRead = setMessageRead
         self.retryMessageAction = retryMessageAction
         self.retrySend = retrySend
+        self.attachmentUploadState = attachmentUploadState
+        self.attachmentInsertion = attachmentInsertion
+        self.uploadAttachment = uploadAttachment
+        self.retryAttachmentUpload = retryAttachmentUpload
+        self.consumeAttachmentInsertion = consumeAttachmentInsertion
+        self.mediaLocalURLs = mediaLocalURLs
+        self.mediaFailures = mediaFailures
+        self.requestMedia = requestMedia
+        self.retryMedia = retryMedia
         _messages = State(initialValue: page.messages)
     }
 
@@ -152,7 +181,11 @@ struct ConversationSurface: View {
                                     },
                                     retrySend: {
                                         retrySend?(message)
-                                    }
+                                    },
+                                    mediaLocalURLs: mediaLocalURLs,
+                                    mediaFailures: mediaFailures,
+                                    requestMedia: requestMedia,
+                                    retryMedia: retryMedia
                                 )
                                 .id(message.id)
                             }
@@ -226,6 +259,11 @@ struct ConversationSurface: View {
                 draft: $draft,
                 isFocused: $isComposerFocused,
                 isDisabled: isOffline,
+                attachmentUploadState: attachmentUploadState,
+                chooseAttachment: uploadAttachment == nil
+                    ? nil
+                    : { isChoosingAttachment = true },
+                retryAttachmentUpload: retryAttachmentUpload,
                 send: sendDraft
             )
         }
@@ -241,6 +279,19 @@ struct ConversationSurface: View {
         }
         .onChange(of: page.messages) {
             messages = page.messages
+        }
+        .task(id: attachmentInsertion?.id) {
+            insertAttachmentIfReady()
+        }
+        .fileImporter(
+            isPresented: $isChoosingAttachment,
+            allowedContentTypes: [.data],
+            allowsMultipleSelection: false
+        ) { result in
+            guard case let .success(urls) = result,
+                  let url = urls.first
+            else { return }
+            uploadAttachment?(url)
         }
         .sheet(item: $editingMessage) { message in
             EditMessageSheet(message: message) { content in
@@ -315,6 +366,18 @@ struct ConversationSurface: View {
         }
         draft = ""
         followsNewest = true
+    }
+
+    private func insertAttachmentIfReady() {
+        guard let attachmentInsertion,
+              attachmentInsertion.key == page.key
+        else { return }
+        if !draft.isEmpty, draft.last?.isWhitespace == false {
+            draft.append("\n")
+        }
+        draft.append(attachmentInsertion.markdown)
+        consumeAttachmentInsertion?(attachmentInsertion.id)
+        isComposerFocused = true
     }
 }
 
@@ -413,6 +476,10 @@ private struct MessageRow: View {
     let toggleRead: (() -> Void)?
     let retryAction: () -> Void
     let retrySend: () -> Void
+    let mediaLocalURLs: [String: String]
+    let mediaFailures: [String: String]
+    let requestMedia: ((String) -> Void)?
+    let retryMedia: ((String) -> Void)?
 
     @State private var isHovered = false
 
@@ -458,7 +525,13 @@ private struct MessageRow: View {
                     }
                 }
 
-                MessageContentView(blocks: message.content)
+                MessageContentView(
+                    blocks: message.content,
+                    mediaLocalURLs: mediaLocalURLs,
+                    mediaFailures: mediaFailures,
+                    requestMedia: requestMedia,
+                    retryMedia: retryMedia
+                )
 
                 if message.reactionCount > 0 {
                     Button(action: toggleReaction) {
@@ -697,10 +770,38 @@ private struct ComposerView: View {
     @Binding var draft: String
     var isFocused: FocusState<Bool>.Binding
     let isDisabled: Bool
+    let attachmentUploadState: AttachmentUploadState
+    let chooseAttachment: (() -> Void)?
+    let retryAttachmentUpload: (() -> Void)?
     let send: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppTheme.Spacing.small) {
+            switch attachmentUploadState {
+            case .idle:
+                EmptyView()
+            case let .uploading(filename):
+                HStack(spacing: AppTheme.Spacing.small) {
+                    ProgressView().controlSize(.small)
+                    Text("Uploading \(filename)…")
+                        .lineLimit(1)
+                }
+                .font(AppTheme.Typography.metadata)
+                .foregroundStyle(AppTheme.Colors.secondaryText)
+            case let .failed(filename, message):
+                HStack(spacing: AppTheme.Spacing.small) {
+                    Image(systemName: "exclamationmark.triangle")
+                    Text("\(filename): \(message)")
+                        .lineLimit(1)
+                    if let retryAttachmentUpload {
+                        Button("Retry", action: retryAttachmentUpload)
+                            .buttonStyle(.borderless)
+                    }
+                }
+                .font(AppTheme.Typography.metadata)
+                .foregroundStyle(AppTheme.Colors.destructive)
+            }
+
             TextField(
                 "Message \(conversationTitle)",
                 text: $draft,
@@ -723,9 +824,16 @@ private struct ComposerView: View {
             )
 
             HStack(spacing: AppTheme.Spacing.small) {
-                Button {} label: {
+                Button {
+                    chooseAttachment?()
+                } label: {
                     Image(systemName: "plus")
                 }
+                .disabled(
+                    isDisabled
+                        || chooseAttachment == nil
+                        || attachmentUploadState.isUploading
+                )
                 .help("Add attachment")
                 .accessibilityLabel("Add attachment")
 
