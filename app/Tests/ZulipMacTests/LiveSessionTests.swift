@@ -182,24 +182,36 @@ struct LiveSessionTests {
             }
         )
         #expect(model.sendText("A reply", to: key))
-        #expect(
-            core.commands.contains {
-                if case let .sendChannelMessage(
-                    _,
-                    commandAccountID,
-                    streamID,
-                    topic,
-                    content,
-                    _
-                ) = $0 {
-                    return commandAccountID == accountID
-                        && streamID == 5
-                        && topic == "macOS"
-                        && content == "A reply"
-                }
-                return false
-            }
+        let sendCommand = core.commands.last {
+            if case .sendChannelMessage = $0 { return true }
+            return false
+        }
+        guard case let .sendChannelMessage(
+            sendRequestID,
+            commandAccountID,
+            streamID,
+            topic,
+            content,
+            localID
+        ) = sendCommand else {
+            Issue.record("Expected send command")
+            return
+        }
+        #expect(commandAccountID == accountID)
+        #expect(streamID == 5)
+        #expect(topic == "macOS")
+        #expect(content == "A reply")
+        core.emit(
+            .messageSent(
+                requestID: sendRequestID,
+                localID: localID,
+                messageID: 45
+            )
         )
+        await eventually {
+            guard case let .loaded(page) = model.conversationState else { return false }
+            return page.messages.allSatisfy { $0.deliveryState == .sent }
+        }
 
         model.loadOlderMessages(for: key)
         let historyCommand = core.commands.last {
@@ -262,6 +274,131 @@ struct LiveSessionTests {
                 && page.beforeCursor == nil
                 && !model.isLoadingOlderMessages
         }
+    }
+
+    @Test("Message actions expose pending, rollback, retry, and success states")
+    func messageActions() async throws {
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(
+            client: core,
+            credentialStore: MemoryCredentialStore()
+        )
+        model.startObserving()
+        let accountID = "account-actions"
+        let key = ConversationKey.topic(
+            accountID: accountID,
+            streamID: 5,
+            topic: "macOS"
+        )
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: accountID),
+                credential: StoredAPICredential(accountID: accountID, apiKey: "key"),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.connectionState == .connected }
+        model.openConversation(key)
+        core.emit(
+            .conversationOpened(
+                requestID: 2,
+                page: LiveConversationPage(
+                    key: key,
+                    messages: [
+                        LiveMessageSnapshot(
+                            messageID: 44,
+                            senderID: 9,
+                            senderFullName: "Maya Chen",
+                            timestamp: Date(timeIntervalSince1970: 1_700_000_000),
+                            contentHTML: "Original",
+                            streamID: 5,
+                            topic: "macOS",
+                            recipientIDs: [],
+                            flags: ["read"],
+                            reactions: []
+                        ),
+                    ],
+                    foundOldest: true,
+                    foundNewest: true
+                )
+            )
+        )
+        await eventually { self.loadedMessage(model)?.id == 44 }
+        let initial = try #require(loadedMessage(model))
+
+        #expect(model.toggleStar(initial))
+        let starCommand = try #require(core.commands.last {
+            if case .updateMessageFlag = $0 { return true }
+            return false
+        })
+        guard case let .updateMessageFlag(starID, _, [44], .starred, true) = starCommand else {
+            Issue.record("Expected star command")
+            return
+        }
+        #expect(loadedMessage(model)?.isStarred == true)
+        #expect(loadedMessage(model)?.actionState == .pending(.star))
+
+        core.emit(.failed(requestID: starID, message: "fixture rejection"))
+        await eventually {
+            self.loadedMessage(model)?.actionState
+                == .failed(.star, message: "fixture rejection")
+        }
+        #expect(loadedMessage(model)?.isStarred == false)
+
+        model.retryMessageAction(for: 44)
+        let retry = try #require(core.commands.last)
+        guard case let .updateMessageFlag(retryID, _, [44], .starred, true) = retry else {
+            Issue.record("Expected star retry")
+            return
+        }
+        core.emit(
+            .messageFlagUpdated(
+                requestID: retryID,
+                messageIDs: [44],
+                flag: .starred,
+                added: true
+            )
+        )
+        await eventually { self.loadedMessage(model)?.actionState == .idle }
+        #expect(loadedMessage(model)?.isStarred == true)
+
+        let starred = try #require(loadedMessage(model))
+        #expect(model.toggleThumbsUp(starred))
+        guard case let .updateReaction(reactionID, _, 44, "thumbs_up", true) = core.commands.last
+        else {
+            Issue.record("Expected reaction command")
+            return
+        }
+        core.emit(
+            .reactionUpdated(
+                requestID: reactionID,
+                messageID: 44,
+                emojiName: "thumbs_up",
+                added: true
+            )
+        )
+        await eventually { self.loadedMessage(model)?.actionState == .idle }
+        #expect(loadedMessage(model)?.reactionCount == 1)
+
+        let reacted = try #require(loadedMessage(model))
+        #expect(model.editMessage(reacted, content: "Edited"))
+        guard case let .editMessage(editID, _, 44, "Edited") = core.commands.last else {
+            Issue.record("Expected edit command")
+            return
+        }
+        #expect(loadedMessage(model)?.plainText == "Edited")
+        core.emit(.messageEdited(requestID: editID, messageID: 44, content: "Edited"))
+        await eventually { self.loadedMessage(model)?.actionState == .idle }
+
+        let edited = try #require(loadedMessage(model))
+        #expect(model.deleteMessage(edited))
+        guard case let .deleteMessage(deleteID, _, 44) = core.commands.last else {
+            Issue.record("Expected delete command")
+            return
+        }
+        core.emit(.messageDeleted(requestID: deleteID, messageID: 44))
+        await eventually { self.loadedMessage(model) == nil }
     }
 
     @Test("Topic drafts, rename, move, and retry keep correlated state")
@@ -631,6 +768,11 @@ struct LiveSessionTests {
             userID: 9,
             fullName: "Maya Chen"
         )
+    }
+
+    private func loadedMessage(_ model: LiveSessionViewModel) -> MessageViewData? {
+        guard case let .loaded(page) = model.conversationState else { return nil }
+        return page.messages.first(where: { $0.id == 44 })
     }
 
     private func eventually(

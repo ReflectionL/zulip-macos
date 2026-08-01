@@ -22,6 +22,7 @@ const MAX_FETCH_MESSAGES: u16 = 1_000;
 const MAX_SEARCH_MESSAGES: u16 = 100;
 const MAX_SEARCH_QUERY_BYTES: usize = 512;
 const MAX_TOPIC_NAME_BYTES: usize = 1_024;
+const MAX_EMOJI_NAME_BYTES: usize = 256;
 
 /// Stable server-side conversation selection.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -130,6 +131,42 @@ pub enum TopicPropagation {
     ChangeOne,
     /// Rename every message in the selected message's current topic.
     ChangeAll,
+}
+
+/// Personal message flag supported by the first daily-use write surface.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MessageFlag {
+    /// Whether the current user has read the message.
+    Read,
+    /// Whether the current user starred the message.
+    Starred,
+}
+
+impl MessageFlag {
+    const fn api_value(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Starred => "starred",
+        }
+    }
+}
+
+/// Add or remove a personal message property.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MessageWriteOperation {
+    /// Add the flag or reaction.
+    Add,
+    /// Remove the flag or reaction.
+    Remove,
+}
+
+impl MessageWriteOperation {
+    const fn api_value(self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::Remove => "remove",
+        }
+    }
 }
 
 impl TopicPropagation {
@@ -538,13 +575,111 @@ impl MessageClient {
         document.validate_result()
     }
 
-    /// Adds the personal `read` flag to the supplied messages.
+    /// Replaces the Zulip-flavored Markdown content of one message.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageApiError`] for invalid identifiers/content, transport,
+    /// rejection, size, or response failures.
+    pub async fn update_message_content(
+        &self,
+        message_id: i64,
+        content: &str,
+    ) -> Result<(), MessageApiError> {
+        if message_id <= 0 {
+            return Err(MessageApiError::InvalidInput);
+        }
+        validate_content(content)?;
+        let path = format!("{MESSAGES_PATH}/{message_id}");
+        let response = self
+            .http
+            .patch(self.base_url.endpoint(&path))
+            .basic_auth(&self.email, Some(self.api_key.expose_secret()))
+            .form(&[("content", content)])
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let document: ApiResultDocument =
+            decode_response(response, MAX_WRITE_RESPONSE_BYTES).await?;
+        document.validate_result()
+    }
+
+    /// Permanently deletes one message when the acting user has permission.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageApiError`] for invalid identifiers, transport,
+    /// rejection, size, or response failures.
+    pub async fn delete_message(&self, message_id: i64) -> Result<(), MessageApiError> {
+        if message_id <= 0 {
+            return Err(MessageApiError::InvalidInput);
+        }
+        let path = format!("{MESSAGES_PATH}/{message_id}");
+        let response = self
+            .http
+            .delete(self.base_url.endpoint(&path))
+            .basic_auth(&self.email, Some(self.api_key.expose_secret()))
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let document: ApiResultDocument =
+            decode_response(response, MAX_WRITE_RESPONSE_BYTES).await?;
+        document.validate_result()
+    }
+
+    /// Adds or removes the current user's emoji reaction on one message.
+    ///
+    /// Zulip resolves the reaction namespace from `emoji_name`, matching the
+    /// documented compatibility behavior for Unicode and realm emoji.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageApiError`] for invalid identifiers/emoji names,
+    /// transport, rejection, size, or response failures.
+    pub async fn update_reaction(
+        &self,
+        message_id: i64,
+        emoji_name: &str,
+        operation: MessageWriteOperation,
+    ) -> Result<(), MessageApiError> {
+        if message_id <= 0 {
+            return Err(MessageApiError::InvalidInput);
+        }
+        let emoji_name = emoji_name.trim();
+        if emoji_name.is_empty()
+            || emoji_name.len() > MAX_EMOJI_NAME_BYTES
+            || emoji_name.chars().any(char::is_control)
+        {
+            return Err(MessageApiError::InvalidInput);
+        }
+        let path = format!("{MESSAGES_PATH}/{message_id}/reactions");
+        let request = match operation {
+            MessageWriteOperation::Add => self.http.post(self.base_url.endpoint(&path)),
+            MessageWriteOperation::Remove => self.http.delete(self.base_url.endpoint(&path)),
+        };
+        let response = request
+            .basic_auth(&self.email, Some(self.api_key.expose_secret()))
+            .form(&[("emoji_name", emoji_name)])
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let document: ApiResultDocument =
+            decode_response(response, MAX_WRITE_RESPONSE_BYTES).await?;
+        document.validate_result()
+    }
+
+    /// Adds or removes a personal flag from the supplied messages.
     ///
     /// # Errors
     ///
     /// Returns [`MessageApiError`] for empty/invalid identifiers, transport,
     /// rejection, size, or response failures.
-    pub async fn mark_read(&self, message_ids: &[i64]) -> Result<(), MessageApiError> {
+    pub async fn update_message_flag(
+        &self,
+        message_ids: &[i64],
+        flag: MessageFlag,
+        operation: MessageWriteOperation,
+    ) -> Result<(), MessageApiError> {
         if message_ids.is_empty() || message_ids.iter().any(|id| *id <= 0) {
             return Err(MessageApiError::InvalidInput);
         }
@@ -556,8 +691,8 @@ impl MessageClient {
             .basic_auth(&self.email, Some(self.api_key.expose_secret()))
             .form(&[
                 ("messages", messages.as_str()),
-                ("op", "add"),
-                ("flag", "read"),
+                ("op", operation.api_value()),
+                ("flag", flag.api_value()),
             ])
             .send()
             .await
@@ -565,6 +700,17 @@ impl MessageClient {
         let document: ApiResultDocument =
             decode_response(response, MAX_WRITE_RESPONSE_BYTES).await?;
         document.validate_result()
+    }
+
+    /// Adds the personal `read` flag to the supplied messages.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageApiError`] for empty/invalid identifiers, transport,
+    /// rejection, size, or response failures.
+    pub async fn mark_read(&self, message_ids: &[i64]) -> Result<(), MessageApiError> {
+        self.update_message_flag(message_ids, MessageFlag::Read, MessageWriteOperation::Add)
+            .await
     }
 }
 
@@ -697,6 +843,10 @@ struct MessageDocument {
     topic: Option<String>,
     #[serde(default)]
     display_recipient: Value,
+    #[serde(default)]
+    flags: Vec<String>,
+    #[serde(default)]
+    reactions: Vec<crate::sync::ReactionDocument>,
 }
 
 impl MessageDocument {
@@ -729,6 +879,12 @@ impl MessageDocument {
             stream_id: self.stream_id,
             topic: self.topic,
             recipient_ids,
+            flags: self.flags,
+            reactions: self
+                .reactions
+                .into_iter()
+                .filter_map(crate::sync::ReactionDocument::normalize)
+                .collect(),
         })
     }
 }
@@ -790,7 +946,8 @@ mod tests {
     use reqwest::StatusCode;
 
     use super::{
-        ConversationTarget, MessageApiError, MessageClient, OutgoingMessage, TopicPropagation,
+        ConversationTarget, MessageApiError, MessageClient, MessageFlag, MessageWriteOperation,
+        OutgoingMessage, TopicPropagation,
     };
     use crate::auth::SecretString;
 
@@ -814,7 +971,9 @@ mod tests {
                         "type":"stream",
                         "stream_id":5,
                         "subject":"Rust core",
-                        "display_recipient":"engineering"
+                        "display_recipient":"engineering",
+                        "flags":["read","starred"],
+                        "reactions":[{"emoji_name":"thumbs_up","user_id":7}]
                     }]
                 }"#
                 .to_owned(),
@@ -841,6 +1000,8 @@ mod tests {
             .expect("fetch conversation");
         assert_eq!(page.messages[0].id, 42);
         assert_eq!(page.messages[0].content_html, "<p>Hello</p>");
+        assert_eq!(page.messages[0].flags, vec!["read", "starred"]);
+        assert_eq!(page.messages[0].reactions[0].emoji_name, "thumbs_up");
         assert!(page.found_oldest && page.found_newest);
 
         let message_id = client
@@ -920,6 +1081,73 @@ mod tests {
         assert!(moved.starts_with("PATCH /api/v1/messages/43 HTTP/1.1"));
         assert!(moved.contains("topic=UI+polish"));
         assert!(moved.contains("propagate_mode=change_one"));
+    }
+
+    #[tokio::test]
+    async fn daily_message_actions_follow_the_zulip_protocol() {
+        let responses = vec![
+            (StatusCode::OK, r#"{"result":"success"}"#.to_owned()),
+            (StatusCode::OK, r#"{"result":"success"}"#.to_owned()),
+            (StatusCode::OK, r#"{"result":"success"}"#.to_owned()),
+            (StatusCode::OK, r#"{"result":"success"}"#.to_owned()),
+            (
+                StatusCode::OK,
+                r#"{"result":"success","messages":[42]}"#.to_owned(),
+            ),
+            (
+                StatusCode::OK,
+                r#"{"result":"success","messages":[42]}"#.to_owned(),
+            ),
+        ];
+        let (server, requests) = spawn_mock(responses);
+        let client = MessageClient::new(&server, "maya@example.com", SecretString::new(API_KEY))
+            .expect("message client");
+
+        client
+            .update_message_content(42, "Edited **content**")
+            .await
+            .expect("edit content");
+        client.delete_message(43).await.expect("delete message");
+        client
+            .update_reaction(42, "thumbs_up", MessageWriteOperation::Add)
+            .await
+            .expect("add reaction");
+        client
+            .update_reaction(42, "thumbs_up", MessageWriteOperation::Remove)
+            .await
+            .expect("remove reaction");
+        client
+            .update_message_flag(&[42], MessageFlag::Starred, MessageWriteOperation::Add)
+            .await
+            .expect("star message");
+        client
+            .update_message_flag(&[42], MessageFlag::Read, MessageWriteOperation::Remove)
+            .await
+            .expect("mark unread");
+
+        let edit = requests.recv().expect("edit request");
+        assert!(edit.starts_with("PATCH /api/v1/messages/42 HTTP/1.1"));
+        assert!(edit.contains("content=Edited+"));
+        assert!(edit.contains("content"));
+
+        let delete = requests.recv().expect("delete request");
+        assert!(delete.starts_with("DELETE /api/v1/messages/43 HTTP/1.1"));
+
+        let add_reaction = requests.recv().expect("add reaction request");
+        assert!(add_reaction.starts_with("POST /api/v1/messages/42/reactions HTTP/1.1"));
+        assert!(add_reaction.contains("emoji_name=thumbs_up"));
+
+        let remove_reaction = requests.recv().expect("remove reaction request");
+        assert!(remove_reaction.starts_with("DELETE /api/v1/messages/42/reactions HTTP/1.1"));
+        assert!(remove_reaction.contains("emoji_name=thumbs_up"));
+
+        let star = requests.recv().expect("star request");
+        assert!(star.contains("op=add"));
+        assert!(star.contains("flag=starred"));
+
+        let unread = requests.recv().expect("unread request");
+        assert!(unread.contains("op=remove"));
+        assert!(unread.contains("flag=read"));
     }
 
     #[tokio::test]
@@ -1125,6 +1353,21 @@ mod tests {
                 .is_err()
         );
         assert!(client.mark_read(&[]).await.is_err());
+        assert!(client.update_message_content(0, "valid").await.is_err());
+        assert!(client.update_message_content(42, " \0 ").await.is_err());
+        assert!(client.delete_message(0).await.is_err());
+        assert!(
+            client
+                .update_reaction(42, "\n", MessageWriteOperation::Add)
+                .await
+                .is_err()
+        );
+        assert!(
+            client
+                .update_message_flag(&[], MessageFlag::Starred, MessageWriteOperation::Add)
+                .await
+                .is_err()
+        );
         assert!(
             client
                 .update_message_topic(0, "Topic", TopicPropagation::ChangeOne)

@@ -326,6 +326,27 @@ private struct LiveWindowView: View {
                 renameTopic: renameAction(for: page),
                 moveMessage: { message in
                     topicSheet = .move(message: message)
+                },
+                editMessage: { message, content in
+                    session.editMessage(message, content: content)
+                },
+                deleteMessage: { message in
+                    session.deleteMessage(message)
+                },
+                reactToMessage: { message in
+                    session.toggleThumbsUp(message)
+                },
+                starMessage: { message in
+                    session.toggleStar(message)
+                },
+                setMessageRead: { message, read in
+                    session.setRead(message, read: read)
+                },
+                retryMessageAction: { message in
+                    session.retryMessageAction(for: message.id)
+                },
+                retrySend: { message in
+                    session.retrySend(message)
                 }
             )
         case let .offline(page):

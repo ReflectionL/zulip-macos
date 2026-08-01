@@ -5,9 +5,9 @@ Last updated: 2026-08-01
 ## Current State
 
 - Milestone: MVP — daily use
-- Current step: —
-- Next step: `MVP-003` (`ready`)
-- Overall status: ready for the next step
+- Current step: none
+- Next step: `MVP-005` (`ready`)
+- Overall status: in progress
 
 ## Step Status
 
@@ -34,7 +34,8 @@ Last updated: 2026-08-01
 | MVP-001 | done | 2026-07-31 | 2026-07-31 | Added authenticated Inbox/Mentions/Starred/Unread narrows, bounded topic discovery, channel/topic/self-and-user DM navigation, stable account-scoped conversation keys, anchored older-message requests, duplicate-free ordered page merging, latest-page refresh, and loading UI. `./scripts/check.sh`: 31 Rust core tests, 4 FFI tests, 29 Swift tests, strict Clippy, formatting, builds, and docs pass. Real Cloud smoke opened every quick destination, a channel, a self-DM, and `#Zulip > 欢迎来到Zulip！`; loading history merged 6 older messages into an initial 10-message page without duplicates or reordering, preserved the viewport, and removed the load control at the oldest page. | — | — |
 | MVP-002 | done | 2026-07-31 | 2026-07-31 | Added bounded server-side `search` narrows, immutable account-scoped result keys, anchored context loading, and correlated Rust actor events. Added a native search overlay with debouncing, loading/empty/error states, stale-response suppression, `⌘F`, result routing, viewport positioning, visible target highlighting, and live-refresh preservation. `./scripts/check.sh`: 32 Rust core tests, 6 FFI actor tests, 31 Swift tests, strict Clippy, formatting, builds, and docs pass. Real Cloud smoke searched a unique existing message, returned one result, opened its self-DM context, highlighted the target, and confirmed `⌘F` transfers focus from the composer to search. | — | — |
 | MVP-002A | done | 2026-07-31 | 2026-08-01 | Implemented inline expandable channel topics, validated new-topic drafts, whole-topic rename via `change_all`, single-message moves via `change_one`, correlated success/failure state, and retry. `./scripts/check.sh` passes: 33 Rust core, 7 FFI actor, and 33 Swift tests; the mock write smoke verifies both PATCH propagation modes. Computer Use verified real-account topic discovery/routing, independent channel collapse/expand, rename and move dialogs, existing-topic choices, and a local new-topic draft with an empty timeline/composer; no live write was submitted. | — | — |
-| MVP-003 | ready | — | — | Pending/error/retry behavior for daily message actions follows the Topic workflow. | — | — |
+| MVP-003 | done | 2026-08-01 | 2026-08-01 | Added typed Rust edit/delete/reaction/read/star APIs, correlated UniFFI commands/events, server-derived flags/reactions, pending local sends, optimistic action state, failure rollback, explicit retry, native edit/delete/read actions, and an exact-target redacted live-action smoke. `./scripts/check.sh` passes with 34 Rust core, 8 FFI actor, and 34 Swift tests. The designated Cloud account passed disposable self-DM send, edit, reaction, star, unread/read, server reconciliation, and permanent deletion; prior disposable smoke data was also removed. | — | — |
+| MVP-005 | ready | — | — | Reprioritized native Zulip HTML parsing immediately after message actions at the user's request; dependency is now complete. | — | — |
 
 Later milestones remain defined in `PLAN.md` and will be added here when they
 become active; completed rows are never removed.
@@ -43,6 +44,28 @@ become active; completed rows are never removed.
 
 ### 2026-08-01
 
+- Closed `MVP-003`: real sends now use view-model-owned pending local echoes;
+  edits, deletes, `thumbs_up` reactions, stars, and read/unread writes cross the
+  typed actor boundary with correlated success or sanitized failure. Optimistic
+  state rolls back on failure and remains manually retryable; failed writes are
+  never replayed automatically.
+- Added server-backed message flags/reaction snapshots, native edit and delete
+  surfaces, explicit permanent-delete confirmation, read-state menu actions,
+  failure labels, and retry controls.
+- `./scripts/check.sh` passes with 34 Rust core tests, 8 FFI actor tests, and 34
+  Swift tests, plus strict Clippy, formatting, regenerated bindings, and the
+  debug application build.
+- The designated Cloud account passed a redacted, exact-target self-DM smoke:
+  send, edit, add reaction, star, mark unread/read, refetch and reconcile server
+  state, then delete the disposable message. The earlier GUI smoke message was
+  found by its unique marker and deleted as cleanup. No credential was printed
+  or passed as a command argument/environment value.
+- Marked `MVP-005` ready.
+- Reprioritized `MVP-005` ahead of files/media at the user's request. Updated
+  dependencies so `MVP-003` closes first, then native content parsing, then
+  `MVP-004`; `MVP-006` now waits for files/media as well.
+- Began `MVP-003` with explicit real-write scope and correlated pending,
+  rollback, and manual retry acceptance criteria.
 - Completed the running-app `MVP-002A` smoke against the designated Cloud
   account: all three channels exposed inline topics; channel topics collapsed
   and expanded independently; selecting a topic loaded its stable route.

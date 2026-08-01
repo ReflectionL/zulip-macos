@@ -61,6 +61,8 @@ public struct LiveMessageSnapshot: Equatable, Sendable {
     public let streamID: Int64?
     public let topic: String?
     public let recipientIDs: [Int64]
+    public let flags: [String]
+    public let reactions: [LiveReactionSnapshot]
 
     public init(
         messageID: Int64,
@@ -70,7 +72,9 @@ public struct LiveMessageSnapshot: Equatable, Sendable {
         contentHTML: String,
         streamID: Int64?,
         topic: String?,
-        recipientIDs: [Int64]
+        recipientIDs: [Int64],
+        flags: [String] = [],
+        reactions: [LiveReactionSnapshot] = []
     ) {
         self.messageID = messageID
         self.senderID = senderID
@@ -80,6 +84,18 @@ public struct LiveMessageSnapshot: Equatable, Sendable {
         self.streamID = streamID
         self.topic = topic
         self.recipientIDs = recipientIDs
+        self.flags = flags
+        self.reactions = reactions
+    }
+}
+
+public struct LiveReactionSnapshot: Equatable, Sendable {
+    public let emojiName: String
+    public let userID: Int64
+
+    public init(emojiName: String, userID: Int64) {
+        self.emojiName = emojiName
+        self.userID = userID
     }
 }
 
@@ -143,6 +159,11 @@ public struct LiveSearchResult: Equatable, Sendable {
 public enum LiveTopicPropagation: Equatable, Sendable {
     case changeOne
     case changeAll
+}
+
+public enum LiveMessageFlag: Equatable, Sendable {
+    case read
+    case starred
 }
 
 public struct LiveTopicUpdate: Equatable, Sendable {
@@ -247,6 +268,27 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
         content: String,
         localID: String
     )
+    case editMessage(
+        requestID: UInt64,
+        accountID: String,
+        messageID: Int64,
+        content: String
+    )
+    case deleteMessage(requestID: UInt64, accountID: String, messageID: Int64)
+    case updateReaction(
+        requestID: UInt64,
+        accountID: String,
+        messageID: Int64,
+        emojiName: String,
+        add: Bool
+    )
+    case updateMessageFlag(
+        requestID: UInt64,
+        accountID: String,
+        messageIDs: [Int64],
+        flag: LiveMessageFlag,
+        add: Bool
+    )
     case renameTopic(
         requestID: UInt64,
         key: ConversationKey,
@@ -278,6 +320,10 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
              let .openMessage(requestID, _, _, _, _),
              let .sendChannelMessage(requestID, _, _, _, _, _),
              let .sendDirectMessage(requestID, _, _, _, _),
+             let .editMessage(requestID, _, _, _),
+             let .deleteMessage(requestID, _, _),
+             let .updateReaction(requestID, _, _, _, _),
+             let .updateMessageFlag(requestID, _, _, _, _),
              let .renameTopic(requestID, _, _, _),
              let .moveMessageToTopic(requestID, _, _, _),
              let .markRead(requestID, _, _),
@@ -306,6 +352,14 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
             "BridgeCommand.sendChannelMessage"
         case .sendDirectMessage:
             "BridgeCommand.sendDirectMessage"
+        case .editMessage:
+            "BridgeCommand.editMessage"
+        case .deleteMessage:
+            "BridgeCommand.deleteMessage"
+        case .updateReaction:
+            "BridgeCommand.updateReaction"
+        case .updateMessageFlag:
+            "BridgeCommand.updateMessageFlag"
         case .renameTopic:
             "BridgeCommand.renameTopic"
         case .moveMessageToTopic:
@@ -397,6 +451,35 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
                 content: content,
                 localId: localID
             )
+        case let .editMessage(requestID, accountID, messageID, content):
+            .editMessage(
+                requestId: requestID,
+                accountId: accountID,
+                messageId: messageID,
+                content: content
+            )
+        case let .deleteMessage(requestID, accountID, messageID):
+            .deleteMessage(
+                requestId: requestID,
+                accountId: accountID,
+                messageId: messageID
+            )
+        case let .updateReaction(requestID, accountID, messageID, emojiName, add):
+            .updateReaction(
+                requestId: requestID,
+                accountId: accountID,
+                messageId: messageID,
+                emojiName: emojiName,
+                add: add
+            )
+        case let .updateMessageFlag(requestID, accountID, messageIDs, flag, add):
+            .updateMessageFlag(
+                requestId: requestID,
+                accountId: accountID,
+                messageIds: messageIDs,
+                flag: flag == .read ? .read : .starred,
+                add: add
+            )
         case let .renameTopic(requestID, key, messageID, newTopic):
             .renameTopic(
                 requestId: requestID,
@@ -451,6 +534,20 @@ public enum BridgeEvent:
         page: LiveConversationPage
     )
     case messageSent(requestID: UInt64, localID: String, messageID: Int64)
+    case messageEdited(requestID: UInt64, messageID: Int64, content: String)
+    case messageDeleted(requestID: UInt64, messageID: Int64)
+    case reactionUpdated(
+        requestID: UInt64,
+        messageID: Int64,
+        emojiName: String,
+        added: Bool
+    )
+    case messageFlagUpdated(
+        requestID: UInt64,
+        messageIDs: [Int64],
+        flag: LiveMessageFlag,
+        added: Bool
+    )
     case topicUpdated(requestID: UInt64, update: LiveTopicUpdate)
     case messagesMarkedRead(requestID: UInt64, messageIDs: [Int64])
     case retryScheduled(accountID: String, delayMilliseconds: UInt64)
@@ -466,6 +563,10 @@ public enum BridgeEvent:
              let .searchCompleted(requestID, _, _),
              let .messageFocused(requestID, _, _),
              let .messageSent(requestID, _, _),
+             let .messageEdited(requestID, _, _),
+             let .messageDeleted(requestID, _),
+             let .reactionUpdated(requestID, _, _, _),
+             let .messageFlagUpdated(requestID, _, _, _),
              let .topicUpdated(requestID, _),
              let .messagesMarkedRead(requestID, _),
              let .disconnected(requestID):
@@ -495,6 +596,14 @@ public enum BridgeEvent:
             "Message focused"
         case .messageSent:
             "Message sent"
+        case .messageEdited:
+            "Message edited"
+        case .messageDeleted:
+            "Message deleted"
+        case .reactionUpdated:
+            "Reaction updated"
+        case .messageFlagUpdated:
+            "Message flag updated"
         case .topicUpdated:
             "Topic updated"
         case .messagesMarkedRead:
@@ -669,6 +778,10 @@ private extension LiveMessageSnapshot {
         streamID = message.streamId
         topic = message.topic
         recipientIDs = message.recipientIds
+        flags = message.flags
+        reactions = message.reactions.map {
+            LiveReactionSnapshot(emojiName: $0.emojiName, userID: $0.userId)
+        }
     }
 }
 
@@ -750,6 +863,28 @@ private extension BridgeEvent {
                 requestID: requestID,
                 localID: localID,
                 messageID: messageID
+            )
+        case let .messageEdited(requestID, messageID, content):
+            self = .messageEdited(
+                requestID: requestID,
+                messageID: messageID,
+                content: content
+            )
+        case let .messageDeleted(requestID, messageID):
+            self = .messageDeleted(requestID: requestID, messageID: messageID)
+        case let .reactionUpdated(requestID, messageID, emojiName, added):
+            self = .reactionUpdated(
+                requestID: requestID,
+                messageID: messageID,
+                emojiName: emojiName,
+                added: added
+            )
+        case let .messageFlagUpdated(requestID, messageIDs, flag, added):
+            self = .messageFlagUpdated(
+                requestID: requestID,
+                messageIDs: messageIDs,
+                flag: flag == .read ? .read : .starred,
+                added: added
             )
         case let .topicUpdated(
             requestID,

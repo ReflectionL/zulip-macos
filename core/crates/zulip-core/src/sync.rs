@@ -86,6 +86,19 @@ pub struct MessageSummary {
     pub topic: Option<String>,
     /// Recipient identifiers for direct messages.
     pub recipient_ids: Vec<i64>,
+    /// Personal flags returned for this account, such as `read` and `starred`.
+    pub flags: Vec<String>,
+    /// Reactions currently attached to this message.
+    pub reactions: Vec<ReactionSummary>,
+}
+
+/// One normalized reaction attached to a message.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReactionSummary {
+    /// Stable emoji name used by Zulip's reaction write API.
+    pub emoji_name: String,
+    /// Zulip identifier of the reacting user.
+    pub user_id: i64,
 }
 
 /// Immutable state seeded by the atomic `register` response.
@@ -1286,6 +1299,31 @@ struct MessageDocument {
     topic: Option<String>,
     #[serde(default)]
     display_recipient: Value,
+    #[serde(default)]
+    flags: Vec<String>,
+    #[serde(default)]
+    reactions: Vec<ReactionDocument>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ReactionDocument {
+    emoji_name: String,
+    user_id: i64,
+}
+
+impl ReactionDocument {
+    pub(crate) fn normalize(self) -> Option<ReactionSummary> {
+        if self.user_id <= 0
+            || self.emoji_name.trim().is_empty()
+            || self.emoji_name.chars().any(char::is_control)
+        {
+            return None;
+        }
+        Some(ReactionSummary {
+            emoji_name: self.emoji_name,
+            user_id: self.user_id,
+        })
+    }
 }
 
 impl MessageDocument {
@@ -1320,6 +1358,12 @@ impl MessageDocument {
             stream_id: self.stream_id,
             topic: self.topic,
             recipient_ids,
+            flags: self.flags,
+            reactions: self
+                .reactions
+                .into_iter()
+                .filter_map(ReactionDocument::normalize)
+                .collect(),
         })
     }
 }
@@ -1846,6 +1890,8 @@ mod tests {
             stream_id: Some(5),
             topic: Some("Rust core".to_owned()),
             recipient_ids: Vec::new(),
+            flags: Vec::new(),
+            reactions: Vec::new(),
         }
     }
 

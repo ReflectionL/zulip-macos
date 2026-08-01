@@ -11,10 +11,19 @@ struct ConversationSurface: View {
     var openSearch: (() -> Void)?
     var renameTopic: (() -> Void)?
     var moveMessage: ((MessageViewData) -> Void)?
+    var editMessage: ((MessageViewData, String) -> Bool)?
+    var deleteMessage: ((MessageViewData) -> Bool)?
+    var reactToMessage: ((MessageViewData) -> Bool)?
+    var starMessage: ((MessageViewData) -> Bool)?
+    var setMessageRead: ((MessageViewData, Bool) -> Bool)?
+    var retryMessageAction: ((MessageViewData) -> Void)?
+    var retrySend: ((MessageViewData) -> Void)?
 
     @State private var messages: [MessageViewData]
     @State private var draft = ""
     @State private var followsNewest = true
+    @State private var editingMessage: MessageViewData?
+    @State private var deletingMessage: MessageViewData?
     @FocusState private var isComposerFocused: Bool
 
     init(
@@ -26,7 +35,14 @@ struct ConversationSurface: View {
         submitMessage: ((String) -> Bool)? = nil,
         openSearch: (() -> Void)? = nil,
         renameTopic: (() -> Void)? = nil,
-        moveMessage: ((MessageViewData) -> Void)? = nil
+        moveMessage: ((MessageViewData) -> Void)? = nil,
+        editMessage: ((MessageViewData, String) -> Bool)? = nil,
+        deleteMessage: ((MessageViewData) -> Bool)? = nil,
+        reactToMessage: ((MessageViewData) -> Bool)? = nil,
+        starMessage: ((MessageViewData) -> Bool)? = nil,
+        setMessageRead: ((MessageViewData, Bool) -> Bool)? = nil,
+        retryMessageAction: ((MessageViewData) -> Void)? = nil,
+        retrySend: ((MessageViewData) -> Void)? = nil
     ) {
         self.page = page
         self.isOffline = isOffline
@@ -37,6 +53,13 @@ struct ConversationSurface: View {
         self.openSearch = openSearch
         self.renameTopic = renameTopic
         self.moveMessage = moveMessage
+        self.editMessage = editMessage
+        self.deleteMessage = deleteMessage
+        self.reactToMessage = reactToMessage
+        self.starMessage = starMessage
+        self.setMessageRead = setMessageRead
+        self.retryMessageAction = retryMessageAction
+        self.retrySend = retrySend
         _messages = State(initialValue: page.messages)
     }
 
@@ -99,14 +122,37 @@ struct ConversationSurface: View {
                                     message: message,
                                     isFocusedSearchResult: page.focusedMessageID == message.id,
                                     toggleReaction: {
-                                        toggleReaction(for: message.id)
+                                        if let reactToMessage {
+                                            _ = reactToMessage(message)
+                                        } else {
+                                            toggleReaction(for: message.id)
+                                        }
                                     },
                                     toggleStar: {
-                                        toggleStar(for: message.id)
+                                        if let starMessage {
+                                            _ = starMessage(message)
+                                        } else {
+                                            toggleStar(for: message.id)
+                                        }
                                     },
                                     moveToTopic: message.sourceStreamID == nil
                                         ? nil
-                                        : { moveMessage?(message) }
+                                        : { moveMessage?(message) },
+                                    edit: message.isOwnMessage && editMessage != nil
+                                        ? { editingMessage = message }
+                                        : nil,
+                                    delete: message.isOwnMessage && deleteMessage != nil
+                                        ? { deletingMessage = message }
+                                        : nil,
+                                    toggleRead: setMessageRead == nil
+                                        ? nil
+                                        : { _ = setMessageRead?(message, !message.isRead) },
+                                    retryAction: {
+                                        retryMessageAction?(message)
+                                    },
+                                    retrySend: {
+                                        retrySend?(message)
+                                    }
                                 )
                                 .id(message.id)
                             }
@@ -196,6 +242,33 @@ struct ConversationSurface: View {
         .onChange(of: page.messages) {
             messages = page.messages
         }
+        .sheet(item: $editingMessage) { message in
+            EditMessageSheet(message: message) { content in
+                if editMessage?(message, content) == true {
+                    editingMessage = nil
+                }
+            }
+        }
+        .confirmationDialog(
+            "Permanently delete this message?",
+            isPresented: Binding(
+                get: { deletingMessage != nil },
+                set: { if !$0 { deletingMessage = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Delete message", role: .destructive) {
+                if let message = deletingMessage {
+                    _ = deleteMessage?(message)
+                }
+                deletingMessage = nil
+            }
+            Button("Cancel", role: .cancel) {
+                deletingMessage = nil
+            }
+        } message: {
+            Text("This cannot be undone.")
+        }
     }
 
     private func toggleReaction(for messageID: Int64) {
@@ -224,7 +297,8 @@ struct ConversationSurface: View {
         let nextID = submitMessage == nil
             ? (messages.last?.id ?? 0) + 1
             : min(messages.last?.id ?? 0, 0) - 1
-        messages.append(
+        if submitMessage == nil {
+            messages.append(
             MessageViewData(
                 id: nextID,
                 accountID: page.key.accountID,
@@ -235,9 +309,10 @@ struct ConversationSurface: View {
                 timestamp: .now,
                 content: [.paragraph([.text(content)])],
                 isOwnMessage: true,
-                deliveryState: submitMessage == nil ? .sent : .pending
+                deliveryState: .sent
             )
-        )
+            )
+        }
         draft = ""
         followsNewest = true
     }
@@ -333,6 +408,11 @@ private struct MessageRow: View {
     let toggleReaction: () -> Void
     let toggleStar: () -> Void
     let moveToTopic: (() -> Void)?
+    let edit: (() -> Void)?
+    let delete: (() -> Void)?
+    let toggleRead: (() -> Void)?
+    let retryAction: () -> Void
+    let retrySend: () -> Void
 
     @State private var isHovered = false
 
@@ -363,6 +443,19 @@ private struct MessageRow: View {
                             .font(AppTheme.Typography.metadata)
                             .foregroundStyle(AppTheme.Colors.destructive)
                     }
+
+                    switch message.actionState {
+                    case let .pending(kind):
+                        Text(pendingLabel(kind))
+                            .font(AppTheme.Typography.metadata)
+                            .foregroundStyle(AppTheme.Colors.secondaryText)
+                    case .failed:
+                        Text("Action failed")
+                            .font(AppTheme.Typography.metadata)
+                            .foregroundStyle(AppTheme.Colors.destructive)
+                    case .idle:
+                        EmptyView()
+                    }
                 }
 
                 MessageContentView(blocks: message.content)
@@ -378,6 +471,21 @@ private struct MessageRow: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Thumbs up, \(message.reactionCount) reactions")
+                }
+
+                if message.deliveryState == .failed {
+                    Button("Retry send", action: retrySend)
+                        .buttonStyle(.borderless)
+                        .font(AppTheme.Typography.metadata)
+                } else if case let .failed(_, failure) = message.actionState {
+                    HStack(spacing: AppTheme.Spacing.small) {
+                        Text(failure)
+                            .lineLimit(1)
+                            .foregroundStyle(AppTheme.Colors.destructive)
+                        Button("Retry", action: retryAction)
+                            .buttonStyle(.borderless)
+                    }
+                    .font(AppTheme.Typography.metadata)
                 }
             }
 
@@ -413,7 +521,12 @@ private struct MessageRow: View {
                 isStarred: message.isStarred,
                 toggleReaction: toggleReaction,
                 toggleStar: toggleStar,
-                moveToTopic: moveToTopic
+                moveToTopic: moveToTopic,
+                edit: edit,
+                delete: delete,
+                toggleRead: toggleRead,
+                isRead: message.isRead,
+                isDisabled: message.actionState.isPending || message.deliveryState != .sent
             )
             .padding(.top, 4)
             .padding(.trailing, AppTheme.Spacing.small)
@@ -430,6 +543,27 @@ private struct MessageRow: View {
         .accessibilityAction(named: message.isStarred ? "Unstar" : "Star") {
             toggleStar()
         }
+        .accessibilityActions {
+            if let edit {
+                Button("Edit message", action: edit)
+            }
+            if let delete {
+                Button("Delete message", action: delete)
+            }
+            if let toggleRead {
+                Button(message.isRead ? "Mark unread" : "Mark read", action: toggleRead)
+            }
+        }
+    }
+
+    private func pendingLabel(_ kind: MessageActionKind) -> String {
+        switch kind {
+        case .edit: "Editing…"
+        case .delete: "Deleting…"
+        case .reaction: "Updating reaction…"
+        case .star: "Updating star…"
+        case .readState: "Updating read state…"
+        }
     }
 }
 
@@ -438,6 +572,11 @@ private struct MessageActions: View {
     let toggleReaction: () -> Void
     let toggleStar: () -> Void
     let moveToTopic: (() -> Void)?
+    let edit: (() -> Void)?
+    let delete: (() -> Void)?
+    let toggleRead: (() -> Void)?
+    let isRead: Bool
+    let isDisabled: Bool
 
     var body: some View {
         HStack(spacing: 0) {
@@ -454,9 +593,20 @@ private struct MessageActions: View {
             Menu {
                 Button("Reply") {}
                 Button("Copy link") {}
+                if let edit {
+                    Divider()
+                    Button("Edit message…", action: edit)
+                }
                 if let moveToTopic {
                     Divider()
                     Button("Move to topic…", action: moveToTopic)
+                }
+                if let toggleRead {
+                    Button(isRead ? "Mark unread" : "Mark read", action: toggleRead)
+                }
+                if let delete {
+                    Divider()
+                    Button("Delete message…", role: .destructive, action: delete)
                 }
             } label: {
                 Image(systemName: "ellipsis")
@@ -466,6 +616,7 @@ private struct MessageActions: View {
             .menuIndicator(.hidden)
             .help("More actions")
             .accessibilityLabel("More message actions")
+            .disabled(isDisabled)
         }
         .elevatedSurface(radius: AppTheme.Metrics.controlRadius)
         .shadow(color: .black.opacity(0.08), radius: 5, y: 2)
@@ -481,8 +632,63 @@ private struct MessageActions: View {
                 .frame(width: 30, height: 28)
         }
         .buttonStyle(.plain)
+        .disabled(isDisabled)
         .help(title)
         .accessibilityLabel(title)
+    }
+}
+
+private extension MessageActionState {
+    var isPending: Bool {
+        if case .pending = self {
+            return true
+        }
+        return false
+    }
+}
+
+private struct EditMessageSheet: View {
+    let message: MessageViewData
+    let save: (String) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var content: String
+
+    init(message: MessageViewData, save: @escaping (String) -> Void) {
+        self.message = message
+        self.save = save
+        _content = State(initialValue: message.plainText)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppTheme.Spacing.large) {
+            Text("Edit message")
+                .font(AppTheme.Typography.title)
+            TextEditor(text: $content)
+                .font(AppTheme.Typography.body)
+                .frame(minHeight: 140)
+                .padding(AppTheme.Spacing.small)
+                .background(AppTheme.Colors.hover.opacity(0.45))
+                .clipShape(
+                    RoundedRectangle(
+                        cornerRadius: AppTheme.Metrics.controlRadius,
+                        style: .continuous
+                    )
+                )
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    dismiss()
+                }
+                Button("Save") {
+                    save(content)
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(AppTheme.Spacing.extraLarge)
+        .frame(width: 480)
     }
 }
 

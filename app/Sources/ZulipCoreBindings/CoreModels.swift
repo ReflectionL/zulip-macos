@@ -214,6 +214,20 @@ public enum MessageDeliveryState: Equatable, Sendable {
     case failed
 }
 
+public enum MessageActionKind: Equatable, Sendable {
+    case edit
+    case delete
+    case reaction
+    case star
+    case readState
+}
+
+public enum MessageActionState: Equatable, Sendable {
+    case idle
+    case pending(MessageActionKind)
+    case failed(MessageActionKind, message: String)
+}
+
 public struct MessageViewData: Identifiable, Equatable, Sendable {
     public let id: Int64
     public let accountID: String
@@ -222,13 +236,16 @@ public struct MessageViewData: Identifiable, Equatable, Sendable {
     public let senderName: String
     public let senderInitials: String
     public let timestamp: Date
-    public let content: [ContentBlock]
+    public var content: [ContentBlock]
     public let isOwnMessage: Bool
     public let sourceStreamID: Int64?
     public let sourceTopic: String?
     public var isStarred: Bool
     public var reactionCount: Int
+    public var hasOwnThumbsUp: Bool
+    public var isRead: Bool
     public var deliveryState: MessageDeliveryState
+    public var actionState: MessageActionState
 
     public init(
         id: Int64,
@@ -244,7 +261,10 @@ public struct MessageViewData: Identifiable, Equatable, Sendable {
         sourceTopic: String? = nil,
         isStarred: Bool = false,
         reactionCount: Int = 0,
-        deliveryState: MessageDeliveryState = .sent
+        hasOwnThumbsUp: Bool = false,
+        isRead: Bool = true,
+        deliveryState: MessageDeliveryState = .sent,
+        actionState: MessageActionState = .idle
     ) {
         self.id = id
         self.accountID = accountID
@@ -259,7 +279,10 @@ public struct MessageViewData: Identifiable, Equatable, Sendable {
         self.sourceTopic = sourceTopic
         self.isStarred = isStarred
         self.reactionCount = reactionCount
+        self.hasOwnThumbsUp = hasOwnThumbsUp
+        self.isRead = isRead
         self.deliveryState = deliveryState
+        self.actionState = actionState
     }
 
     public var plainText: String {

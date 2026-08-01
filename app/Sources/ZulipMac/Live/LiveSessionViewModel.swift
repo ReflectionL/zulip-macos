@@ -70,6 +70,44 @@ enum TopicActionState: Equatable, Sendable {
     case failed(action: TopicAction, message: String)
 }
 
+private enum MessageAction: Equatable, Sendable {
+    case edit(messageID: Int64, content: String)
+    case delete(messageID: Int64)
+    case reaction(messageID: Int64, add: Bool)
+    case flag(messageID: Int64, flag: LiveMessageFlag, add: Bool)
+
+    var messageID: Int64 {
+        switch self {
+        case let .edit(messageID, _),
+             let .delete(messageID),
+             let .reaction(messageID, _),
+             let .flag(messageID, _, _):
+            messageID
+        }
+    }
+
+    var kind: MessageActionKind {
+        switch self {
+        case .edit: .edit
+        case .delete: .delete
+        case .reaction: .reaction
+        case let .flag(_, flag, _): flag == .starred ? .star : .readState
+        }
+    }
+}
+
+private struct SubmittedMessageAction: Sendable {
+    let action: MessageAction
+    let priorMessage: MessageViewData
+}
+
+private struct PendingSend: Sendable {
+    let key: ConversationKey
+    let content: String
+    let localID: String
+    let localMessageID: Int64
+}
+
 @MainActor
 @Observable
 final class LiveSessionViewModel {
@@ -108,6 +146,10 @@ final class LiveSessionViewModel {
     private var pendingFocusedMessageRequestID: UInt64?
     private var issuedFocusedMessageRequestIDs = Set<UInt64>()
     private var topicActionsByRequestID: [UInt64: TopicAction] = [:]
+    private var messageActionsByRequestID: [UInt64: SubmittedMessageAction] = [:]
+    private var failedMessageActions: [Int64: MessageAction] = [:]
+    private var sendsByRequestID: [UInt64: PendingSend] = [:]
+    private var failedSends: [Int64: PendingSend] = [:]
     private var knownTopics: [ConversationKey: LiveTopicSnapshot] = [:]
 
     init(
@@ -400,6 +442,14 @@ final class LiveSessionViewModel {
 
         let id = nextRequestID()
         let localID = "swift-\(id)"
+        let localMessageID = -Int64(id)
+        let send = PendingSend(
+            key: key,
+            content: trimmed,
+            localID: localID,
+            localMessageID: localMessageID
+        )
+        sendsByRequestID[id] = send
         switch key {
         case let .topic(_, streamID, topic):
             client.submit(
@@ -423,10 +473,91 @@ final class LiveSessionViewModel {
                 )
             )
         default:
+            sendsByRequestID.removeValue(forKey: id)
             notice = "Choose a topic or direct message before sending."
             return false
         }
+        appendLocalEcho(send, id: localMessageID)
         return true
+    }
+
+    @discardableResult
+    func editMessage(_ message: MessageViewData, content: String) -> Bool {
+        let content = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !content.isEmpty else {
+            notice = "A message cannot be empty."
+            return false
+        }
+        return submitMessageAction(.edit(messageID: message.id, content: content))
+    }
+
+    @discardableResult
+    func deleteMessage(_ message: MessageViewData) -> Bool {
+        submitMessageAction(.delete(messageID: message.id))
+    }
+
+    @discardableResult
+    func toggleThumbsUp(_ message: MessageViewData) -> Bool {
+        submitMessageAction(
+            .reaction(messageID: message.id, add: !message.hasOwnThumbsUp)
+        )
+    }
+
+    @discardableResult
+    func toggleStar(_ message: MessageViewData) -> Bool {
+        submitMessageAction(
+            .flag(messageID: message.id, flag: .starred, add: !message.isStarred)
+        )
+    }
+
+    @discardableResult
+    func setRead(_ message: MessageViewData, read: Bool) -> Bool {
+        submitMessageAction(
+            .flag(messageID: message.id, flag: .read, add: read)
+        )
+    }
+
+    func retryMessageAction(for messageID: Int64) {
+        guard let action = failedMessageActions[messageID] else {
+            return
+        }
+        _ = submitMessageAction(action)
+    }
+
+    func retrySend(_ message: MessageViewData) {
+        guard let send = failedSends.removeValue(forKey: message.id) else {
+            return
+        }
+        modifyLoadedMessage(message.id) { value in
+            value.deliveryState = .pending
+        }
+        let id = nextRequestID()
+        sendsByRequestID[id] = send
+        switch send.key {
+        case let .topic(_, streamID, topic):
+            client.submit(
+                .sendChannelMessage(
+                    requestID: id,
+                    accountID: send.key.accountID,
+                    streamID: streamID,
+                    topic: topic,
+                    content: send.content,
+                    localID: send.localID
+                )
+            )
+        case let .directMessage(_, recipientIDs):
+            client.submit(
+                .sendDirectMessage(
+                    requestID: id,
+                    accountID: send.key.accountID,
+                    recipientIDs: recipientIDs,
+                    content: send.content,
+                    localID: send.localID
+                )
+            )
+        default:
+            sendsByRequestID.removeValue(forKey: id)
+        }
     }
 
     func disconnect() {
@@ -538,7 +669,38 @@ final class LiveSessionViewModel {
                 )
             }
 
-        case .messageSent:
+        case let .messageSent(requestID, _, _):
+            if let send = sendsByRequestID.removeValue(forKey: requestID) {
+                removeLoadedMessage(send.localMessageID)
+            }
+            if let activeSelection {
+                refreshConversation(activeSelection)
+            }
+
+        case let .messageEdited(requestID, messageID, _):
+            completeMessageAction(requestID: requestID, messageID: messageID)
+            if let activeSelection {
+                refreshConversation(activeSelection)
+            }
+
+        case let .messageDeleted(requestID, messageID):
+            guard messageActionsByRequestID.removeValue(forKey: requestID) != nil else {
+                return
+            }
+            failedMessageActions.removeValue(forKey: messageID)
+            removeLoadedMessage(messageID)
+
+        case let .reactionUpdated(requestID, messageID, _, _):
+            completeMessageAction(requestID: requestID, messageID: messageID)
+            if let activeSelection {
+                refreshConversation(activeSelection)
+            }
+
+        case let .messageFlagUpdated(requestID, messageIDs, _, _):
+            guard let messageID = messageIDs.first else {
+                return
+            }
+            completeMessageAction(requestID: requestID, messageID: messageID)
             if let activeSelection {
                 refreshConversation(activeSelection)
             }
@@ -570,6 +732,10 @@ final class LiveSessionViewModel {
             pendingFocusedMessageRequestID = nil
             issuedFocusedMessageRequestIDs = []
             topicActionsByRequestID = [:]
+            messageActionsByRequestID = [:]
+            failedMessageActions = [:]
+            sendsByRequestID = [:]
+            failedSends = [:]
             isLoadingOlderMessages = false
             messageSearchState = .idle
             topicActionState = .idle
@@ -607,6 +773,20 @@ final class LiveSessionViewModel {
             {
                 topicActionState = .failed(action: action, message: message)
                 notice = "Topic update failed: \(message)"
+            } else if let requestID,
+                      let submitted = messageActionsByRequestID.removeValue(forKey: requestID)
+            {
+                failedMessageActions[submitted.action.messageID] = submitted.action
+                restoreMessageAfterFailure(submitted, message: message)
+                notice = "Message action failed: \(message)"
+            } else if let requestID,
+                      let send = sendsByRequestID.removeValue(forKey: requestID)
+            {
+                failedSends[send.localMessageID] = send
+                modifyLoadedMessage(send.localMessageID) { value in
+                    value.deliveryState = .failed
+                }
+                notice = "Message could not be sent. You can retry it."
             } else {
                 connectionState = .failed(message: message)
             }
@@ -671,7 +851,8 @@ final class LiveSessionViewModel {
 
     private func makeMessages(_ livePage: LiveConversationPage) -> [MessageViewData] {
         livePage.messages.map { message in
-            MessageViewData(
+            let thumbsUp = message.reactions.filter { $0.emojiName == "thumbs_up" }
+            return MessageViewData(
                 id: message.messageID,
                 accountID: livePage.key.accountID,
                 conversationKey: livePage.key,
@@ -682,9 +863,207 @@ final class LiveSessionViewModel {
                 content: [.paragraph([.text(message.contentHTML)])],
                 isOwnMessage: message.senderID == identity?.userID,
                 sourceStreamID: message.streamID,
-                sourceTopic: message.topic
+                sourceTopic: message.topic,
+                isStarred: message.flags.contains("starred"),
+                reactionCount: thumbsUp.count,
+                hasOwnThumbsUp: thumbsUp.contains { $0.userID == identity?.userID },
+                isRead: message.flags.contains("read")
             )
         }
+    }
+
+    private func submitMessageAction(_ action: MessageAction) -> Bool {
+        guard let identity,
+              let activeSelection,
+              action.messageID > 0,
+              let message = loadedPage(for: activeSelection)?
+                .messages.first(where: { $0.id == action.messageID }),
+              message.accountID == identity.accountID
+        else {
+            notice = "This message is not available for an action."
+            return false
+        }
+        if case .pending = message.actionState {
+            return false
+        }
+
+        let id = nextRequestID()
+        messageActionsByRequestID[id] = SubmittedMessageAction(
+            action: action,
+            priorMessage: message
+        )
+        failedMessageActions.removeValue(forKey: action.messageID)
+        applyOptimistic(action)
+        notice = nil
+
+        switch action {
+        case let .edit(messageID, content):
+            client.submit(
+                .editMessage(
+                    requestID: id,
+                    accountID: identity.accountID,
+                    messageID: messageID,
+                    content: content
+                )
+            )
+        case let .delete(messageID):
+            client.submit(
+                .deleteMessage(
+                    requestID: id,
+                    accountID: identity.accountID,
+                    messageID: messageID
+                )
+            )
+        case let .reaction(messageID, add):
+            client.submit(
+                .updateReaction(
+                    requestID: id,
+                    accountID: identity.accountID,
+                    messageID: messageID,
+                    emojiName: "thumbs_up",
+                    add: add
+                )
+            )
+        case let .flag(messageID, flag, add):
+            client.submit(
+                .updateMessageFlag(
+                    requestID: id,
+                    accountID: identity.accountID,
+                    messageIDs: [messageID],
+                    flag: flag,
+                    add: add
+                )
+            )
+        }
+        return true
+    }
+
+    private func applyOptimistic(_ action: MessageAction) {
+        modifyLoadedMessage(action.messageID) { message in
+            message.actionState = .pending(action.kind)
+            switch action {
+            case let .edit(_, content):
+                message.content = [.paragraph([.text(content)])]
+            case .delete:
+                break
+            case let .reaction(_, add):
+                message.hasOwnThumbsUp = add
+                message.reactionCount = max(0, message.reactionCount + (add ? 1 : -1))
+            case let .flag(_, flag, add):
+                if flag == .starred {
+                    message.isStarred = add
+                } else {
+                    message.isRead = add
+                }
+            }
+        }
+    }
+
+    private func completeMessageAction(requestID: UInt64, messageID: Int64) {
+        guard messageActionsByRequestID.removeValue(forKey: requestID) != nil else {
+            return
+        }
+        failedMessageActions.removeValue(forKey: messageID)
+        modifyLoadedMessage(messageID) { message in
+            message.actionState = .idle
+        }
+    }
+
+    private func restoreMessageAfterFailure(
+        _ submitted: SubmittedMessageAction,
+        message failureMessage: String
+    ) {
+        var restored = submitted.priorMessage
+        restored.actionState = .failed(submitted.action.kind, message: failureMessage)
+        replaceLoadedMessage(restored)
+    }
+
+    private func appendLocalEcho(_ send: PendingSend, id: Int64) {
+        guard let identity,
+              case let .loaded(page) = conversationState,
+              page.key == send.key
+        else {
+            return
+        }
+        let source: (Int64?, String?)
+        if case let .topic(_, streamID, topic) = send.key {
+            source = (streamID, topic)
+        } else {
+            source = (nil, nil)
+        }
+        let echo = MessageViewData(
+            id: id,
+            accountID: identity.accountID,
+            conversationKey: send.key,
+            senderID: identity.userID,
+            senderName: identity.fullName,
+            senderInitials: Self.initials(for: identity.fullName),
+            timestamp: .now,
+            content: [.paragraph([.text(send.content)])],
+            isOwnMessage: true,
+            sourceStreamID: source.0,
+            sourceTopic: source.1,
+            deliveryState: .pending
+        )
+        replaceConversationMessages(page.messages + [echo], in: page)
+    }
+
+    private func modifyLoadedMessage(
+        _ messageID: Int64,
+        mutation: (inout MessageViewData) -> Void
+    ) {
+        guard case let .loaded(page) = conversationState,
+              let index = page.messages.firstIndex(where: { $0.id == messageID })
+        else {
+            return
+        }
+        var messages = page.messages
+        mutation(&messages[index])
+        replaceConversationMessages(messages, in: page)
+    }
+
+    private func replaceLoadedMessage(_ replacement: MessageViewData) {
+        modifyLoadedMessage(replacement.id) { message in
+            message = replacement
+        }
+    }
+
+    private func removeLoadedMessage(_ messageID: Int64) {
+        guard case let .loaded(page) = conversationState else {
+            return
+        }
+        replaceConversationMessages(
+            page.messages.filter { $0.id != messageID },
+            in: page
+        )
+    }
+
+    private func replaceConversationMessages(
+        _ messages: [MessageViewData],
+        in page: ConversationPage
+    ) {
+        conversationState = .loaded(
+            ConversationPage(
+                key: page.key,
+                title: page.title,
+                subtitle: page.subtitle,
+                messages: messages.sorted { left, right in
+                    if left.id > 0, right.id > 0 {
+                        return left.id < right.id
+                    }
+                    if left.id > 0 {
+                        return true
+                    }
+                    if right.id > 0 {
+                        return false
+                    }
+                    return left.id > right.id
+                },
+                beforeCursor: page.beforeCursor,
+                afterCursor: page.afterCursor,
+                focusedMessageID: page.focusedMessageID
+            )
+        )
     }
 
     private func makeSearchResult(_ result: LiveSearchResult) -> MessageSearchResult? {
@@ -746,9 +1125,25 @@ final class LiveSessionViewModel {
             uniqueKeysWithValues: first.map { ($0.id, $0) }
         )
         for message in second {
+            if let existing = messagesByID[message.id],
+               existing.deliveryState != .sent || existing.actionState != .idle
+            {
+                continue
+            }
             messagesByID[message.id] = message
         }
-        return messagesByID.values.sorted { $0.id < $1.id }
+        return messagesByID.values.sorted { left, right in
+            if left.id > 0, right.id > 0 {
+                return left.id < right.id
+            }
+            if left.id > 0 {
+                return true
+            }
+            if right.id > 0 {
+                return false
+            }
+            return left.id > right.id
+        }
     }
 
     private func loadedPage(for key: ConversationKey) -> ConversationPage? {

@@ -11,7 +11,8 @@ use tokio::{
 use zulip_core::{
     auth::{AuthenticatedAccount, AuthenticationClient, SecretString},
     messages::{
-        ConversationTarget, MessageClient, OutgoingMessage, TopicPropagation, TopicSummary,
+        ConversationTarget, MessageClient, MessageFlag, MessageWriteOperation, OutgoingMessage,
+        TopicPropagation, TopicSummary,
     },
     sync::{
         EventQueueClient, MessageSummary, RecoveryPolicy, SyncCycle, SyncSession, SyncSnapshot,
@@ -212,6 +213,52 @@ pub enum CoreCommand {
         /// Stable local echo identifier.
         local_id: String,
     },
+    /// Replaces the content of one message.
+    EditMessage {
+        /// Correlates the response.
+        request_id: u64,
+        /// Client-owned account partition.
+        account_id: String,
+        /// Server message identifier.
+        message_id: i64,
+        /// Replacement Zulip-flavored Markdown.
+        content: String,
+    },
+    /// Permanently deletes one message.
+    DeleteMessage {
+        /// Correlates the response.
+        request_id: u64,
+        /// Client-owned account partition.
+        account_id: String,
+        /// Server message identifier.
+        message_id: i64,
+    },
+    /// Adds or removes the current user's emoji reaction.
+    UpdateReaction {
+        /// Correlates the response.
+        request_id: u64,
+        /// Client-owned account partition.
+        account_id: String,
+        /// Server message identifier.
+        message_id: i64,
+        /// Stable Zulip emoji name.
+        emoji_name: String,
+        /// Whether to add instead of remove the reaction.
+        add: bool,
+    },
+    /// Adds or removes a personal read/star flag.
+    UpdateMessageFlag {
+        /// Correlates the response.
+        request_id: u64,
+        /// Client-owned account partition.
+        account_id: String,
+        /// Server message identifiers.
+        message_ids: Vec<i64>,
+        /// Supported personal flag.
+        flag: CoreMessageFlag,
+        /// Whether to add instead of remove the flag.
+        add: bool,
+    },
     /// Renames every message in an existing channel topic.
     RenameTopic {
         /// Correlates the response.
@@ -262,10 +309,32 @@ impl CoreCommand {
             | Self::OpenMessage { request_id, .. }
             | Self::SendChannelMessage { request_id, .. }
             | Self::SendDirectMessage { request_id, .. }
+            | Self::EditMessage { request_id, .. }
+            | Self::DeleteMessage { request_id, .. }
+            | Self::UpdateReaction { request_id, .. }
+            | Self::UpdateMessageFlag { request_id, .. }
             | Self::RenameTopic { request_id, .. }
             | Self::MoveMessageToTopic { request_id, .. }
             | Self::MarkRead { request_id, .. }
             | Self::Disconnect { request_id } => *request_id,
+        }
+    }
+}
+
+/// Personal message flag supported across the bridge.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum CoreMessageFlag {
+    /// Read/unread state.
+    Read,
+    /// Starred/unstarred state.
+    Starred,
+}
+
+impl From<CoreMessageFlag> for MessageFlag {
+    fn from(flag: CoreMessageFlag) -> Self {
+        match flag {
+            CoreMessageFlag::Read => Self::Read,
+            CoreMessageFlag::Starred => Self::Starred,
         }
     }
 }
@@ -341,6 +410,19 @@ pub struct CoreMessage {
     pub topic: Option<String>,
     /// Recipient identifiers for direct messages.
     pub recipient_ids: Vec<i64>,
+    /// Personal flags returned for the active account.
+    pub flags: Vec<String>,
+    /// Reactions currently attached to the message.
+    pub reactions: Vec<CoreReaction>,
+}
+
+/// One reaction attached to a bridge message.
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct CoreReaction {
+    /// Stable emoji name used by the write endpoint.
+    pub emoji_name: String,
+    /// Zulip user identifier of the reacting user.
+    pub user_id: i64,
 }
 
 /// Immutable full state projection.
@@ -468,6 +550,44 @@ pub enum CoreEvent {
         local_id: String,
         /// Server-assigned message identifier.
         message_id: i64,
+    },
+    /// A correlated content edit succeeded.
+    MessageEdited {
+        /// Originating request.
+        request_id: u64,
+        /// Updated server message.
+        message_id: i64,
+        /// Submitted replacement Markdown.
+        content: String,
+    },
+    /// A correlated permanent deletion succeeded.
+    MessageDeleted {
+        /// Originating request.
+        request_id: u64,
+        /// Deleted server message.
+        message_id: i64,
+    },
+    /// A correlated emoji reaction mutation succeeded.
+    ReactionUpdated {
+        /// Originating request.
+        request_id: u64,
+        /// Updated server message.
+        message_id: i64,
+        /// Stable Zulip emoji name.
+        emoji_name: String,
+        /// Whether the reaction was added.
+        added: bool,
+    },
+    /// A correlated personal flag mutation succeeded.
+    MessageFlagUpdated {
+        /// Originating request.
+        request_id: u64,
+        /// Updated server messages.
+        message_ids: Vec<i64>,
+        /// Updated personal flag.
+        flag: CoreMessageFlag,
+        /// Whether the flag was added.
+        added: bool,
     },
     /// A correlated topic mutation succeeded.
     TopicUpdated {
@@ -756,6 +876,72 @@ async fn handle_command(
             )
             .await;
         }
+        CoreCommand::EditMessage {
+            request_id,
+            account_id,
+            message_id,
+            content,
+        } => {
+            edit_message(
+                request_id,
+                &account_id,
+                message_id,
+                content,
+                account.as_ref(),
+                event_sink,
+            )
+            .await;
+        }
+        CoreCommand::DeleteMessage {
+            request_id,
+            account_id,
+            message_id,
+        } => {
+            delete_message(
+                request_id,
+                &account_id,
+                message_id,
+                account.as_ref(),
+                event_sink,
+            )
+            .await;
+        }
+        CoreCommand::UpdateReaction {
+            request_id,
+            account_id,
+            message_id,
+            emoji_name,
+            add,
+        } => {
+            update_reaction(
+                request_id,
+                &account_id,
+                message_id,
+                emoji_name,
+                add,
+                account.as_ref(),
+                event_sink,
+            )
+            .await;
+        }
+        CoreCommand::UpdateMessageFlag {
+            request_id,
+            account_id,
+            message_ids,
+            flag,
+            add,
+        } => {
+            update_message_flag(
+                request_id,
+                &account_id,
+                message_ids,
+                flag,
+                add,
+                account.as_ref(),
+                event_sink,
+            )
+            .await;
+        }
         CoreCommand::RenameTopic {
             request_id,
             key,
@@ -805,6 +991,120 @@ async fn handle_command(
             .await;
         }
         CoreCommand::Disconnect { request_id } => disconnect(request_id, account, event_sink),
+    }
+}
+
+async fn edit_message(
+    request_id: u64,
+    account_id: &str,
+    message_id: i64,
+    content: String,
+    account: Option<&AccountSession>,
+    event_sink: &Arc<dyn CoreEventSink>,
+) {
+    let Some(session) = account.filter(|item| item.account_id == account_id) else {
+        emit_no_session(request_id, event_sink);
+        return;
+    };
+    match session
+        .messages
+        .update_message_content(message_id, &content)
+        .await
+    {
+        Ok(()) => event_sink.handle_event(CoreEvent::MessageEdited {
+            request_id,
+            message_id,
+            content,
+        }),
+        Err(error) => emit_error(Some(request_id), error, event_sink),
+    }
+}
+
+async fn delete_message(
+    request_id: u64,
+    account_id: &str,
+    message_id: i64,
+    account: Option<&AccountSession>,
+    event_sink: &Arc<dyn CoreEventSink>,
+) {
+    let Some(session) = account.filter(|item| item.account_id == account_id) else {
+        emit_no_session(request_id, event_sink);
+        return;
+    };
+    match session.messages.delete_message(message_id).await {
+        Ok(()) => event_sink.handle_event(CoreEvent::MessageDeleted {
+            request_id,
+            message_id,
+        }),
+        Err(error) => emit_error(Some(request_id), error, event_sink),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn update_reaction(
+    request_id: u64,
+    account_id: &str,
+    message_id: i64,
+    emoji_name: String,
+    add: bool,
+    account: Option<&AccountSession>,
+    event_sink: &Arc<dyn CoreEventSink>,
+) {
+    let Some(session) = account.filter(|item| item.account_id == account_id) else {
+        emit_no_session(request_id, event_sink);
+        return;
+    };
+    let operation = if add {
+        MessageWriteOperation::Add
+    } else {
+        MessageWriteOperation::Remove
+    };
+    match session
+        .messages
+        .update_reaction(message_id, &emoji_name, operation)
+        .await
+    {
+        Ok(()) => event_sink.handle_event(CoreEvent::ReactionUpdated {
+            request_id,
+            message_id,
+            emoji_name,
+            added: add,
+        }),
+        Err(error) => emit_error(Some(request_id), error, event_sink),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn update_message_flag(
+    request_id: u64,
+    account_id: &str,
+    message_ids: Vec<i64>,
+    flag: CoreMessageFlag,
+    add: bool,
+    account: Option<&AccountSession>,
+    event_sink: &Arc<dyn CoreEventSink>,
+) {
+    let Some(session) = account.filter(|item| item.account_id == account_id) else {
+        emit_no_session(request_id, event_sink);
+        return;
+    };
+    let operation = if add {
+        MessageWriteOperation::Add
+    } else {
+        MessageWriteOperation::Remove
+    };
+    match session
+        .messages
+        .update_message_flag(&message_ids, flag.into(), operation)
+        .await
+    {
+        Ok(()) => event_sink.handle_event(CoreEvent::MessageFlagUpdated {
+            request_id,
+            message_ids,
+            flag,
+            added: add,
+        }),
+        Err(error) => emit_error(Some(request_id), error, event_sink),
     }
 }
 
@@ -1388,6 +1688,15 @@ impl From<MessageSummary> for CoreMessage {
             stream_id: message.stream_id,
             topic: message.topic,
             recipient_ids: message.recipient_ids,
+            flags: message.flags,
+            reactions: message
+                .reactions
+                .into_iter()
+                .map(|reaction| CoreReaction {
+                    emoji_name: reaction.emoji_name,
+                    user_id: reaction.user_id,
+                })
+                .collect(),
         }
     }
 }
@@ -1435,7 +1744,7 @@ mod tests {
     };
 
     use super::{
-        CoreCommand, CoreConversationKey, CoreEvent, CoreEventSink, CoreSnapshot,
+        CoreCommand, CoreConversationKey, CoreEvent, CoreEventSink, CoreMessageFlag, CoreSnapshot,
         CoreTopicPropagation, RustCoreClient, conversation_key_for_message,
     };
     use zulip_core::{
@@ -1547,6 +1856,8 @@ mod tests {
             stream_id: Some(5),
             topic: Some("Rust core".to_owned()),
             recipient_ids: Vec::new(),
+            flags: vec!["read".to_owned()],
+            reactions: Vec::new(),
         };
         assert_eq!(
             conversation_key_for_message("account-1", 9, &topic_message),
@@ -1743,6 +2054,111 @@ mod tests {
             request.starts_with("PATCH /api/v1/messages/51 HTTP/1.1")
                 && request.contains("propagate_mode=change_one")
         }));
+    }
+
+    #[test]
+    fn actor_correlates_daily_message_action_results() {
+        let (server, requests) = spawn_message_action_actor_mock();
+        let (signal_sender, signal_receiver) = mpsc::channel();
+        let sink = Arc::new(RecordingSink {
+            events: Mutex::new(Vec::new()),
+            notifier: Mutex::new(Some(signal_sender)),
+        });
+        let client = RustCoreClient::new(sink.clone());
+        client.submit(CoreCommand::StartApiKeySession {
+            request_id: 40,
+            account_id: "account-actions".to_owned(),
+            server_url: server,
+            email: "maya@example.com".to_owned(),
+            api_key: "fixture-key-do-not-log".to_owned(),
+        });
+        let _ = wait_for_event(&signal_receiver, &sink, |event| {
+            matches!(event, CoreEvent::SessionStarted { request_id: 40, .. })
+        });
+
+        client.submit(CoreCommand::EditMessage {
+            request_id: 41,
+            account_id: "account-actions".to_owned(),
+            message_id: 50,
+            content: "Edited content".to_owned(),
+        });
+        assert!(matches!(
+            wait_for_event(&signal_receiver, &sink, |event| {
+                matches!(event, CoreEvent::MessageEdited { request_id: 41, .. })
+            }),
+            CoreEvent::MessageEdited { message_id: 50, .. }
+        ));
+
+        client.submit(CoreCommand::UpdateReaction {
+            request_id: 42,
+            account_id: "account-actions".to_owned(),
+            message_id: 50,
+            emoji_name: "thumbs_up".to_owned(),
+            add: true,
+        });
+        assert!(matches!(
+            wait_for_event(&signal_receiver, &sink, |event| {
+                matches!(event, CoreEvent::ReactionUpdated { request_id: 42, .. })
+            }),
+            CoreEvent::ReactionUpdated { added: true, .. }
+        ));
+
+        client.submit(CoreCommand::UpdateMessageFlag {
+            request_id: 43,
+            account_id: "account-actions".to_owned(),
+            message_ids: vec![50],
+            flag: CoreMessageFlag::Starred,
+            add: true,
+        });
+        assert!(matches!(
+            wait_for_event(&signal_receiver, &sink, |event| {
+                matches!(event, CoreEvent::MessageFlagUpdated { request_id: 43, .. })
+            }),
+            CoreEvent::MessageFlagUpdated {
+                flag: CoreMessageFlag::Starred,
+                added: true,
+                ..
+            }
+        ));
+
+        client.submit(CoreCommand::UpdateMessageFlag {
+            request_id: 44,
+            account_id: "account-actions".to_owned(),
+            message_ids: vec![50],
+            flag: CoreMessageFlag::Read,
+            add: false,
+        });
+        let _ = wait_for_event(&signal_receiver, &sink, |event| {
+            matches!(event, CoreEvent::MessageFlagUpdated { request_id: 44, .. })
+        });
+
+        client.submit(CoreCommand::DeleteMessage {
+            request_id: 45,
+            account_id: "account-actions".to_owned(),
+            message_id: 50,
+        });
+        let _ = wait_for_event(&signal_receiver, &sink, |event| {
+            matches!(event, CoreEvent::MessageDeleted { request_id: 45, .. })
+        });
+
+        let observed = requests.try_iter().collect::<Vec<_>>();
+        assert!(observed.iter().any(|request| {
+            request.starts_with("PATCH /api/v1/messages/50 HTTP/1.1")
+                && request.contains("content=Edited+content")
+        }));
+        assert!(observed.iter().any(|request| {
+            request.starts_with("POST /api/v1/messages/50/reactions HTTP/1.1")
+                && request.contains("emoji_name=thumbs_up")
+        }));
+        assert!(observed.iter().any(|request| {
+            request.starts_with("POST /api/v1/messages/flags HTTP/1.1")
+                && request.contains("flag=starred")
+        }));
+        assert!(
+            observed
+                .iter()
+                .any(|request| { request.starts_with("DELETE /api/v1/messages/50 HTTP/1.1") })
+        );
     }
 
     #[test]
@@ -2044,6 +2460,53 @@ mod tests {
                 } else if request_line.starts_with("PATCH /api/v1/messages/") {
                     updates += 1;
                     r#"{"result":"success"}"#
+                } else {
+                    panic!("unexpected request: {request_line}");
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        (format!("http://{address}/"), receiver)
+    }
+
+    fn spawn_message_action_actor_mock() -> (String, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let address = listener.local_addr().expect("listener address");
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let mut writes = 0;
+            while writes < 5 {
+                let (mut stream, _) = listener.accept().expect("accept request");
+                let request = read_request(&mut stream);
+                let request_line = request.lines().next().unwrap_or_default();
+                let _ = sender.send(request.clone());
+                let body = if request_line.starts_with("GET /api/v1/users/me HTTP") {
+                    r#"{"result":"success","email":"maya@example.com","full_name":"Maya Chen","user_id":9}"#
+                } else if request_line.starts_with("POST /api/v1/register HTTP") {
+                    r#"{
+                        "result":"success",
+                        "queue_id":"queue-actions",
+                        "last_event_id":10,
+                        "event_queue_longpoll_timeout_seconds":5,
+                        "zulip_feature_level":481,
+                        "realm_users":[],
+                        "subscriptions":[]
+                    }"#
+                } else if request_line.starts_with("GET /api/v1/events?") {
+                    thread::sleep(Duration::from_millis(10));
+                    r#"{"result":"success","events":[{"id":11,"type":"heartbeat"}]}"#
+                } else if request_line.starts_with("PATCH /api/v1/messages/50")
+                    || request_line.starts_with("POST /api/v1/messages/50/reactions")
+                    || request_line.starts_with("POST /api/v1/messages/flags")
+                    || request_line.starts_with("DELETE /api/v1/messages/50")
+                {
+                    writes += 1;
+                    r#"{"result":"success","messages":[50]}"#
                 } else {
                     panic!("unexpected request: {request_line}");
                 };
