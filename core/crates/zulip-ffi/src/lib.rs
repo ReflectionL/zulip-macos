@@ -2941,6 +2941,9 @@ mod tests {
                 let (mut stream, _) = listener.accept().expect("accept request");
                 let request = read_request(&mut stream);
                 let request_line = request.lines().next().unwrap_or_default();
+                if request_line.is_empty() {
+                    continue;
+                }
                 let _ = sender.send(request.clone());
                 let body = if request_line.starts_with("GET /api/v1/users/me HTTP") {
                     r#"{"result":"success","email":"maya@example.com","full_name":"Maya Chen","user_id":9}"#
@@ -2991,6 +2994,9 @@ mod tests {
                 let (mut stream, _) = listener.accept().expect("accept request");
                 let request = read_request(&mut stream);
                 let request_line = request.lines().next().unwrap_or_default();
+                if request_line.is_empty() {
+                    continue;
+                }
                 let _ = sender.send(request.clone());
                 let body = if request_line.starts_with("GET /api/v1/users/me HTTP") {
                     r#"{"result":"success","email":"maya@example.com","full_name":"Maya Chen","user_id":9}"#
