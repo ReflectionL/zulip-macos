@@ -88,9 +88,16 @@ land:
 ./scripts/build-app.sh
 ./scripts/test.sh
 ./scripts/check.sh
+./scripts/package-app.sh release
+./scripts/package-dmg.sh release v0.1.0-alpha.1
 ./scripts/live-smoke.sh
 ./scripts/live-media-smoke-keychain.sh SERVER EMAIL
 ```
+
+`package-dmg.sh` creates an arm64 DMG and adjacent SHA-256 file under the
+ignored `dist/` directory. It verifies the app version, architecture, ad-hoc
+signature, and disk image before returning. Alpha packages are not a substitute
+for the signed/notarized and self-hosted release gate in `REL-005`.
 
 `live-smoke.sh` reads server URL, email, and password as three stdin lines with
 terminal echo disabled. It must print only redacted step results; never pass

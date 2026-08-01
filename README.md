@@ -46,6 +46,8 @@ The documented command surface is:
 ./scripts/build-app.sh
 ./scripts/test.sh
 ./scripts/check.sh
+./scripts/package-app.sh release
+./scripts/package-dmg.sh release v0.1.0-alpha.1
 ```
 
 Foundation steps add these commands progressively. The currently available

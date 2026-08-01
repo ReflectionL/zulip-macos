@@ -5,7 +5,7 @@ Last updated: 2026-08-01
 ## Current State
 
 - Milestone: MVP — daily use
-- Current step: `none` (no step selected)
+- Current step: `ALPHA-001` (`in_progress`)
 - Next step: `MVP-006` (`ready`)
 - Overall status: in progress
 
@@ -39,6 +39,7 @@ Last updated: 2026-08-01
 | MVP-004 | done | 2026-08-01 | 2026-08-01 | Implemented 25 MiB multipart upload, server-normalized composer links, 32 MiB authenticated downloads, opaque account-partitioned atomic caching, original-image URL parsing, asynchronous FFI media tasks, a native file picker, visible retry state, composer insertion without auto-send, and off-main AppKit image decode. `./scripts/check.sh` passes with 45 Rust core, 10 FFI actor, and 37 Swift tests plus strict Clippy, binding regeneration, and app build. The designated Cloud account passed bounded PNG upload, disposable self-DM link send, server-rendered image parsing, authenticated download with exact byte validation, cache hit, and message/attachment-reference cleanup. | — | — |
 | MVP-004A | done | 2026-08-01 | 2026-08-01 | Tightened the sidebar into the titlebar safe area, moved conversation identity/actions into the released native toolbar position, relocated connect/disconnect to an accessible bottom-left gear menu, preserved native sidebar collapse, and removed the composer separator. Generated an original flat icon master, transparent-corner PNG, multi-resolution ICNS, Info.plist identity, package copy, and icon decode test. `./scripts/check.sh` passes with 45 Rust core, 10 FFI actor, and 40 Swift tests including light/dark shell renders. The ad-hoc signed bundle passed `plutil`, `codesign --verify --deep --strict`, running-app menu/layout/collapse smoke, and Finder icon inspection. | — | — |
 | MVP-004B | done | 2026-08-01 | 2026-08-01 | Restored the sidebar's titlebar safe area; replaced the macOS-generated glass sidebar toggle with one compact flat 13 pt control and a hover-only background; preserved mouse and `⌃⌘S` collapse/expand; restored the flat conversation breadcrumb; and forced search, topic actions, and details to the far-right group. `./scripts/check.sh` passes with 45 Rust core, 10 FFI actor, and 41 Swift tests, including a native-toolbar suppression regression test and light/dark shell renders. The ad-hoc packaged app passed real-account Inbox/topic visual smoke at 1348×768, 1081×721, and 824×612, with all three topic controls visible and no title/sidebar collision. | — | `3c4ecda` |
+| ALPHA-001 | in_progress | 2026-08-01 | — | Preparing the first public Apple Silicon DMG and GitHub prerelease from the current verified UI build. This package is intentionally ad-hoc signed and unnotarized; `REL-005` remains the later beta-quality release gate. | — | — |
 
 Later milestones remain defined in `PLAN.md` and will be added here when they
 become active; completed rows are never removed.
@@ -47,6 +48,10 @@ become active; completed rows are never removed.
 
 ### 2026-08-01
 
+- Began `ALPHA-001` at the user's request. The release target is
+  `v0.1.0-alpha.1`: a reproducibly built arm64 DMG plus checksum and GitHub
+  prerelease notes that clearly disclose macOS 26+, ad-hoc signing, lack of
+  notarization, and unfinished MVP work. This does not close `REL-005`.
 - Closed `MVP-004B`. Fresh packaged-app screenshots, rather than accessibility
   output alone, verified the corrected standard, compact, and near-minimum live
   topic layouts. The sidebar control is now a single flat icon with hover-only
