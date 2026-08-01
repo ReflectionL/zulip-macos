@@ -1,6 +1,6 @@
 # Zulip Mac Development Tracker
 
-Last updated: 2026-08-01
+Last updated: 2026-08-02
 
 ## Current State
 
@@ -39,12 +39,22 @@ Last updated: 2026-08-01
 | MVP-004 | done | 2026-08-01 | 2026-08-01 | Implemented 25 MiB multipart upload, server-normalized composer links, 32 MiB authenticated downloads, opaque account-partitioned atomic caching, original-image URL parsing, asynchronous FFI media tasks, a native file picker, visible retry state, composer insertion without auto-send, and off-main AppKit image decode. `./scripts/check.sh` passes with 45 Rust core, 10 FFI actor, and 37 Swift tests plus strict Clippy, binding regeneration, and app build. The designated Cloud account passed bounded PNG upload, disposable self-DM link send, server-rendered image parsing, authenticated download with exact byte validation, cache hit, and message/attachment-reference cleanup. | — | — |
 | MVP-004A | done | 2026-08-01 | 2026-08-01 | Tightened the sidebar into the titlebar safe area, moved conversation identity/actions into the released native toolbar position, relocated connect/disconnect to an accessible bottom-left gear menu, preserved native sidebar collapse, and removed the composer separator. Generated an original flat icon master, transparent-corner PNG, multi-resolution ICNS, Info.plist identity, package copy, and icon decode test. `./scripts/check.sh` passes with 45 Rust core, 10 FFI actor, and 40 Swift tests including light/dark shell renders. The ad-hoc signed bundle passed `plutil`, `codesign --verify --deep --strict`, running-app menu/layout/collapse smoke, and Finder icon inspection. | — | — |
 | MVP-004B | done | 2026-08-01 | 2026-08-01 | Restored the sidebar's titlebar safe area; replaced the macOS-generated glass sidebar toggle with one compact flat 13 pt control and a hover-only background; preserved mouse and `⌃⌘S` collapse/expand; restored the flat conversation breadcrumb; and forced search, topic actions, and details to the far-right group. `./scripts/check.sh` passes with 45 Rust core, 10 FFI actor, and 41 Swift tests, including a native-toolbar suppression regression test and light/dark shell renders. The ad-hoc packaged app passed real-account Inbox/topic visual smoke at 1348×768, 1081×721, and 824×612, with all three topic controls visible and no title/sidebar collision. | — | `3c4ecda` |
-| ALPHA-001 | in_progress | 2026-08-01 | — | Preparing the first public Apple Silicon DMG and GitHub prerelease from the current verified UI build. This package is intentionally ad-hoc signed and unnotarized; `REL-005` remains the later beta-quality release gate. | — | — |
+| ALPHA-001 | in_progress | 2026-08-01 | — | Built and locally verified the first Apple Silicon DMG and checksum from the current UI build. Strict ad-hoc signature, arm64 architecture, DMG verification/read-only inspection, and packaged-app launch smoke pass. GitHub Actions exposed a clean-runner dependency gap because `rg` was not installed; CI now installs `ripgrep` before bootstrap. This package remains unnotarized and does not close `REL-005`. | Awaiting a green GitHub Actions run before prerelease publication. | `819fd7c` |
 
 Later milestones remain defined in `PLAN.md` and will be added here when they
 become active; completed rows are never removed.
 
 ## Work Log
+
+### 2026-08-02
+
+- `ALPHA-001` local release verification passed, including the full test suite,
+  strict ad-hoc signature, arm64-only executable, valid/read-only DMG, checksum,
+  and launching the packaged app directly from the mounted image.
+- GitHub CLI was reauthorized for `ReflectionL`. The pushed release-source run
+  failed before tests because the clean macOS 26 runner lacked `rg`; updated CI
+  to install `ripgrep` before `bootstrap.sh`. Publication remains pending until
+  the replacement run is green.
 
 ### 2026-08-01
 

@@ -23,6 +23,9 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v5
 
+      - name: Install host tools
+        run: brew install ripgrep
+
       - name: Install Rust 1.95
         run: |
           rustup toolchain install 1.95.0 --profile minimal --component clippy,rustfmt
