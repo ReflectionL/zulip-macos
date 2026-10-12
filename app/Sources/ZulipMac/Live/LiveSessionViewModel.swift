@@ -194,6 +194,9 @@ final class LiveSessionViewModel {
     private var hasLiveSession = false
     @ObservationIgnored private var snapshotMessages: [Int64: LiveMessageSnapshot] = [:]
     @ObservationIgnored private var avatarURLs: [Int64: String] = [:]
+    /// Set while the visible page is only the local cache of that conversation, which
+    /// the first fresh page replaces outright instead of merging into.
+    @ObservationIgnored private var cachedPlaceholderKey: ConversationKey?
     @ObservationIgnored private var presenceStates: [Int64: PresenceState] = [:]
     @ObservationIgnored private var presenceTask: Task<Void, Never>?
     private(set) var drafts: [ConversationKey: String] = [:]
@@ -506,6 +509,9 @@ final class LiveSessionViewModel {
             title: destination?.title ?? "Conversation",
             subtitle: destination?.subtitle ?? organizationName
         )
+        // Show the last copy we have right away while the fresh page loads.
+        cachedPlaceholderKey = nil
+        client.submit(.loadCachedConversation(requestID: nextRequestID(), key: key))
         client.submit(
             .openConversation(
                 requestID: nextRequestID(),
@@ -952,7 +958,8 @@ final class LiveSessionViewModel {
                 return
             }
             rememberTopics(from: page.messages)
-            let existing = loadedPage(for: page.key)
+            let existing = cachedPlaceholderKey == page.key ? nil : loadedPage(for: page.key)
+            cachedPlaceholderKey = nil
             let conversationPage = makeConversationPage(page, merging: existing)
             if isServingCachedData {
                 // Cached copy: readable, but writes wait for a live connection.
@@ -970,6 +977,20 @@ final class LiveSessionViewModel {
                     )
                 )
             }
+
+        case let .cachedConversationLoaded(_, page):
+            // Only a conversation still waiting for its first page uses the cache; the
+            // fresh page replaces it and is the one that marks messages read.
+            guard pendingFocusedMessageRequestID == nil,
+                  activeSelection == page.key,
+                  case .loading = conversationState
+            else {
+                return
+            }
+            rememberTopics(from: page.messages)
+            let cachedPage = makeConversationPage(page)
+            cachedPlaceholderKey = page.key
+            conversationState = isServingCachedData ? .offline(cachedPage) : .loaded(cachedPage)
 
         case let .conversationHistoryLoaded(requestID, page):
             guard pendingOlderRequestID == requestID else {
@@ -1238,6 +1259,7 @@ final class LiveSessionViewModel {
         presenceTask?.cancel()
         presenceTask = nil
         presenceStates = [:]
+        cachedPlaceholderKey = nil
         notificationPlanner.reset()
         unseenNotificationCount = 0
         notifier?.setBadge(0)

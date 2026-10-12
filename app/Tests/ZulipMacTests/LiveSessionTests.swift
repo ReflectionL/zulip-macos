@@ -474,6 +474,81 @@ struct LiveSessionTests {
         #expect(model.draft(for: key).isEmpty)
     }
 
+    @Test("Opening a conversation shows its cached copy until the fresh page replaces it")
+    func cachedConversationShownFirst() async {
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(client: core, credentialStore: MemoryCredentialStore())
+        model.startObserving()
+        let accountID = "account-1"
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: accountID),
+                credential: StoredAPICredential(accountID: accountID, apiKey: "key"),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.connectionState == .connected }
+
+        let key = ConversationKey.topic(accountID: accountID, streamID: 5, topic: "macOS")
+        model.openConversation(key)
+        let commands = core.commands.suffix(2)
+        guard case .loadCachedConversation = commands.first,
+              case .openConversation = commands.last
+        else {
+            Issue.record("Expected the cache read to be submitted before the fetch")
+            return
+        }
+        func page(_ messageID: Int64, _ text: String) -> LiveConversationPage {
+            LiveConversationPage(
+                key: key,
+                messages: [
+                    LiveMessageSnapshot(
+                        messageID: messageID,
+                        senderID: 22,
+                        senderFullName: "Theo Martin",
+                        timestamp: Date(timeIntervalSince1970: 1_700_000_000),
+                        content: [.paragraph([.text(text)])],
+                        streamID: 5,
+                        topic: "macOS",
+                        recipientIDs: []
+                    ),
+                ],
+                foundOldest: true,
+                foundNewest: true
+            )
+        }
+
+        core.emit(.cachedConversationLoaded(requestID: 2, page: page(40, "Cached")))
+        await eventually {
+            if case let .loaded(shown) = model.conversationState {
+                return shown.messages.map(\.plainText) == ["Cached"]
+            }
+            return false
+        }
+        #expect(!core.commands.contains {
+            if case .markRead = $0 { return true }
+            return false
+        })
+
+        core.emit(.conversationOpened(requestID: 3, page: page(41, "Fresh")))
+        await eventually {
+            if case let .loaded(shown) = model.conversationState {
+                return shown.messages.map(\.plainText) == ["Fresh"]
+            }
+            return false
+        }
+
+        // A cache answer that arrives after the fresh page must not roll it back.
+        core.emit(.cachedConversationLoaded(requestID: 2, page: page(40, "Cached")))
+        for _ in 0..<30 { await Task.yield() }
+        if case let .loaded(shown) = model.conversationState {
+            #expect(shown.messages.map(\.plainText) == ["Fresh"])
+        } else {
+            Issue.record("Expected the fresh page to stay loaded")
+        }
+    }
+
     @Test("A loaded conversation is mapped safely and marked read")
     func openConversation() async {
         let core = RecordingCoreClient()

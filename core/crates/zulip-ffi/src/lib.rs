@@ -276,6 +276,16 @@ pub enum CoreCommand {
         /// Number of newest messages, from 1 through 1000.
         limit: u16,
     },
+    /// Reads the locally cached copy of a conversation without touching the
+    /// network, so a view can show something while `OpenConversation` runs.
+    ///
+    /// Answers with `CachedConversationLoaded`, or with nothing when no copy exists.
+    LoadCachedConversation {
+        /// Correlates the response.
+        request_id: u64,
+        /// Stable account-scoped conversation.
+        key: CoreConversationKey,
+    },
     /// Loads a page ending immediately before a known message.
     LoadOlderMessages {
         /// Correlates the response.
@@ -487,6 +497,7 @@ impl CoreCommand {
             | Self::SaveDraft { request_id, .. }
             | Self::LoadDrafts { request_id, .. }
             | Self::OpenConversation { request_id, .. }
+            | Self::LoadCachedConversation { request_id, .. }
             | Self::LoadOlderMessages { request_id, .. }
             | Self::SearchMessages { request_id, .. }
             | Self::OpenMessage { request_id, .. }
@@ -845,6 +856,13 @@ pub enum CoreEvent {
         /// Originating request.
         request_id: u64,
         /// Loaded page.
+        page: CoreConversationPage,
+    },
+    /// The cached copy of a conversation, which may be older than the server's.
+    CachedConversationLoaded {
+        /// Originating request.
+        request_id: u64,
+        /// Cached page.
         page: CoreConversationPage,
     },
     /// An older page loaded for merging ahead of the current timeline.
@@ -1244,6 +1262,11 @@ async fn handle_command(
             key,
             limit,
         } => open_conversation(request_id, key, limit, account.as_ref(), cache, event_sink).await,
+        CoreCommand::LoadCachedConversation { request_id, key } => {
+            if let Some(page) = cached_conversation_page(&key, cache) {
+                event_sink.handle_event(CoreEvent::CachedConversationLoaded { request_id, page });
+            }
+        }
         CoreCommand::LoadOlderMessages {
             request_id,
             key,
@@ -1880,6 +1903,22 @@ async fn open_conversation(
     }
 }
 
+/// Reads the cached copy of `key`, if any.
+fn cached_conversation_page(
+    key: &CoreConversationKey,
+    cache: &CacheHandle,
+) -> Option<CoreConversationPage> {
+    let cached = cache
+        .with(|database| database.conversation(key.account_id(), &key.cache_key()))
+        .flatten()?;
+    Some(CoreConversationPage {
+        key: key.clone(),
+        messages: cached.messages.into_iter().map(Into::into).collect(),
+        found_oldest: cached.found_oldest,
+        found_newest: cached.found_newest,
+    })
+}
+
 /// Emits the cached copy of `key`; returns whether one existed.
 fn emit_cached_conversation(
     request_id: u64,
@@ -1887,21 +1926,10 @@ fn emit_cached_conversation(
     cache: &CacheHandle,
     event_sink: &Arc<dyn CoreEventSink>,
 ) -> bool {
-    let Some(cached) = cache
-        .with(|database| database.conversation(key.account_id(), &key.cache_key()))
-        .flatten()
-    else {
+    let Some(page) = cached_conversation_page(key, cache) else {
         return false;
     };
-    event_sink.handle_event(CoreEvent::ConversationOpened {
-        request_id,
-        page: CoreConversationPage {
-            key: key.clone(),
-            messages: cached.messages.into_iter().map(Into::into).collect(),
-            found_oldest: cached.found_oldest,
-            found_newest: cached.found_newest,
-        },
-    });
+    event_sink.handle_event(CoreEvent::ConversationOpened { request_id, page });
     true
 }
 
@@ -3345,6 +3373,22 @@ mod tests {
         assert_eq!(page.messages.len(), 1);
         assert_eq!(page.messages[0].message_id, 50);
         assert!(page.found_oldest);
+
+        offline.submit(CoreCommand::LoadCachedConversation {
+            request_id: 47,
+            key: page.key.clone(),
+        });
+        let cached = wait_for_event(&offline_receiver, &offline_sink, |event| {
+            matches!(
+                event,
+                CoreEvent::CachedConversationLoaded { request_id: 47, .. }
+            )
+        });
+        assert!(matches!(
+            cached,
+            CoreEvent::CachedConversationLoaded { page, .. }
+                if page.messages.len() == 1 && page.messages[0].message_id == 50
+        ));
 
         let draft_key = CoreConversationKey::Topic {
             account_id: "account-search".to_owned(),

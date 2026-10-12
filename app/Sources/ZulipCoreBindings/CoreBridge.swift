@@ -303,6 +303,7 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
         password: String
     )
     case openConversation(requestID: UInt64, key: ConversationKey, limit: UInt16)
+    case loadCachedConversation(requestID: UInt64, key: ConversationKey)
     case loadOlderMessages(
         requestID: UInt64,
         key: ConversationKey,
@@ -395,6 +396,7 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
              let .startAPIKeySession(requestID, _, _, _, _),
              let .startPasswordSession(requestID, _, _, _, _),
              let .openConversation(requestID, _, _),
+             let .loadCachedConversation(requestID, _),
              let .loadOlderMessages(requestID, _, _, _),
              let .searchMessages(requestID, _, _, _),
              let .openMessage(requestID, _, _, _, _),
@@ -428,6 +430,8 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
             "BridgeCommand.startPasswordSession(password: [REDACTED])"
         case .openConversation:
             "BridgeCommand.openConversation"
+        case .loadCachedConversation:
+            "BridgeCommand.loadCachedConversation"
         case .loadOlderMessages:
             "BridgeCommand.loadOlderMessages"
         case .searchMessages:
@@ -497,6 +501,8 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
                 key: try key.ffiValue(),
                 limit: limit
             )
+        case let .loadCachedConversation(requestID, key):
+            .loadCachedConversation(requestId: requestID, key: try key.ffiValue())
         case let .loadOlderMessages(requestID, key, beforeMessageID, limit):
             .loadOlderMessages(
                 requestId: requestID,
@@ -647,6 +653,7 @@ public enum BridgeEvent:
     case draftsLoaded(requestID: UInt64, accountID: String, drafts: [LiveDraft])
     case snapshotUpdated(accountID: String, snapshot: LiveSnapshot)
     case conversationOpened(requestID: UInt64, page: LiveConversationPage)
+    case cachedConversationLoaded(requestID: UInt64, page: LiveConversationPage)
     case conversationHistoryLoaded(requestID: UInt64, page: LiveConversationPage)
     case searchCompleted(
         requestID: UInt64,
@@ -690,6 +697,7 @@ public enum BridgeEvent:
              let .cachedSessionLoaded(requestID, _, _),
              let .draftsLoaded(requestID, _, _),
              let .conversationOpened(requestID, _),
+             let .cachedConversationLoaded(requestID, _),
              let .conversationHistoryLoaded(requestID, _),
              let .searchCompleted(requestID, _, _),
              let .messageFocused(requestID, _, _),
@@ -725,6 +733,8 @@ public enum BridgeEvent:
             "Live snapshot updated"
         case .conversationOpened:
             "Conversation opened"
+        case .cachedConversationLoaded:
+            "Cached conversation loaded"
         case .conversationHistoryLoaded:
             "Conversation history loaded"
         case .searchCompleted:
@@ -1092,6 +1102,11 @@ private extension BridgeEvent {
             )
         case let .conversationOpened(requestID, page):
             self = .conversationOpened(
+                requestID: requestID,
+                page: LiveConversationPage(page)
+            )
+        case let .cachedConversationLoaded(requestID, page):
+            self = .cachedConversationLoaded(
                 requestID: requestID,
                 page: LiveConversationPage(page)
             )
