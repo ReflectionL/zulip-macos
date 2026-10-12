@@ -131,6 +131,17 @@ private struct PendingSend: Sendable {
     let localMessageID: Int64
 }
 
+/// A message whose Markdown source is being fetched to quote or forward it.
+private struct PendingMessageSource: Sendable {
+    enum Purpose: Sendable {
+        case quote(into: ConversationKey)
+        case forward(to: ConversationKey)
+    }
+
+    let purpose: Purpose
+    let message: MessageViewData
+}
+
 private struct PendingAttachmentUpload: Sendable {
     let key: ConversationKey
     let fileURL: URL
@@ -215,6 +226,7 @@ final class LiveSessionViewModel {
     private var pendingFocusedMessageRequestID: UInt64?
     private var issuedFocusedMessageRequestIDs = Set<UInt64>()
     private var topicActionsByRequestID: [UInt64: TopicAction] = [:]
+    @ObservationIgnored private var messageSourceRequests: [UInt64: PendingMessageSource] = [:]
     private var messageActionsByRequestID: [UInt64: SubmittedMessageAction] = [:]
     private var failedMessageActions: [Int64: MessageAction] = [:]
     private var sendsByRequestID: [UInt64: PendingSend] = [:]
@@ -787,6 +799,93 @@ final class LiveSessionViewModel {
         )
     }
 
+    /// Puts a quote of `message` into the open conversation's composer.
+    func quote(_ message: MessageViewData) {
+        guard let activeSelection else {
+            return
+        }
+        requestMessageSource(for: message, purpose: .quote(into: activeSelection))
+    }
+
+    /// Posts a quote of `message` into another conversation.
+    func forward(_ message: MessageViewData, to key: ConversationKey) {
+        requestMessageSource(for: message, purpose: .forward(to: key))
+    }
+
+    /// Topics and direct messages a message can be forwarded to.
+    func forwardDestinations(matching query: String) -> [NavigationDestination] {
+        navigationDirectory
+            .search(query, limit: 400)
+            .filter {
+                switch $0.key {
+                case .topic, .directMessage: true
+                default: false
+                }
+            }
+            .prefix(30)
+            .map { $0 }
+    }
+
+    private func requestMessageSource(
+        for message: MessageViewData,
+        purpose: PendingMessageSource.Purpose
+    ) {
+        guard let identity, message.id > 0, message.accountID == identity.accountID else {
+            notice = "This message is not available to quote."
+            return
+        }
+        let id = nextRequestID()
+        messageSourceRequests[id] = PendingMessageSource(purpose: purpose, message: message)
+        notice = nil
+        client.submit(
+            .fetchMessageSource(
+                requestID: id,
+                accountID: identity.accountID,
+                messageID: message.id
+            )
+        )
+    }
+
+    private func messageSourceMarkdown(_ pending: PendingMessageSource, source: String) -> String {
+        let message = pending.message
+        let streamID: Int64?
+        let topic: String?
+        var recipientIDs: [Int64] = []
+        switch message.conversationKey {
+        case let .topic(_, keyStreamID, keyTopic):
+            streamID = message.sourceStreamID ?? keyStreamID
+            topic = message.sourceTopic ?? keyTopic
+        case let .directMessage(_, ids):
+            streamID = nil
+            topic = nil
+            recipientIDs = ids
+        default:
+            streamID = message.sourceStreamID
+            topic = message.sourceTopic
+        }
+        let streamName = streamID.flatMap {
+            navigationDirectory.destination(
+                for: .channel(accountID: message.accountID, streamID: $0)
+            )?.title
+        }
+        let link = identity.flatMap {
+            MessageQuote.permalink(
+                serverURL: $0.serverURL,
+                streamID: streamID,
+                streamName: streamName,
+                topic: topic,
+                recipientIDs: recipientIDs,
+                messageID: message.id
+            )
+        }
+        return MessageQuote.markdown(
+            senderName: message.senderName,
+            senderID: message.senderID,
+            permalink: link,
+            source: source
+        )
+    }
+
     func retryMessageAction(for messageID: Int64) {
         guard let action = failedMessageActions[messageID] else {
             return
@@ -1132,6 +1231,28 @@ final class LiveSessionViewModel {
             topicActionState = .idle
             applyTopicUpdate(update, action: action)
 
+        case let .messageSourceLoaded(requestID, _, source):
+            guard let pending = messageSourceRequests.removeValue(forKey: requestID),
+                  identity?.accountID == pending.message.accountID
+            else {
+                return
+            }
+            let markdown = messageSourceMarkdown(pending, source: source)
+            switch pending.purpose {
+            case let .quote(key):
+                attachmentInsertion = ComposerAttachmentInsertion(
+                    id: requestID,
+                    key: key,
+                    filename: "quote",
+                    markdown: markdown + "\n\n"
+                )
+            case let .forward(key):
+                if sendText(markdown, to: key) {
+                    let name = navigationDirectory.destination(for: key)?.title ?? "the conversation"
+                    notice = "Forwarded to \(name)."
+                }
+            }
+
         case .messagesMarkedRead, .pong:
             break
 
@@ -1225,6 +1346,10 @@ final class LiveSessionViewModel {
                     value.deliveryState = .failed
                 }
                 notice = "Message could not be sent. You can retry it."
+            } else if let requestID,
+                      messageSourceRequests.removeValue(forKey: requestID) != nil
+            {
+                notice = "The original message could not be loaded: \(message)"
             } else if requestID != nil,
                       identity != nil,
                       connectionState != .connected,
@@ -1306,6 +1431,7 @@ final class LiveSessionViewModel {
         pendingMediaURLs = []
         mediaLocalURLs = [:]
         mediaFailures = [:]
+        messageSourceRequests = [:]
         isLoadingOlderMessages = false
         messageSearchState = .idle
         topicActionState = .idle

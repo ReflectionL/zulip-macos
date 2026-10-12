@@ -446,6 +446,15 @@ pub enum CoreCommand {
         /// Server message identifiers.
         message_ids: Vec<i64>,
     },
+    /// Fetches the original Markdown of one message so it can be quoted or forwarded.
+    FetchMessageSource {
+        /// Correlates the response.
+        request_id: u64,
+        /// Client-owned account partition.
+        account_id: String,
+        /// Server message identifier.
+        message_id: i64,
+    },
     /// Reports the user's own presence and fetches everyone else's.
     ///
     /// Failures are silent: presence is advisory and the next refresh retries.
@@ -513,6 +522,7 @@ impl CoreCommand {
             | Self::LoadMedia { request_id, .. }
             | Self::MarkRead { request_id, .. }
             | Self::RefreshPresence { request_id, .. }
+            | Self::FetchMessageSource { request_id, .. }
             | Self::Disconnect { request_id } => *request_id,
         }
     }
@@ -1044,6 +1054,15 @@ pub enum CoreEvent {
         /// Last known immutable navigation state.
         snapshot: CoreSnapshot,
     },
+    /// The original Markdown source of a requested message.
+    MessageSourceLoaded {
+        /// Matches the originating command.
+        request_id: u64,
+        /// Server message identifier.
+        message_id: i64,
+        /// Markdown exactly as its author wrote it.
+        content: String,
+    },
     /// Fresh online states for users known to the server.
     PresenceUpdated {
         /// Active account partition.
@@ -1508,6 +1527,17 @@ async fn handle_command(
             is_active,
             ..
         } => refresh_presence(account_id, is_active, account.as_ref(), event_sink),
+        CoreCommand::FetchMessageSource {
+            request_id,
+            account_id,
+            message_id,
+        } => fetch_message_source(
+            request_id,
+            &account_id,
+            message_id,
+            account.as_ref(),
+            event_sink,
+        ),
         CoreCommand::MarkRead {
             request_id,
             account_id,
@@ -1550,6 +1580,31 @@ fn upload_attachment(
                 filename: uploaded.filename,
                 url: uploaded.url,
                 markdown: uploaded.markdown,
+            }),
+            Err(error) => emit_error(Some(request_id), error, &event_sink),
+        }
+    });
+}
+
+fn fetch_message_source(
+    request_id: u64,
+    account_id: &str,
+    message_id: i64,
+    account: Option<&AccountSession>,
+    event_sink: &Arc<dyn CoreEventSink>,
+) {
+    let Some(session) = account.filter(|item| item.account_id == account_id) else {
+        emit_no_session(request_id, event_sink);
+        return;
+    };
+    let messages = Arc::clone(&session.messages);
+    let event_sink = Arc::clone(event_sink);
+    tokio::spawn(async move {
+        match messages.fetch_message_source(message_id).await {
+            Ok(content) => event_sink.handle_event(CoreEvent::MessageSourceLoaded {
+                request_id,
+                message_id,
+                content,
             }),
             Err(error) => emit_error(Some(request_id), error, &event_sink),
         }

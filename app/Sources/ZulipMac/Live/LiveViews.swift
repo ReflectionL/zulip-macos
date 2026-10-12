@@ -398,6 +398,15 @@ private struct LiveWindowView: View {
                 retrySend: { message in
                     session.retrySend(message)
                 },
+                quoteMessage: { message in
+                    session.quote(message)
+                },
+                forwardMessage: { message, key in
+                    session.forward(message, to: key)
+                },
+                forwardDestinations: { query in
+                    session.forwardDestinations(matching: query)
+                },
                 attachmentUploadState: session.attachmentUploadState,
                 attachmentInsertion: session.attachmentInsertion,
                 uploadAttachment: { url in

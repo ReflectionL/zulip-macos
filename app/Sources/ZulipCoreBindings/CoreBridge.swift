@@ -396,6 +396,7 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
     case loadMedia(requestID: UInt64, accountID: String, remoteURL: String)
     case markRead(requestID: UInt64, accountID: String, messageIDs: [Int64])
     case refreshPresence(requestID: UInt64, accountID: String, isActive: Bool)
+    case fetchMessageSource(requestID: UInt64, accountID: String, messageID: Int64)
     case disconnect(requestID: UInt64)
     case loadCachedSession(requestID: UInt64, accountID: String)
     case saveDraft(requestID: UInt64, key: ConversationKey, content: String)
@@ -428,6 +429,7 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
              let .loadMedia(requestID, _, _),
              let .markRead(requestID, _, _),
              let .refreshPresence(requestID, _, _),
+             let .fetchMessageSource(requestID, _, _),
              let .disconnect(requestID),
              let .loadCachedSession(requestID, _),
              let .saveDraft(requestID, _, _),
@@ -478,6 +480,8 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
             "BridgeCommand.markRead"
         case .refreshPresence:
             "BridgeCommand.refreshPresence"
+        case .fetchMessageSource:
+            "BridgeCommand.fetchMessageSource"
         case .disconnect:
             "BridgeCommand.disconnect"
         case .loadCachedSession:
@@ -635,6 +639,12 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
             )
         case let .refreshPresence(requestID, accountID, isActive):
             .refreshPresence(requestId: requestID, accountId: accountID, isActive: isActive)
+        case let .fetchMessageSource(requestID, accountID, messageID):
+            .fetchMessageSource(
+                requestId: requestID,
+                accountId: accountID,
+                messageId: messageID
+            )
         case let .disconnect(requestID):
             .disconnect(requestId: requestID)
         case let .loadCachedSession(requestID, accountID):
@@ -700,6 +710,7 @@ public enum BridgeEvent:
     )
     case topicUpdated(requestID: UInt64, update: LiveTopicUpdate)
     case messagesMarkedRead(requestID: UInt64, messageIDs: [Int64])
+    case messageSourceLoaded(requestID: UInt64, messageID: Int64, content: String)
     case retryScheduled(accountID: String, delayMilliseconds: UInt64)
     case syncResumed(accountID: String)
     case presenceUpdated(accountID: String, presences: [LivePresence])
@@ -726,6 +737,7 @@ public enum BridgeEvent:
              let .messageFlagUpdated(requestID, _, _, _),
              let .topicUpdated(requestID, _),
              let .messagesMarkedRead(requestID, _),
+             let .messageSourceLoaded(requestID, _, _),
              let .disconnected(requestID):
             requestID
         case let .failed(requestID, _):
@@ -775,6 +787,8 @@ public enum BridgeEvent:
             "Topic updated"
         case .messagesMarkedRead:
             "Messages marked read"
+        case .messageSourceLoaded:
+            "Message source loaded"
         case .retryScheduled:
             "Retry scheduled"
         case .syncResumed:
@@ -1228,6 +1242,12 @@ private extension BridgeEvent {
             self = .messagesMarkedRead(
                 requestID: requestID,
                 messageIDs: messageIDs
+            )
+        case let .messageSourceLoaded(requestID, messageID, content):
+            self = .messageSourceLoaded(
+                requestID: requestID,
+                messageID: messageID,
+                content: content
             )
         case let .retryScheduled(accountID, delayMilliseconds):
             self = .retryScheduled(

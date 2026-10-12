@@ -630,6 +630,37 @@ impl MessageClient {
         document.validate_result()
     }
 
+    /// Fetches the original Markdown source of one visible message, as needed
+    /// to quote or forward it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageApiError`] for invalid identifiers, transport,
+    /// rejection, size, or response failures.
+    pub async fn fetch_message_source(&self, message_id: i64) -> Result<String, MessageApiError> {
+        if message_id <= 0 {
+            return Err(MessageApiError::InvalidInput);
+        }
+        let path = format!("{MESSAGES_PATH}/{message_id}");
+        let response = self
+            .http
+            .get(self.base_url.endpoint(&path))
+            .basic_auth(&self.email, Some(self.api_key.expose_secret()))
+            .query(&[("apply_markdown", "false")])
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let document: MessageSourceDocument =
+            decode_response(response, MAX_MESSAGES_RESPONSE_BYTES).await?;
+        validate_api_result(document.result.as_deref(), document.code.as_deref())?;
+        document
+            .message
+            .map(|message| message.content)
+            .ok_or(MessageApiError::InvalidResponse(
+                "message source is missing",
+            ))
+    }
+
     /// Adds or removes the current user's emoji reaction on one message.
     ///
     /// Zulip resolves the reaction namespace from `emoji_name`, matching the
@@ -912,6 +943,20 @@ impl SendMessageDocument {
 }
 
 #[derive(Debug, Deserialize)]
+struct MessageSourceDocument {
+    result: Option<String>,
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    message: Option<MessageSourceBody>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MessageSourceBody {
+    content: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct ApiResultDocument {
     result: Option<String>,
     #[serde(default)]
@@ -1166,6 +1211,27 @@ mod tests {
         assert!(request.contains("status=active"));
         assert!(request.contains("slim_presence=true"));
         assert!(!request.contains(API_KEY));
+    }
+
+    #[tokio::test]
+    async fn message_source_requests_raw_markdown() {
+        let responses = vec![(
+            StatusCode::OK,
+            r#"{"result":"success","message":{"id":55,"content":"**bold** text"}}"#.to_owned(),
+        )];
+        let (server, requests) = spawn_mock(responses);
+        let client = MessageClient::new(&server, "maya@example.com", SecretString::new(API_KEY))
+            .expect("message client");
+
+        let source = client.fetch_message_source(55).await.expect("source");
+        assert_eq!(source, "**bold** text");
+        let request = requests.recv().expect("source request");
+        assert!(request.starts_with("GET /api/v1/messages/55?apply_markdown=false HTTP/1.1"));
+        assert!(!request.contains(API_KEY));
+        assert!(matches!(
+            client.fetch_message_source(0).await,
+            Err(MessageApiError::InvalidInput)
+        ));
     }
 
     #[tokio::test]

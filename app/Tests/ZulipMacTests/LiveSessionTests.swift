@@ -611,6 +611,84 @@ struct LiveSessionTests {
         }
     }
 
+    @Test("Quoting fetches the source and inserts a quote; forwarding posts it elsewhere")
+    func quoteAndForward() async {
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(client: core, credentialStore: MemoryCredentialStore())
+        model.startObserving()
+        let accountID = "account-1"
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: accountID),
+                credential: StoredAPICredential(accountID: accountID, apiKey: "key"),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.connectionState == .connected }
+
+        let key = ConversationKey.topic(accountID: accountID, streamID: 5, topic: "macOS")
+        model.openConversation(key)
+        core.emit(
+            .conversationOpened(
+                requestID: 2,
+                page: LiveConversationPage(
+                    key: key,
+                    messages: [
+                        LiveMessageSnapshot(
+                            messageID: 40,
+                            senderID: 22,
+                            senderFullName: "Theo Martin",
+                            timestamp: Date(timeIntervalSince1970: 1_700_000_000),
+                            content: [.paragraph([.text("Rendered")])],
+                            streamID: 5,
+                            topic: "macOS",
+                            recipientIDs: []
+                        ),
+                    ],
+                    foundOldest: true,
+                    foundNewest: true
+                )
+            )
+        )
+        await eventually {
+            if case .loaded = model.conversationState { return true }
+            return false
+        }
+        guard case let .loaded(page) = model.conversationState,
+              let message = page.messages.first
+        else {
+            Issue.record("Expected a loaded message")
+            return
+        }
+
+        model.quote(message)
+        guard case let .fetchMessageSource(quoteID, _, 40) = core.commands.last else {
+            Issue.record("Expected the message source to be requested")
+            return
+        }
+        core.emit(.messageSourceLoaded(requestID: quoteID, messageID: 40, content: "**raw**"))
+        await eventually { model.attachmentInsertion != nil }
+        let insertion = model.attachmentInsertion
+        #expect(insertion?.key == key)
+        #expect(insertion?.markdown.contains("@_**Theo Martin|22**") == true)
+        #expect(insertion?.markdown.contains("```quote\n**raw**\n```") == true)
+
+        let other = ConversationKey.topic(accountID: accountID, streamID: 5, topic: "other")
+        model.forward(message, to: other)
+        guard case let .fetchMessageSource(forwardID, _, 40) = core.commands.last else {
+            Issue.record("Expected a second source request")
+            return
+        }
+        core.emit(.messageSourceLoaded(requestID: forwardID, messageID: 40, content: "**raw**"))
+        await eventually {
+            if case let .sendChannelMessage(_, _, 5, "other", content, _) = core.commands.last {
+                return content.contains("**raw**")
+            }
+            return false
+        }
+    }
+
     @Test("Reopening a conversation seen this session paints at once without a loading state")
     func reopenedConversationSkipsLoading() async {
         let core = RecordingCoreClient()

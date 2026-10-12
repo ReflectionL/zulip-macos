@@ -19,6 +19,9 @@ struct ConversationSurface: View {
     var setMessageRead: ((MessageViewData, Bool) -> Bool)?
     var retryMessageAction: ((MessageViewData) -> Void)?
     var retrySend: ((MessageViewData) -> Void)?
+    var quoteMessage: ((MessageViewData) -> Void)?
+    var forwardMessage: ((MessageViewData, ConversationKey) -> Void)?
+    var forwardDestinations: ((String) -> [NavigationDestination])?
     var attachmentUploadState = AttachmentUploadState.idle
     var attachmentInsertion: ComposerAttachmentInsertion?
     var uploadAttachment: ((URL) -> Void)?
@@ -36,6 +39,7 @@ struct ConversationSurface: View {
     @State private var followsNewest = true
     @State private var editingMessage: MessageViewData?
     @State private var deletingMessage: MessageViewData?
+    @State private var forwardingMessage: MessageViewData?
     @State private var isChoosingAttachment = false
     @FocusState private var isComposerFocused: Bool
 
@@ -56,6 +60,9 @@ struct ConversationSurface: View {
         setMessageRead: ((MessageViewData, Bool) -> Bool)? = nil,
         retryMessageAction: ((MessageViewData) -> Void)? = nil,
         retrySend: ((MessageViewData) -> Void)? = nil,
+        quoteMessage: ((MessageViewData) -> Void)? = nil,
+        forwardMessage: ((MessageViewData, ConversationKey) -> Void)? = nil,
+        forwardDestinations: ((String) -> [NavigationDestination])? = nil,
         attachmentUploadState: AttachmentUploadState = .idle,
         attachmentInsertion: ComposerAttachmentInsertion? = nil,
         uploadAttachment: ((URL) -> Void)? = nil,
@@ -84,6 +91,9 @@ struct ConversationSurface: View {
         self.setMessageRead = setMessageRead
         self.retryMessageAction = retryMessageAction
         self.retrySend = retrySend
+        self.quoteMessage = quoteMessage
+        self.forwardMessage = forwardMessage
+        self.forwardDestinations = forwardDestinations
         self.attachmentUploadState = attachmentUploadState
         self.attachmentInsertion = attachmentInsertion
         self.uploadAttachment = uploadAttachment
@@ -173,6 +183,12 @@ struct ConversationSurface: View {
                                     delete: message.isOwnMessage && deleteMessage != nil
                                         ? { deletingMessage = message }
                                         : nil,
+                                    quote: quoteMessage == nil
+                                        ? nil
+                                        : { quoteMessage?(message) },
+                                    forward: forwardMessage == nil || forwardDestinations == nil
+                                        ? nil
+                                        : { forwardingMessage = message },
                                     toggleRead: setMessageRead == nil
                                         ? nil
                                         : { _ = setMessageRead?(message, !message.isRead) },
@@ -311,6 +327,17 @@ struct ConversationSurface: View {
             EditMessageSheet(message: message) { content in
                 if editMessage?(message, content) == true {
                     editingMessage = nil
+                }
+            }
+        }
+        .sheet(item: $forwardingMessage) { message in
+            if let forwardDestinations {
+                ForwardMessageSheet(
+                    message: message,
+                    destinations: forwardDestinations
+                ) { key in
+                    forwardMessage?(message, key)
+                    forwardingMessage = nil
                 }
             }
         }
@@ -508,6 +535,8 @@ private struct MessageRow: View {
     let moveToTopic: (() -> Void)?
     let edit: (() -> Void)?
     let delete: (() -> Void)?
+    let quote: (() -> Void)?
+    let forward: (() -> Void)?
     let toggleRead: (() -> Void)?
     let retryAction: () -> Void
     let retrySend: () -> Void
@@ -631,6 +660,8 @@ private struct MessageRow: View {
                 moveToTopic: moveToTopic,
                 edit: edit,
                 delete: delete,
+                quote: quote,
+                forward: forward,
                 toggleRead: toggleRead,
                 isRead: message.isRead,
                 isDisabled: message.actionState.isPending || message.deliveryState != .sent
@@ -651,6 +682,12 @@ private struct MessageRow: View {
             toggleStar()
         }
         .accessibilityActions {
+            if let quote {
+                Button("Quote and reply", action: quote)
+            }
+            if let forward {
+                Button("Forward message", action: forward)
+            }
             if let edit {
                 Button("Edit message", action: edit)
             }
@@ -713,6 +750,8 @@ private struct MessageActions: View {
     let moveToTopic: (() -> Void)?
     let edit: (() -> Void)?
     let delete: (() -> Void)?
+    let quote: (() -> Void)?
+    let forward: (() -> Void)?
     let toggleRead: (() -> Void)?
     let isRead: Bool
     let isDisabled: Bool
@@ -729,8 +768,24 @@ private struct MessageActions: View {
                 systemImage: isStarred ? "star.fill" : "star",
                 action: toggleStar
             )
+            if let quote {
+                actionButton(
+                    title: "Quote and reply",
+                    systemImage: "quote.bubble",
+                    action: quote
+                )
+            }
             Menu {
+                if let quote {
+                    Button("Quote and reply", action: quote)
+                }
+                if let forward {
+                    Button("Forward message…", action: forward)
+                }
                 if let edit {
+                    if quote != nil || forward != nil {
+                        Divider()
+                    }
                     Button("Edit message…", action: edit)
                 }
                 if let moveToTopic {
@@ -780,6 +835,57 @@ private extension MessageActionState {
             return true
         }
         return false
+    }
+}
+
+private struct ForwardMessageSheet: View {
+    let message: MessageViewData
+    let destinations: (String) -> [NavigationDestination]
+    let choose: (ConversationKey) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var query = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppTheme.Spacing.medium) {
+            Text("Forward message")
+                .font(AppTheme.Typography.title)
+            Text("\(message.senderName): \(message.plainText)")
+                .font(AppTheme.Typography.metadata)
+                .foregroundStyle(AppTheme.Colors.secondaryText)
+                .lineLimit(2)
+            TextField("Search topics and people", text: $query)
+                .textFieldStyle(.roundedBorder)
+            List(destinations(query)) { destination in
+                Button {
+                    choose(destination.key)
+                } label: {
+                    HStack {
+                        Image(systemName: destination.systemImage)
+                            .frame(width: 20)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(destination.title)
+                            Text(destination.subtitle)
+                                .font(AppTheme.Typography.metadata)
+                                .foregroundStyle(AppTheme.Colors.secondaryText)
+                        }
+                        Spacer()
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            .frame(minHeight: 220)
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(AppTheme.Spacing.large)
+        .frame(width: 420)
     }
 }
 
