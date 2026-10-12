@@ -611,6 +611,64 @@ struct LiveSessionTests {
         }
     }
 
+    @Test("Reopening a conversation seen this session paints at once without a loading state")
+    func reopenedConversationSkipsLoading() async {
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(client: core, credentialStore: MemoryCredentialStore())
+        model.startObserving()
+        let accountID = "account-1"
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: accountID),
+                credential: StoredAPICredential(accountID: accountID, apiKey: "key"),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.connectionState == .connected }
+
+        let first = ConversationKey.topic(accountID: accountID, streamID: 5, topic: "macOS")
+        let second = ConversationKey.topic(accountID: accountID, streamID: 5, topic: "release")
+        func page(_ key: ConversationKey, topic: String, _ text: String) -> LiveConversationPage {
+            LiveConversationPage(
+                key: key,
+                messages: [
+                    LiveMessageSnapshot(
+                        messageID: 40,
+                        senderID: 22,
+                        senderFullName: "Theo Martin",
+                        timestamp: Date(timeIntervalSince1970: 1_700_000_000),
+                        content: [.paragraph([.text(text)])],
+                        streamID: 5,
+                        topic: topic,
+                        recipientIDs: []
+                    ),
+                ],
+                foundOldest: true,
+                foundNewest: true
+            )
+        }
+
+        model.openConversation(first)
+        core.emit(.conversationOpened(requestID: 2, page: page(first, topic: "macOS", "Hello")))
+        await eventually {
+            if case .loaded = model.conversationState { return true }
+            return false
+        }
+        model.openConversation(second)
+        if case .loading = model.conversationState {} else {
+            Issue.record("A never-opened conversation still waits for its first page")
+        }
+
+        // Going back to the first one shows its earlier content in the same turn.
+        model.openConversation(first)
+        guard case let .loaded(shown) = model.conversationState else {
+            Issue.record("Expected the remembered page to be shown immediately")
+            return
+        }
+        #expect(shown.messages.map(\.plainText) == ["Hello"])
+    }
+
     @Test("A loaded conversation is mapped safely and marked read")
     func openConversation() async {
         let core = RecordingCoreClient()

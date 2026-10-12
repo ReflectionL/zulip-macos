@@ -197,6 +197,11 @@ final class LiveSessionViewModel {
     /// Set while the visible page is only the local cache of that conversation, which
     /// the first fresh page replaces outright instead of merging into.
     @ObservationIgnored private var cachedPlaceholderKey: ConversationKey?
+    /// Pages already shown this session, newest use last, so reopening a chat,
+    /// topic or thread paints at once instead of passing through a loading state.
+    @ObservationIgnored private var recentPages: [ConversationKey: ConversationPage] = [:]
+    @ObservationIgnored private var recentPageOrder: [ConversationKey] = []
+    private static let recentPageLimit = 24
     @ObservationIgnored private var presenceStates: [Int64: PresenceState] = [:]
     @ObservationIgnored private var presenceTask: Task<Void, Never>?
     private(set) var drafts: [ConversationKey: String] = [:]
@@ -500,17 +505,24 @@ final class LiveSessionViewModel {
         guard identity?.accountID == key.accountID else {
             return
         }
+        stashVisiblePage()
         pendingFocusedMessageRequestID = nil
         pendingOlderRequestID = nil
         isLoadingOlderMessages = false
         activeSelection = key
-        let destination = navigationDirectory.destination(for: key)
-        conversationState = .loading(
-            title: destination?.title ?? "Conversation",
-            subtitle: destination?.subtitle ?? organizationName
-        )
-        // Show the last copy we have right away while the fresh page loads.
-        cachedPlaceholderKey = nil
+        if let page = recentPages[key] {
+            // Seen earlier this session: show it synchronously while the fresh page loads.
+            cachedPlaceholderKey = key
+            conversationState = isServingCachedData ? .offline(page) : .loaded(page)
+        } else {
+            let destination = navigationDirectory.destination(for: key)
+            conversationState = .loading(
+                title: destination?.title ?? "Conversation",
+                subtitle: destination?.subtitle ?? organizationName
+            )
+            // Otherwise show the last on-disk copy as soon as the core reads it.
+            cachedPlaceholderKey = nil
+        }
         client.submit(.loadCachedConversation(requestID: nextRequestID(), key: key))
         client.submit(
             .openConversation(
@@ -645,6 +657,7 @@ final class LiveSessionViewModel {
         pendingSearchRequestID = nil
         pendingSearchQuery = nil
         messageSearchState = .idle
+        stashVisiblePage()
         pendingOlderRequestID = nil
         isLoadingOlderMessages = false
         activeSelection = result.conversationKey
@@ -1260,6 +1273,8 @@ final class LiveSessionViewModel {
         presenceTask = nil
         presenceStates = [:]
         cachedPlaceholderKey = nil
+        recentPages = [:]
+        recentPageOrder = []
         notificationPlanner.reset()
         unseenNotificationCount = 0
         notifier?.setBadge(0)
@@ -1803,6 +1818,38 @@ final class LiveSessionViewModel {
                 return false
             }
             return left.id > right.id
+        }
+    }
+
+    /// Remembers the page on screen (without unsent echoes or a search focus) so it
+    /// can be shown immediately the next time that conversation opens.
+    private func stashVisiblePage() {
+        let page: ConversationPage
+        switch conversationState {
+        case let .loaded(visible), let .offline(visible):
+            page = visible
+        default:
+            return
+        }
+        guard page.focusedMessageID == nil else {
+            return
+        }
+        let confirmed = page.messages.filter { $0.id > 0 }
+        guard !confirmed.isEmpty else {
+            return
+        }
+        recentPages[page.key] = ConversationPage(
+            key: page.key,
+            title: page.title,
+            subtitle: page.subtitle,
+            messages: confirmed,
+            beforeCursor: page.beforeCursor,
+            afterCursor: page.afterCursor
+        )
+        recentPageOrder.removeAll { $0 == page.key }
+        recentPageOrder.append(page.key)
+        while recentPageOrder.count > Self.recentPageLimit {
+            recentPages[recentPageOrder.removeFirst()] = nil
         }
     }
 
