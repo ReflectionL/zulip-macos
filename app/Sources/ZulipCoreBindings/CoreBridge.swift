@@ -125,6 +125,17 @@ public struct LiveSnapshot: Equatable, Sendable {
     }
 }
 
+/// One persisted composer draft.
+public struct LiveDraft: Equatable, Sendable {
+    public let key: ConversationKey
+    public let content: String
+
+    public init(key: ConversationKey, content: String) {
+        self.key = key
+        self.content = content
+    }
+}
+
 /// Newest live messages for one stable conversation.
 public struct LiveConversationPage: Equatable, Sendable {
     public let key: ConversationKey
@@ -349,6 +360,9 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
     case loadMedia(requestID: UInt64, accountID: String, remoteURL: String)
     case markRead(requestID: UInt64, accountID: String, messageIDs: [Int64])
     case disconnect(requestID: UInt64)
+    case loadCachedSession(requestID: UInt64, accountID: String)
+    case saveDraft(requestID: UInt64, key: ConversationKey, content: String)
+    case loadDrafts(requestID: UInt64, accountID: String)
 
     /// Backward-compatible foundation ping initializer.
     public init(requestID: UInt64, payload: String) {
@@ -375,7 +389,10 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
              let .uploadAttachment(requestID, _, _, _),
              let .loadMedia(requestID, _, _),
              let .markRead(requestID, _, _),
-             let .disconnect(requestID):
+             let .disconnect(requestID),
+             let .loadCachedSession(requestID, _),
+             let .saveDraft(requestID, _, _),
+             let .loadDrafts(requestID, _):
             requestID
         }
     }
@@ -420,6 +437,12 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
             "BridgeCommand.markRead"
         case .disconnect:
             "BridgeCommand.disconnect"
+        case .loadCachedSession:
+            "BridgeCommand.loadCachedSession"
+        case .saveDraft:
+            "BridgeCommand.saveDraft(content: [REDACTED])"
+        case .loadDrafts:
+            "BridgeCommand.loadDrafts"
         }
     }
 
@@ -567,6 +590,12 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
             )
         case let .disconnect(requestID):
             .disconnect(requestId: requestID)
+        case let .loadCachedSession(requestID, accountID):
+            .loadCachedSession(requestId: requestID, accountId: accountID)
+        case let .saveDraft(requestID, key, content):
+            .saveDraft(requestId: requestID, key: try key.ffiValue(), content: content)
+        case let .loadDrafts(requestID, accountID):
+            .loadDrafts(requestId: requestID, accountId: accountID)
         }
     }
 }
@@ -585,6 +614,12 @@ public enum BridgeEvent:
         credential: StoredAPICredential,
         snapshot: LiveSnapshot
     )
+    case cachedSessionLoaded(
+        requestID: UInt64,
+        identity: LiveSessionIdentity,
+        snapshot: LiveSnapshot
+    )
+    case draftsLoaded(requestID: UInt64, accountID: String, drafts: [LiveDraft])
     case snapshotUpdated(accountID: String, snapshot: LiveSnapshot)
     case conversationOpened(requestID: UInt64, page: LiveConversationPage)
     case conversationHistoryLoaded(requestID: UInt64, page: LiveConversationPage)
@@ -626,6 +661,8 @@ public enum BridgeEvent:
         switch self {
         case let .pong(requestID, _),
              let .sessionStarted(requestID, _, _, _),
+             let .cachedSessionLoaded(requestID, _, _),
+             let .draftsLoaded(requestID, _, _),
              let .conversationOpened(requestID, _),
              let .conversationHistoryLoaded(requestID, _),
              let .searchCompleted(requestID, _, _),
@@ -654,6 +691,10 @@ public enum BridgeEvent:
             message
         case .sessionStarted:
             "Live session started"
+        case .cachedSessionLoaded:
+            "Cached session loaded"
+        case .draftsLoaded:
+            "Drafts loaded"
         case .snapshotUpdated:
             "Live snapshot updated"
         case .conversationOpened:
@@ -747,9 +788,13 @@ public final class LiveCoreClient: CoreClientProtocol, @unchecked Sendable {
         let mediaCacheRoot = caches
             .appendingPathComponent("io.github.huahai.ZulipMac", isDirectory: true)
             .appendingPathComponent("Media", isDirectory: true)
+        let databaseURL = caches
+            .appendingPathComponent("io.github.huahai.ZulipMac", isDirectory: true)
+            .appendingPathComponent("Cache.sqlite")
         rustClient = RustCoreClient(
             eventSink: eventRelay,
-            mediaCacheRootPath: mediaCacheRoot.path
+            mediaCacheRootPath: mediaCacheRoot.path,
+            databasePath: databaseURL.path
         )
     }
 
@@ -956,6 +1001,34 @@ private extension BridgeEvent {
                     apiKey: credential.apiKey
                 ),
                 snapshot: LiveSnapshot(snapshot)
+            )
+        case let .cachedSessionLoaded(
+            requestID,
+            accountID,
+            serverURL,
+            email,
+            userID,
+            fullName,
+            snapshot
+        ):
+            self = .cachedSessionLoaded(
+                requestID: requestID,
+                identity: LiveSessionIdentity(
+                    accountID: accountID,
+                    serverURL: serverURL,
+                    email: email,
+                    userID: userID,
+                    fullName: fullName
+                ),
+                snapshot: LiveSnapshot(snapshot)
+            )
+        case let .draftsLoaded(requestID, accountID, drafts):
+            self = .draftsLoaded(
+                requestID: requestID,
+                accountID: accountID,
+                drafts: drafts.map {
+                    LiveDraft(key: ConversationKey($0.key), content: $0.content)
+                }
             )
         case let .snapshotUpdated(accountID, snapshot):
             self = .snapshotUpdated(

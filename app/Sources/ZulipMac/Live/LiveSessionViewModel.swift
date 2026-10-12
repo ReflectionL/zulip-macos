@@ -177,6 +177,12 @@ final class LiveSessionViewModel {
     @ObservationIgnored private let credentialStore: any CredentialStore
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private var eventTask: Task<Void, Never>?
+    @ObservationIgnored private var reconnectTask: Task<Void, Never>?
+    private var reconnectAttempt = 0
+    private var cachedSessionRequestID: UInt64?
+    private var hasLiveSession = false
+    private(set) var drafts: [ConversationKey: String] = [:]
+    @ObservationIgnored private var draftSaveTasks: [ConversationKey: Task<Void, Never>] = [:]
     private var requestID: UInt64 = 1
     private var activeSelection: ConversationKey?
     private var pendingOlderRequestID: UInt64?
@@ -276,7 +282,99 @@ final class LiveSessionViewModel {
         }
         serverURL = savedServer
         email = savedEmail
+        startObserving()
+        // Show the last known state immediately; the live session replaces it.
+        let cachedRequestID = nextRequestID()
+        cachedSessionRequestID = cachedRequestID
+        client.submit(
+            .loadCachedSession(
+                requestID: cachedRequestID,
+                accountID: Self.accountID(serverURL: savedServer, email: savedEmail)
+            )
+        )
         await connectUsingSavedAPIKey(reportMissingKey: false)
+    }
+
+    /// True for failures that mean "the network is unavailable" rather than
+    /// "the server rejected us". The text mirrors the Rust core's sanitized
+    /// transport errors.
+    static func isTransientFailure(_ message: String) -> Bool {
+        message.hasPrefix("could not connect securely")
+            || message.hasPrefix("could not synchronize")
+            || message.hasPrefix("authentication returned HTTP 5")
+            || message.hasPrefix("event synchronization returned HTTP 5")
+    }
+
+    /// Whether the visible data may be older than the server's: either no live
+    /// session exists yet, or the live session is currently retrying.
+    private var isServingCachedData: Bool {
+        if !hasLiveSession {
+            return true
+        }
+        if case .retrying = connectionState {
+            return true
+        }
+        return false
+    }
+
+    /// Manual "Reconnect" from the offline banner.
+    func reconnectNow() {
+        if hasLiveSession {
+            if let activeSelection {
+                refreshConversation(activeSelection)
+            }
+            return
+        }
+        cancelReconnect()
+        Task { await connectUsingSavedAPIKey(reportMissingKey: false) }
+    }
+
+    func draft(for key: ConversationKey) -> String {
+        drafts[key] ?? ""
+    }
+
+    /// Remembers composer text immediately and persists it shortly after typing
+    /// pauses, so a relaunch or conversation switch never loses it.
+    func updateDraft(_ content: String, for key: ConversationKey) {
+        guard identity?.accountID == key.accountID else {
+            return
+        }
+        if content.isEmpty {
+            drafts.removeValue(forKey: key)
+        } else {
+            drafts[key] = content
+        }
+        draftSaveTasks[key]?.cancel()
+        draftSaveTasks[key] = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(500))
+            guard !Task.isCancelled, let self else { return }
+            self.draftSaveTasks.removeValue(forKey: key)
+            self.client.submit(
+                .saveDraft(requestID: self.nextRequestID(), key: key, content: content)
+            )
+        }
+    }
+
+    private func loadDrafts(for accountID: String) {
+        client.submit(.loadDrafts(requestID: nextRequestID(), accountID: accountID))
+    }
+
+    private func scheduleReconnect() {
+        reconnectTask?.cancel()
+        let seconds = min(5 << min(reconnectAttempt, 4), 60)
+        reconnectAttempt += 1
+        connectionState = .retrying(delayMilliseconds: UInt64(seconds) * 1_000)
+        reconnectTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(seconds))
+            guard !Task.isCancelled, let self else { return }
+            await self.connectUsingSavedAPIKey(reportMissingKey: false)
+        }
+    }
+
+    private func cancelReconnect() {
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        reconnectAttempt = 0
     }
 
     private func connectUsingSavedAPIKey(reportMissingKey: Bool) async {
@@ -718,20 +816,41 @@ final class LiveSessionViewModel {
 
     private func consume(_ event: BridgeEvent) async {
         switch event {
+        case let .cachedSessionLoaded(_, identity, snapshot):
+            // A live session that won the race must not be replaced by older data.
+            guard self.identity == nil else {
+                return
+            }
+            cachedSessionRequestID = nil
+            self.identity = identity
+            serverURL = identity.serverURL
+            email = identity.email
+            apply(snapshot)
+            loadDrafts(for: identity.accountID)
+            let inbox = ConversationKey.inbox(accountID: identity.accountID)
+            openConversation(inbox)
+
         case let .sessionStarted(_, identity, credential, snapshot):
+            cancelReconnect()
+            hasLiveSession = true
             self.identity = identity
             serverURL = identity.serverURL
             email = identity.email
             rememberLastAccount(identity)
             apply(snapshot)
+            loadDrafts(for: identity.accountID)
             do {
                 try await credentialStore.save(credential)
             } catch {
                 notice = "Connected, but the API key could not be saved in Keychain."
             }
             connectionState = .connected
-            let inbox = ConversationKey.inbox(accountID: identity.accountID)
-            openConversation(inbox)
+            if let activeSelection, activeSelection.accountID == identity.accountID {
+                // Keep the user's place when a cached session went live.
+                refreshConversation(activeSelection)
+            } else {
+                openConversation(ConversationKey.inbox(accountID: identity.accountID))
+            }
 
         case let .snapshotUpdated(accountID, snapshot):
             guard identity?.accountID == accountID else {
@@ -751,9 +870,13 @@ final class LiveSessionViewModel {
             }
             rememberTopics(from: page.messages)
             let existing = loadedPage(for: page.key)
-            conversationState = .loaded(
-                makeConversationPage(page, merging: existing)
-            )
+            let conversationPage = makeConversationPage(page, merging: existing)
+            if isServingCachedData {
+                // Cached copy: readable, but writes wait for a live connection.
+                conversationState = .offline(conversationPage)
+                return
+            }
+            conversationState = .loaded(conversationPage)
             let messageIDs = page.messages.map(\.messageID)
             if !messageIDs.isEmpty, let identity {
                 client.submit(
@@ -898,18 +1021,31 @@ final class LiveSessionViewModel {
         case let .retryScheduled(_, delayMilliseconds):
             connectionState = .retrying(delayMilliseconds: delayMilliseconds)
 
+        case let .draftsLoaded(_, accountID, loaded):
+            guard identity?.accountID == accountID else {
+                return
+            }
+            // Text typed since launch wins over what was stored.
+            for draft in loaded where drafts[draft.key] == nil {
+                drafts[draft.key] = draft.content
+            }
+
         case let .syncResumed(accountID):
             if identity?.accountID == accountID, case .retrying = connectionState {
                 connectionState = .connected
             }
 
         case .disconnected:
+            cancelReconnect()
             forgetLastAccount()
             resetSessionState()
             connectionState = .signedOut
 
         case let .failed(requestID, message):
-            if let requestID,
+            if let requestID, requestID == cachedSessionRequestID {
+                // No cached data yet (first run); the live connection continues.
+                cachedSessionRequestID = nil
+            } else if let requestID,
                let pending = attachmentUploadsByRequestID.removeValue(forKey: requestID)
             {
                 stopSecurityScope(for: pending)
@@ -964,6 +1100,25 @@ final class LiveSessionViewModel {
                     value.deliveryState = .failed
                 }
                 notice = "Message could not be sent. You can retry it."
+            } else if requestID != nil,
+                      identity != nil,
+                      connectionState != .connected,
+                      message == "no matching live account session"
+            {
+                // Cached session without a live connection and nothing cached
+                // for this conversation.
+                conversationState = .failure(
+                    title: "Not available offline",
+                    subtitle: organizationName,
+                    message: "This conversation has not been cached yet. It will load once you are back online."
+                )
+            } else if requestID != nil,
+                      identity != nil,
+                      connectionState == .connecting,
+                      Self.isTransientFailure(message)
+            {
+                // Offline with a cached session on screen: keep reading and retry.
+                scheduleReconnect()
             } else if requestID == nil, identity != nil {
                 // The Rust core ended the live session (for example after the
                 // server rejected the stored key). Return to the login surface
@@ -971,6 +1126,7 @@ final class LiveSessionViewModel {
                 // Only a credential rejection ends a session, so the saved key is
                 // known to be unusable and must not be offered again.
                 let rejectedAccountID = identity?.accountID
+                cancelReconnect()
                 resetSessionState()
                 if let rejectedAccountID {
                     try? await credentialStore.delete(accountID: rejectedAccountID)
@@ -984,6 +1140,10 @@ final class LiveSessionViewModel {
     }
 
     private func resetSessionState() {
+        hasLiveSession = false
+        draftSaveTasks.values.forEach { $0.cancel() }
+        draftSaveTasks = [:]
+        drafts = [:]
         attachmentUploadsByRequestID.values.forEach(stopSecurityScope)
         identity = nil
         sidebarSnapshot = nil

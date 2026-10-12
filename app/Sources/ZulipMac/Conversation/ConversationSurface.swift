@@ -28,6 +28,8 @@ struct ConversationSurface: View {
     var mediaFailures: [String: String] = [:]
     var requestMedia: ((String) -> Void)?
     var retryMedia: ((String) -> Void)?
+    var initialDraft = ""
+    var draftChanged: ((String) -> Void)?
 
     @State private var messages: [MessageViewData]
     @State private var draft = ""
@@ -62,7 +64,9 @@ struct ConversationSurface: View {
         mediaLocalURLs: [String: String] = [:],
         mediaFailures: [String: String] = [:],
         requestMedia: ((String) -> Void)? = nil,
-        retryMedia: ((String) -> Void)? = nil
+        retryMedia: ((String) -> Void)? = nil,
+        initialDraft: String = "",
+        draftChanged: ((String) -> Void)? = nil
     ) {
         self.page = page
         self.isOffline = isOffline
@@ -89,7 +93,10 @@ struct ConversationSurface: View {
         self.mediaFailures = mediaFailures
         self.requestMedia = requestMedia
         self.retryMedia = retryMedia
+        self.initialDraft = initialDraft
+        self.draftChanged = draftChanged
         _messages = State(initialValue: page.messages)
+        _draft = State(initialValue: initialDraft)
     }
 
     var body: some View {
@@ -275,6 +282,15 @@ struct ConversationSurface: View {
         }
         .onChange(of: page.messages) {
             messages = page.messages
+        }
+        .onChange(of: draft) {
+            draftChanged?(draft)
+        }
+        .onChange(of: initialDraft) {
+            // Persisted drafts can arrive after the surface appears.
+            if draft.isEmpty {
+                draft = initialDraft
+            }
         }
         .task(id: attachmentInsertion?.id) {
             insertAttachmentIfReady()

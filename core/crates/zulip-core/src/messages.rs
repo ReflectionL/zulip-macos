@@ -2,8 +2,8 @@
 
 use futures_util::StreamExt;
 use reqwest::{Client, Response};
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -93,7 +93,7 @@ impl ConversationTarget {
 }
 
 /// One topic visible to the current account.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TopicSummary {
     /// Zulip stream identifier.
     pub stream_id: i64,

@@ -259,8 +259,8 @@ private struct LiveWindowView: View {
                 .transition(.move(edge: .top).combined(with: .opacity))
             }
 
-            if case .retrying = session.connectionState {
-                ConnectionStatusPill(text: "Reconnecting…")
+            if let statusText = connectionStatusText {
+                ConnectionStatusPill(text: statusText)
                     .padding(.top, AppTheme.Spacing.small)
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
@@ -327,6 +327,13 @@ private struct LiveWindowView: View {
         }
     }
 
+    private var connectionStatusText: String? {
+        // The live window only exists with a session, so `.connecting` here is
+        // the cached-data-while-connecting state. Retries are announced by the
+        // conversation's own offline banner.
+        session.connectionState == .connecting ? "Connecting…" : nil
+    }
+
     @ViewBuilder
     private var liveConversation: some View {
         switch session.conversationState {
@@ -376,16 +383,18 @@ private struct LiveWindowView: View {
                 mediaLocalURLs: session.mediaLocalURLs,
                 mediaFailures: session.mediaFailures,
                 requestMedia: session.loadMedia,
-                retryMedia: session.retryMedia
+                retryMedia: session.retryMedia,
+                initialDraft: session.draft(for: page.key),
+                draftChanged: { session.updateDraft($0, for: page.key) }
             )
         case let .offline(page):
             ConversationSurface(
                 page: page,
                 isOffline: true,
-                reconnect: {
-                    session.openConversation(page.key)
-                },
-                openSearch: presentMessageSearch
+                reconnect: session.reconnectNow,
+                openSearch: presentMessageSearch,
+                initialDraft: session.draft(for: page.key),
+                draftChanged: { session.updateDraft($0, for: page.key) }
             )
         case let .loading(title, subtitle):
             LivePlaceholder(
