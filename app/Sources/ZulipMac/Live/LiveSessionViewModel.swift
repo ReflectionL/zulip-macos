@@ -180,6 +180,7 @@ final class LiveSessionViewModel {
     @ObservationIgnored private var reconnectTask: Task<Void, Never>?
     private var reconnectAttempt = 0
     private var cachedSessionRequestID: UInt64?
+    private var hasLiveSession = false
     private var requestID: UInt64 = 1
     private var activeSelection: ConversationKey?
     private var pendingOlderRequestID: UInt64?
@@ -300,6 +301,30 @@ final class LiveSessionViewModel {
             || message.hasPrefix("could not synchronize")
             || message.hasPrefix("authentication returned HTTP 5")
             || message.hasPrefix("event synchronization returned HTTP 5")
+    }
+
+    /// Whether the visible data may be older than the server's: either no live
+    /// session exists yet, or the live session is currently retrying.
+    private var isServingCachedData: Bool {
+        if !hasLiveSession {
+            return true
+        }
+        if case .retrying = connectionState {
+            return true
+        }
+        return false
+    }
+
+    /// Manual "Reconnect" from the offline banner.
+    func reconnectNow() {
+        if hasLiveSession {
+            if let activeSelection {
+                refreshConversation(activeSelection)
+            }
+            return
+        }
+        cancelReconnect()
+        Task { await connectUsingSavedAPIKey(reportMissingKey: false) }
     }
 
     private func scheduleReconnect() {
@@ -774,6 +799,7 @@ final class LiveSessionViewModel {
 
         case let .sessionStarted(_, identity, credential, snapshot):
             cancelReconnect()
+            hasLiveSession = true
             self.identity = identity
             serverURL = identity.serverURL
             email = identity.email
@@ -810,9 +836,13 @@ final class LiveSessionViewModel {
             }
             rememberTopics(from: page.messages)
             let existing = loadedPage(for: page.key)
-            conversationState = .loaded(
-                makeConversationPage(page, merging: existing)
-            )
+            let conversationPage = makeConversationPage(page, merging: existing)
+            if isServingCachedData {
+                // Cached copy: readable, but writes wait for a live connection.
+                conversationState = .offline(conversationPage)
+                return
+            }
+            conversationState = .loaded(conversationPage)
             let messageIDs = page.messages.map(\.messageID)
             if !messageIDs.isEmpty, let identity {
                 client.submit(
@@ -1067,6 +1097,7 @@ final class LiveSessionViewModel {
     }
 
     private func resetSessionState() {
+        hasLiveSession = false
         attachmentUploadsByRequestID.values.forEach(stopSecurityScope)
         identity = nil
         sidebarSnapshot = nil

@@ -328,16 +328,10 @@ private struct LiveWindowView: View {
     }
 
     private var connectionStatusText: String? {
-        switch session.connectionState {
-        case .retrying:
-            "Reconnecting…"
-        case .connecting:
-            // The live window only exists with a session, so this is the
-            // cached-data-while-connecting state.
-            "Connecting…"
-        default:
-            nil
-        }
+        // The live window only exists with a session, so `.connecting` here is
+        // the cached-data-while-connecting state. Retries are announced by the
+        // conversation's own offline banner.
+        session.connectionState == .connecting ? "Connecting…" : nil
     }
 
     @ViewBuilder
@@ -395,9 +389,7 @@ private struct LiveWindowView: View {
             ConversationSurface(
                 page: page,
                 isOffline: true,
-                reconnect: {
-                    session.openConversation(page.key)
-                },
+                reconnect: session.reconnectNow,
                 openSearch: presentMessageSearch
             )
         case let .loading(title, subtitle):

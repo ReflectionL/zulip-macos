@@ -307,6 +307,39 @@ struct LiveSessionTests {
         #expect(model.sidebarSnapshot?.channels.map(\.name) == ["engineering"])
 
         core.emit(
+            .conversationOpened(
+                requestID: 99,
+                page: LiveConversationPage(
+                    key: .inbox(accountID: accountID),
+                    messages: [
+                        LiveMessageSnapshot(
+                            messageID: 44,
+                            senderID: 22,
+                            senderFullName: "Theo Martin",
+                            timestamp: Date(timeIntervalSince1970: 1_700_000_000),
+                            content: [.paragraph([.text("Cached hello")])],
+                            streamID: 5,
+                            topic: "macOS",
+                            recipientIDs: []
+                        ),
+                    ],
+                    foundOldest: true,
+                    foundNewest: true
+                )
+            )
+        )
+        await eventually {
+            if case let .offline(page) = model.conversationState {
+                return page.messages.first?.plainText == "Cached hello"
+            }
+            return false
+        }
+        #expect(!core.commands.contains {
+            if case .markRead = $0 { return true }
+            return false
+        })
+
+        core.emit(
             .failed(
                 requestID: startRequestID,
                 message: "could not connect securely to the Zulip server: offline"
