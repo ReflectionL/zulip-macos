@@ -39,6 +39,9 @@ struct ConversationSurface: View {
     var retryMedia: ((String) -> Void)?
     var initialDraft = ""
     var draftChanged: ((String) -> Void)?
+    var readReceipts: ReadReceiptDisplay?
+    /// Asks the core who has read the given message; returns whether to keep asking.
+    var pollReadReceipts: ((Int64) -> Bool)?
 
     @State private var messages: [MessageViewData]
     @State private var draft = ""
@@ -85,7 +88,9 @@ struct ConversationSurface: View {
         requestMedia: ((String) -> Void)? = nil,
         retryMedia: ((String) -> Void)? = nil,
         initialDraft: String = "",
-        draftChanged: ((String) -> Void)? = nil
+        draftChanged: ((String) -> Void)? = nil,
+        readReceipts: ReadReceiptDisplay? = nil,
+        pollReadReceipts: ((Int64) -> Bool)? = nil
     ) {
         self.page = page
         self.isOffline = isOffline
@@ -122,6 +127,8 @@ struct ConversationSurface: View {
         self.retryMedia = retryMedia
         self.initialDraft = initialDraft
         self.draftChanged = draftChanged
+        self.readReceipts = readReceipts
+        self.pollReadReceipts = pollReadReceipts
         _messages = State(initialValue: page.messages)
         _draft = State(initialValue: initialDraft)
     }
@@ -218,7 +225,10 @@ struct ConversationSurface: View {
                                     mediaLocalURLs: mediaLocalURLs,
                                     mediaFailures: mediaFailures,
                                     requestMedia: requestMedia,
-                                    retryMedia: retryMedia
+                                    retryMedia: retryMedia,
+                                    readers: readReceipts?.messageID == message.id
+                                        ? readReceipts?.readers ?? []
+                                        : []
                                 )
                                 .id(message.rowID)
                             }
@@ -321,6 +331,18 @@ struct ConversationSurface: View {
             .frame(width: 0, height: 0)
             .opacity(0)
             .accessibilityHidden(true)
+        }
+        .task(
+            id: ReadReceiptPolling(key: page.key, messageID: readReceipts?.messageID)
+        ) {
+            guard let messageID = readReceipts?.messageID, let pollReadReceipts else {
+                return
+            }
+            var attempt = 0
+            while !Task.isCancelled, pollReadReceipts(messageID) {
+                try? await Task.sleep(for: ReadReceiptPolicy.delay(afterAttempt: attempt))
+                attempt += 1
+            }
         }
         .onChange(of: page.messages) {
             messages = page.messages
@@ -607,6 +629,12 @@ private struct ConversationToolbarModifier: ViewModifier {
     }
 }
 
+/// Restarts read-receipt polling when the conversation or its newest sent message changes.
+private struct ReadReceiptPolling: Hashable {
+    let key: ConversationKey
+    let messageID: Int64?
+}
+
 private struct MessageRow: View {
     let message: MessageViewData
     let isContinuation: Bool
@@ -625,6 +653,7 @@ private struct MessageRow: View {
     let mediaFailures: [String: String]
     let requestMedia: ((String) -> Void)?
     let retryMedia: ((String) -> Void)?
+    var readers: [ReadReceiptReader] = []
 
     @State private var isHovered = false
 
@@ -708,7 +737,18 @@ private struct MessageRow: View {
                     }
                     .font(AppTheme.Typography.metadata)
                 }
+
+                if !readers.isEmpty {
+                    ReadReceiptStack(
+                        readers: readers,
+                        mediaLocalURLs: mediaLocalURLs,
+                        requestMedia: requestMedia
+                    )
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .transition(.opacity)
+                }
             }
+            .animation(.snappy, value: readers)
 
             Spacer(minLength: 0)
         }

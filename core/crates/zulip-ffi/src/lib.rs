@@ -25,7 +25,7 @@ use zulip_core::{
     media::MediaClient,
     messages::{
         ConversationTarget, MessageClient, MessageFlag, MessageWriteOperation, OutgoingMessage,
-        PresenceStatus, TopicPropagation, TopicSummary,
+        PresenceStatus, ReadReceipts, TopicPropagation, TopicSummary,
     },
     sync::{
         EventQueueClient, MessageSummary, RecentDirectConversation, RecoveryPolicy, SyncCycle,
@@ -492,6 +492,17 @@ pub enum CoreCommand {
         /// Whether the app is in active use (otherwise reported as idle).
         is_active: bool,
     },
+    /// Asks who has read one message (the user's own sent message).
+    ///
+    /// Failures are silent: read receipts are advisory and the next poll retries.
+    FetchReadReceipts {
+        /// Correlates the response.
+        request_id: u64,
+        /// Client-owned account partition.
+        account_id: String,
+        /// Server message identifier.
+        message_id: i64,
+    },
     /// Ends the current live account session and forgets its cached data.
     Disconnect {
         /// Correlates the response.
@@ -548,6 +559,7 @@ impl CoreCommand {
             | Self::LoadMedia { request_id, .. }
             | Self::MarkRead { request_id, .. }
             | Self::RefreshPresence { request_id, .. }
+            | Self::FetchReadReceipts { request_id, .. }
             | Self::FetchMessageSource { request_id, .. }
             | Self::CreateChannel { request_id, .. }
             | Self::RenameChannel { request_id, .. }
@@ -1116,6 +1128,17 @@ pub enum CoreEvent {
         /// Users sorted by identifier.
         presences: Vec<CorePresence>,
     },
+    /// Who has read one of the user's messages.
+    ReadReceiptsLoaded {
+        /// Active account partition.
+        account_id: String,
+        /// Server message identifier.
+        message_id: i64,
+        /// Readers sorted by identifier; empty when `is_available` is false.
+        user_ids: Vec<i64>,
+        /// False when the server cannot report read receipts for this message.
+        is_available: bool,
+    },
     /// Polling succeeded again after one or more scheduled retries.
     SyncResumed {
         /// Active account partition.
@@ -1573,6 +1596,11 @@ async fn handle_command(
             is_active,
             ..
         } => refresh_presence(account_id, is_active, account.as_ref(), event_sink),
+        CoreCommand::FetchReadReceipts {
+            account_id,
+            message_id,
+            ..
+        } => fetch_read_receipts(account_id, message_id, account.as_ref(), event_sink),
         CoreCommand::CreateChannel {
             request_id,
             account_id,
@@ -1769,6 +1797,32 @@ fn refresh_presence(
                     .collect(),
             });
         }
+    });
+}
+
+fn fetch_read_receipts(
+    account_id: String,
+    message_id: i64,
+    account: Option<&AccountSession>,
+    event_sink: &Arc<dyn CoreEventSink>,
+) {
+    let Some(session) = account.filter(|item| item.account_id == account_id) else {
+        return;
+    };
+    let messages = Arc::clone(&session.messages);
+    let event_sink = Arc::clone(event_sink);
+    tokio::spawn(async move {
+        let (user_ids, is_available) = match messages.fetch_read_receipts(message_id).await {
+            Ok(ReadReceipts::Readers(user_ids)) => (user_ids, true),
+            Ok(ReadReceipts::Unavailable) => (Vec::new(), false),
+            Err(_) => return,
+        };
+        event_sink.handle_event(CoreEvent::ReadReceiptsLoaded {
+            account_id,
+            message_id,
+            user_ids,
+            is_available,
+        });
     });
 }
 

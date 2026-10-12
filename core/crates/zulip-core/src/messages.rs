@@ -31,6 +31,7 @@ const MAX_SEARCH_MESSAGES: u16 = 100;
 const MAX_SEARCH_QUERY_BYTES: usize = 512;
 const MAX_TOPIC_NAME_BYTES: usize = 1_024;
 const MAX_EMOJI_NAME_BYTES: usize = 256;
+const MAX_READ_RECEIPT_USERS: usize = 500;
 
 /// Stable server-side conversation selection.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -197,6 +198,16 @@ pub struct ConversationMessages {
     pub found_oldest: bool,
     /// Whether the response reached the newest matching message.
     pub found_newest: bool,
+}
+
+/// Outcome of asking who has read a message.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReadReceipts {
+    /// Users who read the message, sorted by identifier.
+    Readers(Vec<i64>),
+    /// The server cannot tell: it predates read receipts, the organization
+    /// disabled them, or the message is not visible to this user.
+    Unavailable,
 }
 
 /// Message API failures safe to map into application errors.
@@ -762,6 +773,46 @@ impl MessageClient {
             ))
     }
 
+    /// Lists who has read one message, according to Zulip's read receipts.
+    ///
+    /// The server answers only when the organization enables read receipts
+    /// (Zulip 6.0, feature level 137) and omits readers who turned off sending
+    /// them, so an unsupported or disabled server is reported as
+    /// [`ReadReceipts::Unavailable`] rather than as a failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageApiError`] for invalid identifiers, transport, rate
+    /// limits, size, or response failures.
+    pub async fn fetch_read_receipts(
+        &self,
+        message_id: i64,
+    ) -> Result<ReadReceipts, MessageApiError> {
+        if message_id <= 0 {
+            return Err(MessageApiError::InvalidInput);
+        }
+        let path = format!("{MESSAGES_PATH}/{message_id}/read_receipts");
+        let response = self
+            .http
+            .get(self.base_url.endpoint(&path))
+            .basic_auth(&self.email, Some(self.api_key.expose_secret()))
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let document: ReadReceiptsDocument =
+            match decode_response(response, MAX_WRITE_RESPONSE_BYTES).await {
+                Ok(document) => document,
+                Err(error) => return read_receipts_failure(error),
+            };
+        validate_api_result(document.result.as_deref(), document.code.as_deref())?;
+        let mut user_ids = document.user_ids;
+        user_ids.retain(|id| *id > 0);
+        user_ids.sort_unstable();
+        user_ids.dedup();
+        user_ids.truncate(MAX_READ_RECEIPT_USERS);
+        Ok(ReadReceipts::Readers(user_ids))
+    }
+
     /// Adds or removes the current user's emoji reaction on one message.
     ///
     /// Zulip resolves the reaction namespace from `emoji_name`, matching the
@@ -1080,6 +1131,15 @@ struct MessageSourceBody {
 }
 
 #[derive(Debug, Deserialize)]
+struct ReadReceiptsDocument {
+    result: Option<String>,
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    user_ids: Vec<i64>,
+}
+
+#[derive(Debug, Deserialize)]
 struct ApiResultDocument {
     result: Option<String>,
     #[serde(default)]
@@ -1168,6 +1228,19 @@ struct ApiErrorDocument {
     code: Option<String>,
 }
 
+/// Maps a failed read-receipts request: a missing route or a plain rejection means
+/// the feature is unavailable, while rate limits and transport trouble stay errors
+/// so the caller can try again later.
+fn read_receipts_failure(error: MessageApiError) -> Result<ReadReceipts, MessageApiError> {
+    match error {
+        MessageApiError::HttpStatus(400 | 403 | 404 | 405) => Ok(ReadReceipts::Unavailable),
+        MessageApiError::Rejected { ref code } if code == "BAD_REQUEST" => {
+            Ok(ReadReceipts::Unavailable)
+        }
+        other => Err(other),
+    }
+}
+
 fn transport_error(error: reqwest::Error) -> MessageApiError {
     MessageApiError::Transport {
         message: error.without_url().to_string(),
@@ -1221,7 +1294,7 @@ mod tests {
 
     use super::{
         ConversationTarget, MessageApiError, MessageClient, MessageFlag, MessageWriteOperation,
-        OutgoingMessage, PresenceStatus, TopicPropagation,
+        OutgoingMessage, PresenceStatus, ReadReceipts, TopicPropagation,
     };
     use crate::auth::SecretString;
 
@@ -1437,6 +1510,54 @@ mod tests {
         assert!(!request.contains(API_KEY));
         assert!(matches!(
             client.fetch_message_source(0).await,
+            Err(MessageApiError::InvalidInput)
+        ));
+    }
+
+    #[tokio::test]
+    async fn read_receipts_list_readers_and_degrade_gracefully() {
+        let responses = vec![
+            (
+                StatusCode::OK,
+                r#"{"result":"success","msg":"","user_ids":[9,3,3,-1,5]}"#.to_owned(),
+            ),
+            (
+                StatusCode::BAD_REQUEST,
+                r#"{"result":"error","code":"BAD_REQUEST","msg":"Read receipts are disabled for this organization."}"#
+                    .to_owned(),
+            ),
+            (StatusCode::NOT_FOUND, "<html>missing</html>".to_owned()),
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                r#"{"result":"error","code":"RATE_LIMIT_HIT","msg":"slow down"}"#.to_owned(),
+            ),
+        ];
+        let (server, requests) = spawn_mock(responses);
+        let client = MessageClient::new(&server, "maya@example.com", SecretString::new(API_KEY))
+            .expect("message client");
+
+        assert_eq!(
+            client.fetch_read_receipts(55).await.expect("readers"),
+            ReadReceipts::Readers(vec![3, 5, 9])
+        );
+        let request = requests.recv().expect("receipt request");
+        assert!(request.starts_with("GET /api/v1/messages/55/read_receipts HTTP/1.1"));
+        assert!(!request.contains(API_KEY));
+
+        assert_eq!(
+            client.fetch_read_receipts(55).await.expect("disabled"),
+            ReadReceipts::Unavailable
+        );
+        assert_eq!(
+            client.fetch_read_receipts(55).await.expect("old server"),
+            ReadReceipts::Unavailable
+        );
+        assert!(matches!(
+            client.fetch_read_receipts(55).await,
+            Err(MessageApiError::Rejected { code }) if code == "RATE_LIMIT_HIT"
+        ));
+        assert!(matches!(
+            client.fetch_read_receipts(0).await,
             Err(MessageApiError::InvalidInput)
         ));
     }

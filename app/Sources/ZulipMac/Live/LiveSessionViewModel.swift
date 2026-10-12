@@ -234,6 +234,18 @@ final class LiveSessionViewModel {
     /// Bumps whenever presence is refreshed, so views showing it redraw.
     private(set) var presenceRevision = 0
     @ObservationIgnored private var presenceTask: Task<Void, Never>?
+    @ObservationIgnored private var userNames: [Int64: String] = [:]
+    /// Readers of the user's recent sent messages, by message identifier.
+    @ObservationIgnored private var readReceiptReaders: [Int64: [Int64]] = [:]
+    @ObservationIgnored private var readReceiptRequestDates: [Int64: Date] = [:]
+    @ObservationIgnored private var unavailableReadReceiptMessages = Set<Int64>()
+    /// Consecutive messages the server could not report; two in a row mean the server
+    /// is too old or the organization turned read receipts off, so we stop asking.
+    @ObservationIgnored private var unavailableReadReceiptStreak = 0
+    @ObservationIgnored private var readReceiptsDisabled = false
+    /// Bumps whenever read receipts change, so views showing them redraw.
+    private(set) var readReceiptRevision = 0
+    private static let readReceiptCacheLimit = 64
     private(set) var drafts: [ConversationKey: String] = [:]
     @ObservationIgnored private var draftSaveTasks: [ConversationKey: Task<Void, Never>] = [:]
     private var requestID: UInt64 = 1
@@ -1063,6 +1075,91 @@ final class LiveSessionViewModel {
         return presenceDescription(forUserID: userID)
     }
 
+    /// The user's newest sent message in `page` with the people who have read it,
+    /// or nil where read receipts do not apply or the server cannot provide them.
+    func readReceiptDisplay(for page: ConversationPage) -> ReadReceiptDisplay? {
+        _ = readReceiptRevision
+        guard !readReceiptsDisabled,
+              let identity,
+              let messageID = ReadReceiptPolicy.targetMessageID(
+                  in: page.messages,
+                  key: page.key,
+                  selfUserID: identity.userID
+              ),
+              !unavailableReadReceiptMessages.contains(messageID)
+        else {
+            return nil
+        }
+        let readers = (readReceiptReaders[messageID] ?? []).compactMap { userID -> ReadReceiptReader? in
+            guard userID != identity.userID, let name = userNames[userID] else {
+                return nil
+            }
+            return ReadReceiptReader(
+                userID: userID,
+                name: name,
+                initials: Self.initials(for: name),
+                avatarURL: avatarURLs[userID]
+            )
+        }
+        return ReadReceiptDisplay(messageID: messageID, readers: readers)
+    }
+
+    /// Asks who has read `messageID` unless the app is inactive, offline or asked
+    /// moments ago. Returns false once asking again cannot help, which ends polling.
+    func pollReadReceipts(messageID: Int64, key: ConversationKey) -> Bool {
+        guard !readReceiptsDisabled,
+              let identity,
+              identity.accountID == key.accountID,
+              messageID > 0,
+              !unavailableReadReceiptMessages.contains(messageID),
+              !ReadReceiptPolicy.isComplete(
+                  readerIDs: readReceiptReaders[messageID] ?? [],
+                  key: key,
+                  selfUserID: identity.userID
+              )
+        else {
+            return false
+        }
+        let now = Date()
+        if connectionState == .connected,
+           isApplicationActive(),
+           now.timeIntervalSince(readReceiptRequestDates[messageID] ?? .distantPast)
+               >= ReadReceiptPolicy.minimumRequestInterval
+        {
+            readReceiptRequestDates[messageID] = now
+            client.submit(
+                .fetchReadReceipts(
+                    requestID: nextRequestID(),
+                    accountID: identity.accountID,
+                    messageID: messageID
+                )
+            )
+        }
+        return true
+    }
+
+    private func applyReadReceipts(messageID: Int64, userIDs: [Int64], isAvailable: Bool) {
+        if isAvailable {
+            unavailableReadReceiptStreak = 0
+            guard readReceiptReaders[messageID] != userIDs else {
+                return
+            }
+            readReceiptReaders[messageID] = userIDs
+            for staleID in readReceiptReaders.keys.sorted().dropLast(Self.readReceiptCacheLimit) {
+                readReceiptReaders.removeValue(forKey: staleID)
+                readReceiptRequestDates.removeValue(forKey: staleID)
+            }
+        } else {
+            unavailableReadReceiptMessages.insert(messageID)
+            unavailableReadReceiptStreak += 1
+            if unavailableReadReceiptStreak >= 2 {
+                readReceiptsDisabled = true
+                readReceiptReaders = [:]
+            }
+        }
+        readReceiptRevision += 1
+    }
+
     func retryMessageAction(for messageID: Int64) {
         guard let action = failedMessageActions[messageID] else {
             return
@@ -1499,6 +1596,12 @@ final class LiveSessionViewModel {
             }
             applyPresence(presences)
 
+        case let .readReceiptsLoaded(accountID, messageID, userIDs, isAvailable):
+            guard identity?.accountID == accountID else {
+                return
+            }
+            applyReadReceipts(messageID: messageID, userIDs: userIDs, isAvailable: isAvailable)
+
         case let .syncResumed(accountID):
             if identity?.accountID == accountID, case .retrying = connectionState {
                 sessionLog.info("sync resumed")
@@ -1636,6 +1739,12 @@ final class LiveSessionViewModel {
         presenceTask = nil
         presenceStates = [:]
         lastActiveDates = [:]
+        userNames = [:]
+        readReceiptReaders = [:]
+        readReceiptRequestDates = [:]
+        unavailableReadReceiptMessages = []
+        unavailableReadReceiptStreak = 0
+        readReceiptsDisabled = false
         cachedPlaceholderKey = nil
         recentPages = [:]
         recentPageOrder = []
@@ -1807,6 +1916,10 @@ final class LiveSessionViewModel {
             snapshot.users.compactMap { user in
                 user.avatarURL.map { (user.userID, $0) }
             },
+            uniquingKeysWith: { _, latest in latest }
+        )
+        userNames = Dictionary(
+            snapshot.users.map { ($0.userID, $0.fullName) },
             uniquingKeysWith: { _, latest in latest }
         )
         let others = snapshot.users

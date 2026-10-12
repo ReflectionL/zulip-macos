@@ -278,6 +278,92 @@ struct LiveSessionTests {
         await eventually { model.connectionState == .connected }
     }
 
+    @Test("Read receipts list the readers of the latest sent message and stop when unsupported")
+    func readReceipts() async {
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(
+            client: core,
+            credentialStore: MemoryCredentialStore()
+        )
+        model.isApplicationActive = { true }
+        model.startObserving()
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: "account-1"),
+                credential: StoredAPICredential(accountID: "account-1", apiKey: "key"),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.connectionState == .connected }
+
+        let key = ConversationKey.directMessage(accountID: "account-1", recipientIDs: [22])
+        func page(ownMessageID: Int64) -> ConversationPage {
+            ConversationPage(
+                key: key,
+                title: "Theo Martin",
+                subtitle: "",
+                messages: [
+                    MessageViewData(
+                        id: ownMessageID,
+                        accountID: "account-1",
+                        conversationKey: key,
+                        senderID: 9,
+                        senderName: "Maya Chen",
+                        senderInitials: "MC",
+                        timestamp: Date(timeIntervalSince1970: 1_700_000_000),
+                        content: [],
+                        isOwnMessage: true
+                    ),
+                ]
+            )
+        }
+        func receiptRequests() -> Int {
+            core.commands.filter {
+                if case .fetchReadReceipts = $0 { return true }
+                return false
+            }.count
+        }
+
+        #expect(model.readReceiptDisplay(for: page(ownMessageID: 70))?.messageID == 70)
+        #expect(model.readReceiptDisplay(for: page(ownMessageID: 70))?.readers.isEmpty == true)
+
+        #expect(model.pollReadReceipts(messageID: 70, key: key))
+        #expect(receiptRequests() == 1)
+        // Asking again right away is throttled but polling carries on.
+        #expect(model.pollReadReceipts(messageID: 70, key: key))
+        #expect(receiptRequests() == 1)
+
+        // Your own id and people the client does not know are left out.
+        core.emit(
+            .readReceiptsLoaded(
+                accountID: "account-1",
+                messageID: 70,
+                userIDs: [9, 22, 99],
+                isAvailable: true
+            )
+        )
+        await eventually {
+            model.readReceiptDisplay(for: page(ownMessageID: 70))?.readers.map(\.userID) == [22]
+        }
+        #expect(
+            model.readReceiptDisplay(for: page(ownMessageID: 70))?.readers.first?.name
+                == "Theo Martin"
+        )
+        // Everyone in the direct message has read it, so there is nothing left to ask.
+        #expect(!model.pollReadReceipts(messageID: 70, key: key))
+
+        // Two messages in a row the server cannot report: stop for the session.
+        core.emit(
+            .readReceiptsLoaded(accountID: "account-1", messageID: 71, userIDs: [], isAvailable: false)
+        )
+        core.emit(
+            .readReceiptsLoaded(accountID: "account-1", messageID: 72, userIDs: [], isAvailable: false)
+        )
+        await eventually { model.readReceiptDisplay(for: page(ownMessageID: 73)) == nil }
+        #expect(!model.pollReadReceipts(messageID: 73, key: key))
+    }
+
     @Test("A cached session is shown first and survives an offline start")
     func cachedSessionSurvivesOfflineStart() async throws {
         let accountID = "https://acme.zulipchat.com|maya@example.com"
