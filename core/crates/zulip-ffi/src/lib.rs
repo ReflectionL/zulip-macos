@@ -446,6 +446,21 @@ pub enum CoreCommand {
         /// Server message identifiers.
         message_ids: Vec<i64>,
     },
+    /// Creates a channel and subscribes the listed members to it.
+    CreateChannel {
+        /// Correlates the response.
+        request_id: u64,
+        /// Client-owned account partition.
+        account_id: String,
+        /// Channel name.
+        name: String,
+        /// Optional channel description.
+        description: String,
+        /// Whether the channel is invite-only.
+        is_private: bool,
+        /// Initial subscribers, including the current user.
+        member_ids: Vec<i64>,
+    },
     /// Fetches the original Markdown of one message so it can be quoted or forwarded.
     FetchMessageSource {
         /// Correlates the response.
@@ -523,6 +538,7 @@ impl CoreCommand {
             | Self::MarkRead { request_id, .. }
             | Self::RefreshPresence { request_id, .. }
             | Self::FetchMessageSource { request_id, .. }
+            | Self::CreateChannel { request_id, .. }
             | Self::Disconnect { request_id } => *request_id,
         }
     }
@@ -1054,6 +1070,13 @@ pub enum CoreEvent {
         /// Last known immutable navigation state.
         snapshot: CoreSnapshot,
     },
+    /// A channel was created.
+    ChannelCreated {
+        /// Matches the originating command.
+        request_id: u64,
+        /// Name the server accepted.
+        name: String,
+    },
     /// The original Markdown source of a requested message.
     MessageSourceLoaded {
         /// Matches the originating command.
@@ -1527,6 +1550,23 @@ async fn handle_command(
             is_active,
             ..
         } => refresh_presence(account_id, is_active, account.as_ref(), event_sink),
+        CoreCommand::CreateChannel {
+            request_id,
+            account_id,
+            name,
+            description,
+            is_private,
+            member_ids,
+        } => create_channel(
+            request_id,
+            &account_id,
+            name,
+            description,
+            is_private,
+            member_ids,
+            account.as_ref(),
+            event_sink,
+        ),
         CoreCommand::FetchMessageSource {
             request_id,
             account_id,
@@ -1580,6 +1620,37 @@ fn upload_attachment(
                 filename: uploaded.filename,
                 url: uploaded.url,
                 markdown: uploaded.markdown,
+            }),
+            Err(error) => emit_error(Some(request_id), error, &event_sink),
+        }
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_channel(
+    request_id: u64,
+    account_id: &str,
+    name: String,
+    description: String,
+    is_private: bool,
+    member_ids: Vec<i64>,
+    account: Option<&AccountSession>,
+    event_sink: &Arc<dyn CoreEventSink>,
+) {
+    let Some(session) = account.filter(|item| item.account_id == account_id) else {
+        emit_no_session(request_id, event_sink);
+        return;
+    };
+    let messages = Arc::clone(&session.messages);
+    let event_sink = Arc::clone(event_sink);
+    tokio::spawn(async move {
+        match messages
+            .create_channel(&name, &description, is_private, &member_ids)
+            .await
+        {
+            Ok(()) => event_sink.handle_event(CoreEvent::ChannelCreated {
+                request_id,
+                name: name.trim().to_owned(),
             }),
             Err(error) => emit_error(Some(request_id), error, &event_sink),
         }

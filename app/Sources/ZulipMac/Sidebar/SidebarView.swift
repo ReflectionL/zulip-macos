@@ -38,6 +38,7 @@ struct SidebarView: View {
     @Binding var selection: ConversationKey
     let openCommandPalette: () -> Void
     var startNewTopic: (ChannelSnapshot) -> Void = { _ in }
+    var createChannel: (() -> Void)?
     var sessionControl: SidebarSessionControl?
     var mediaLocalURLs: [String: String] = [:]
     var requestMedia: ((String) -> Void)?
@@ -93,7 +94,9 @@ struct SidebarView: View {
                         title: "Channels",
                         count: model.snapshot.channels.count,
                         isExpanded: model.areChannelsExpanded,
-                        action: model.toggleChannels
+                        action: model.toggleChannels,
+                        addTitle: createChannel == nil ? nil : "New channel",
+                        add: createChannel
                     )
                     .padding(.top, AppTheme.Spacing.medium)
 
@@ -306,8 +309,28 @@ private struct SidebarSectionHeader: View {
     let count: Int
     let isExpanded: Bool
     let action: () -> Void
+    var addTitle: String?
+    var add: (() -> Void)?
 
     var body: some View {
+        HStack(spacing: 0) {
+            toggleButton
+            if let add, let addTitle {
+                Button(action: add) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(AppTheme.Colors.tertiaryText)
+                        .frame(width: 26, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(addTitle)
+                .accessibilityLabel(addTitle)
+            }
+        }
+    }
+
+    private var toggleButton: some View {
         Button(action: action) {
             HStack(spacing: AppTheme.Spacing.extraSmall) {
                 Image(systemName: "chevron.right")

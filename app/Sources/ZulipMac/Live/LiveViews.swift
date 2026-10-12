@@ -178,6 +178,7 @@ private struct LiveWindowView: View {
     @State private var isMessageSearchPresented = false
     @State private var suppressedSelectionOpen: ConversationKey?
     @State private var topicSheet: LiveTopicSheetContext?
+    @State private var isCreatingChannel = false
 
     init(session: LiveSessionViewModel) {
         self.session = session
@@ -218,6 +219,7 @@ private struct LiveWindowView: View {
                         }
                         topicSheet = .new(channel: channel)
                     },
+                    createChannel: { isCreatingChannel = true },
                     sessionControl: SidebarSessionControl(
                         action: .disconnect,
                         perform: session.disconnect
@@ -340,6 +342,11 @@ private struct LiveWindowView: View {
                 topicSheet = nil
             }
         }
+        .sheet(isPresented: $isCreatingChannel) {
+            CreateChannelSheet(session: session) {
+                isCreatingChannel = false
+            }
+        }
         .sheet(item: $topicSheet) { context in
             LiveTopicActionSheet(
                 session: session,
@@ -407,6 +414,7 @@ private struct LiveWindowView: View {
                 forwardDestinations: { query in
                     session.forwardDestinations(matching: query)
                 },
+                mentionCandidates: session.mentionCandidates(for: page.key),
                 attachmentUploadState: session.attachmentUploadState,
                 attachmentInsertion: session.attachmentInsertion,
                 uploadAttachment: { url in

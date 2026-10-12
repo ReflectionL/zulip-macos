@@ -16,6 +16,10 @@ use crate::{
 const MESSAGES_PATH: &str = "api/v1/messages";
 const MESSAGE_FLAGS_PATH: &str = "api/v1/messages/flags";
 const PRESENCE_PATH: &str = "api/v1/users/me/presence";
+const SUBSCRIPTIONS_PATH: &str = "api/v1/users/me/subscriptions";
+const MAX_CHANNEL_NAME_CHARS: usize = 60;
+const MAX_CHANNEL_DESCRIPTION_CHARS: usize = 1_024;
+const MAX_CHANNEL_MEMBERS: usize = 1_000;
 /// How recent a presence timestamp must be (Zulip's offline threshold) to count.
 const PRESENCE_FRESH_SECONDS: f64 = 140.0;
 const TOPICS_PATH_PREFIX: &str = "api/v1/users/me";
@@ -630,6 +634,68 @@ impl MessageClient {
         document.validate_result()
     }
 
+    /// Creates a channel by subscribing `member_ids` to a new name, which is how
+    /// Zulip creates channels. The caller includes its own identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageApiError`] for invalid names, descriptions or members,
+    /// transport, rejection (including permission and duplicate names), size,
+    /// or response failures.
+    pub async fn create_channel(
+        &self,
+        name: &str,
+        description: &str,
+        is_private: bool,
+        member_ids: &[i64],
+    ) -> Result<(), MessageApiError> {
+        let name = name.trim();
+        let description = description.trim();
+        if name.is_empty()
+            || name.chars().count() > MAX_CHANNEL_NAME_CHARS
+            || name.chars().any(char::is_control)
+            || description.chars().count() > MAX_CHANNEL_DESCRIPTION_CHARS
+            || member_ids.is_empty()
+            || member_ids.len() > MAX_CHANNEL_MEMBERS
+            || member_ids.iter().any(|id| *id <= 0)
+        {
+            return Err(MessageApiError::InvalidInput);
+        }
+        let subscriptions =
+            serde_json::json!([{ "name": name, "description": description }]).to_string();
+        let principals = serde_json::to_string(member_ids)
+            .map_err(|_| MessageApiError::InvalidResponse("channel members are not encodable"))?;
+        let response = self
+            .http
+            .post(self.base_url.endpoint(SUBSCRIPTIONS_PATH))
+            .basic_auth(&self.email, Some(self.api_key.expose_secret()))
+            .form(&[
+                ("subscriptions", subscriptions),
+                ("principals", principals),
+                ("invite_only", is_private.to_string()),
+                ("announce", "false".to_owned()),
+            ])
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let document: SubscribeDocument =
+            decode_response(response, MAX_WRITE_RESPONSE_BYTES).await?;
+        validate_api_result(document.result.as_deref(), document.code.as_deref())?;
+        if document.subscribed.as_ref().is_none_or(Value::is_null)
+            || document
+                .subscribed
+                .as_ref()
+                .and_then(Value::as_object)
+                .is_some_and(serde_json::Map::is_empty)
+        {
+            // Nobody was newly subscribed: the channel already existed.
+            return Err(MessageApiError::Rejected {
+                code: "CHANNEL_ALREADY_EXISTS".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
     /// Fetches the original Markdown source of one visible message, as needed
     /// to quote or forward it.
     ///
@@ -943,6 +1009,15 @@ impl SendMessageDocument {
 }
 
 #[derive(Debug, Deserialize)]
+struct SubscribeDocument {
+    result: Option<String>,
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    subscribed: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
 struct MessageSourceDocument {
     result: Option<String>,
     #[serde(default)]
@@ -1211,6 +1286,49 @@ mod tests {
         assert!(request.contains("status=active"));
         assert!(request.contains("slim_presence=true"));
         assert!(!request.contains(API_KEY));
+    }
+
+    #[tokio::test]
+    async fn create_channel_subscribes_members_to_a_new_name() {
+        let responses = vec![
+            (
+                StatusCode::OK,
+                r#"{"result":"success","subscribed":{"9":["design"]},"already_subscribed":{}}"#
+                    .to_owned(),
+            ),
+            (
+                StatusCode::OK,
+                r#"{"result":"success","subscribed":{},"already_subscribed":{"9":["design"]}}"#
+                    .to_owned(),
+            ),
+        ];
+        let (server, requests) = spawn_mock(responses);
+        let client = MessageClient::new(&server, "maya@example.com", SecretString::new(API_KEY))
+            .expect("message client");
+
+        client
+            .create_channel(" design ", "Visual work", true, &[9, 7])
+            .await
+            .expect("created");
+        let request = requests.recv().expect("create request");
+        assert!(request.starts_with("POST /api/v1/users/me/subscriptions HTTP/1.1"));
+        assert!(request.contains("invite_only=true"));
+        assert!(request.contains("principals=%5B9%2C7%5D"));
+        assert!(request.contains("design"));
+        assert!(!request.contains(API_KEY));
+
+        assert!(matches!(
+            client.create_channel("design", "", false, &[9]).await,
+            Err(MessageApiError::Rejected { code }) if code == "CHANNEL_ALREADY_EXISTS"
+        ));
+        assert!(matches!(
+            client.create_channel("  ", "", false, &[9]).await,
+            Err(MessageApiError::InvalidInput)
+        ));
+        assert!(matches!(
+            client.create_channel("design", "", false, &[]).await,
+            Err(MessageApiError::InvalidInput)
+        ));
     }
 
     #[tokio::test]

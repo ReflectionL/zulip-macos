@@ -133,6 +133,13 @@ private struct PendingSend: Sendable {
     let localMessageID: Int64
 }
 
+enum ChannelCreationState: Equatable, Sendable {
+    case idle
+    case creating
+    case failed(message: String)
+    case created(name: String)
+}
+
 /// A message whose Markdown source is being fetched to quote or forward it.
 private struct PendingMessageSource: Sendable {
     enum Purpose: Sendable {
@@ -229,6 +236,11 @@ final class LiveSessionViewModel {
     private var issuedFocusedMessageRequestIDs = Set<UInt64>()
     private var topicActionsByRequestID: [UInt64: TopicAction] = [:]
     @ObservationIgnored private var messageSourceRequests: [UInt64: PendingMessageSource] = [:]
+    @ObservationIgnored private var channelCreationRequestID: UInt64?
+    @ObservationIgnored private var mentionPeople: [MentionCandidate] = []
+    /// People who can be added to a new channel (everyone active except the user).
+    private(set) var channelMemberCandidates: [MentionCandidate] = []
+    private(set) var channelCreationState = ChannelCreationState.idle
     private var messageActionsByRequestID: [UInt64: SubmittedMessageAction] = [:]
     private var failedMessageActions: [Int64: MessageAction] = [:]
     private var sendsByRequestID: [UInt64: PendingSend] = [:]
@@ -888,6 +900,68 @@ final class LiveSessionViewModel {
         )
     }
 
+    /// People the composer can offer after `@`; group mentions only make sense in a topic.
+    func mentionCandidates(for key: ConversationKey) -> [MentionCandidate] {
+        guard case .topic = key else {
+            return mentionPeople
+        }
+        return [
+            MentionCandidate(kind: .everyone, name: "all", detail: "Notify everyone in the channel"),
+            MentionCandidate(kind: .topic, name: "topic", detail: "Notify people in this topic"),
+        ] + mentionPeople
+    }
+
+    /// Creates a channel and subscribes the chosen people (and the user) to it.
+    func createChannel(
+        name: String,
+        description: String,
+        isPrivate: Bool,
+        memberIDs: [Int64]
+    ) {
+        guard let identity else {
+            return
+        }
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty,
+              name.count <= 60,
+              !name.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
+        else {
+            channelCreationState = .failed(
+                message: "Enter a channel name of up to 60 characters."
+            )
+            return
+        }
+        if sidebarSnapshot?.channels.contains(where: {
+            $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame
+        }) == true {
+            channelCreationState = .failed(message: "A channel named “\(name)” already exists.")
+            return
+        }
+        if case .creating = channelCreationState {
+            return
+        }
+        var members = Array(Set(memberIDs.filter { $0 > 0 && $0 != identity.userID }))
+        members.sort()
+        let id = nextRequestID()
+        channelCreationRequestID = id
+        channelCreationState = .creating
+        client.submit(
+            .createChannel(
+                requestID: id,
+                accountID: identity.accountID,
+                name: name,
+                description: description.trimmingCharacters(in: .whitespacesAndNewlines),
+                isPrivate: isPrivate,
+                memberIDs: [identity.userID] + members
+            )
+        )
+    }
+
+    func resetChannelCreation() {
+        channelCreationRequestID = nil
+        channelCreationState = .idle
+    }
+
     func retryMessageAction(for messageID: Int64) {
         guard let action = failedMessageActions[messageID] else {
             return
@@ -1233,6 +1307,14 @@ final class LiveSessionViewModel {
             topicActionState = .idle
             applyTopicUpdate(update, action: action)
 
+        case let .channelCreated(requestID, name):
+            guard channelCreationRequestID == requestID else {
+                return
+            }
+            channelCreationRequestID = nil
+            channelCreationState = .created(name: name)
+            notice = "Created channel “\(name)”."
+
         case let .messageSourceLoaded(requestID, _, source):
             guard let pending = messageSourceRequests.removeValue(forKey: requestID),
                   identity?.accountID == pending.message.accountID
@@ -1353,6 +1435,13 @@ final class LiveSessionViewModel {
                     value.deliveryState = .failed
                 }
                 notice = "Message could not be sent. You can retry it."
+            } else if let requestID, channelCreationRequestID == requestID {
+                channelCreationRequestID = nil
+                channelCreationState = .failed(
+                    message: message.contains("CHANNEL_ALREADY_EXISTS")
+                        ? "A channel with this name already exists."
+                        : message
+                )
             } else if let requestID,
                       messageSourceRequests.removeValue(forKey: requestID) != nil
             {
@@ -1439,6 +1528,10 @@ final class LiveSessionViewModel {
         mediaLocalURLs = [:]
         mediaFailures = [:]
         messageSourceRequests = [:]
+        channelCreationRequestID = nil
+        channelCreationState = .idle
+        mentionPeople = []
+        channelMemberCandidates = []
         isLoadingOlderMessages = false
         messageSearchState = .idle
         topicActionState = .idle
@@ -1565,6 +1658,25 @@ final class LiveSessionViewModel {
             },
             uniquingKeysWith: { _, latest in latest }
         )
+        let others = snapshot.users
+            .filter { $0.isActive && $0.userID != identity.userID }
+            .sorted { $0.fullName.localizedCaseInsensitiveCompare($1.fullName) == .orderedAscending }
+        mentionPeople = others.map {
+            MentionCandidate(
+                kind: .person(userID: $0.userID),
+                name: $0.fullName,
+                detail: $0.isBot ? "Bot" : ($0.email ?? "")
+            )
+        }
+        channelMemberCandidates = others
+            .filter { !$0.isBot }
+            .map {
+                MentionCandidate(
+                    kind: .person(userID: $0.userID),
+                    name: $0.fullName,
+                    detail: $0.email ?? ""
+                )
+            }
         rememberTopics(from: snapshot.topics)
         rememberTopics(from: snapshot.messages)
         sidebarSnapshot = Self.makeSidebar(

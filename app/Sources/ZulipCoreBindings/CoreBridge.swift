@@ -397,6 +397,14 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
     case markRead(requestID: UInt64, accountID: String, messageIDs: [Int64])
     case refreshPresence(requestID: UInt64, accountID: String, isActive: Bool)
     case fetchMessageSource(requestID: UInt64, accountID: String, messageID: Int64)
+    case createChannel(
+        requestID: UInt64,
+        accountID: String,
+        name: String,
+        description: String,
+        isPrivate: Bool,
+        memberIDs: [Int64]
+    )
     case disconnect(requestID: UInt64)
     case loadCachedSession(requestID: UInt64, accountID: String)
     case saveDraft(requestID: UInt64, key: ConversationKey, content: String)
@@ -430,6 +438,7 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
              let .markRead(requestID, _, _),
              let .refreshPresence(requestID, _, _),
              let .fetchMessageSource(requestID, _, _),
+             let .createChannel(requestID, _, _, _, _, _),
              let .disconnect(requestID),
              let .loadCachedSession(requestID, _),
              let .saveDraft(requestID, _, _),
@@ -482,6 +491,8 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
             "BridgeCommand.refreshPresence"
         case .fetchMessageSource:
             "BridgeCommand.fetchMessageSource"
+        case .createChannel:
+            "BridgeCommand.createChannel"
         case .disconnect:
             "BridgeCommand.disconnect"
         case .loadCachedSession:
@@ -639,6 +650,15 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
             )
         case let .refreshPresence(requestID, accountID, isActive):
             .refreshPresence(requestId: requestID, accountId: accountID, isActive: isActive)
+        case let .createChannel(requestID, accountID, name, description, isPrivate, memberIDs):
+            .createChannel(
+                requestId: requestID,
+                accountId: accountID,
+                name: name,
+                description: description,
+                isPrivate: isPrivate,
+                memberIds: memberIDs
+            )
         case let .fetchMessageSource(requestID, accountID, messageID):
             .fetchMessageSource(
                 requestId: requestID,
@@ -711,6 +731,7 @@ public enum BridgeEvent:
     case topicUpdated(requestID: UInt64, update: LiveTopicUpdate)
     case messagesMarkedRead(requestID: UInt64, messageIDs: [Int64])
     case messageSourceLoaded(requestID: UInt64, messageID: Int64, content: String)
+    case channelCreated(requestID: UInt64, name: String)
     case retryScheduled(accountID: String, delayMilliseconds: UInt64)
     case syncResumed(accountID: String)
     case presenceUpdated(accountID: String, presences: [LivePresence])
@@ -738,6 +759,7 @@ public enum BridgeEvent:
              let .topicUpdated(requestID, _),
              let .messagesMarkedRead(requestID, _),
              let .messageSourceLoaded(requestID, _, _),
+             let .channelCreated(requestID, _),
              let .disconnected(requestID):
             requestID
         case let .failed(requestID, _):
@@ -789,6 +811,8 @@ public enum BridgeEvent:
             "Messages marked read"
         case .messageSourceLoaded:
             "Message source loaded"
+        case .channelCreated:
+            "Channel created"
         case .retryScheduled:
             "Retry scheduled"
         case .syncResumed:
@@ -1243,6 +1267,8 @@ private extension BridgeEvent {
                 requestID: requestID,
                 messageIDs: messageIDs
             )
+        case let .channelCreated(requestID, name):
+            self = .channelCreated(requestID: requestID, name: name)
         case let .messageSourceLoaded(requestID, messageID, content):
             self = .messageSourceLoaded(
                 requestID: requestID,

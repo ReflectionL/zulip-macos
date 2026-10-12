@@ -691,6 +691,47 @@ struct LiveSessionTests {
         }
     }
 
+    @Test("Mentions offer other people, and a new channel subscribes the user too")
+    func mentionsAndChannelCreation() async {
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(client: core, credentialStore: MemoryCredentialStore())
+        model.startObserving()
+        let accountID = "account-1"
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: accountID),
+                credential: StoredAPICredential(accountID: accountID, apiKey: "key"),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.connectionState == .connected }
+
+        let topicKey = ConversationKey.topic(accountID: accountID, streamID: 5, topic: "macOS")
+        let inTopic = model.mentionCandidates(for: topicKey)
+        #expect(inTopic.map(\.name) == ["all", "topic", "Theo Martin"])
+        let inDirect = model.mentionCandidates(
+            for: .directMessage(accountID: accountID, recipientIDs: [22])
+        )
+        #expect(inDirect.map(\.name) == ["Theo Martin"])
+        #expect(model.channelMemberCandidates.map(\.name) == ["Theo Martin"])
+
+        model.createChannel(name: "engineering", description: "", isPrivate: false, memberIDs: [])
+        if case .failed = model.channelCreationState {} else {
+            Issue.record("An existing channel name must be refused before any request")
+        }
+
+        model.createChannel(name: " design ", description: "Visuals", isPrivate: true, memberIDs: [22, 22])
+        guard case let .createChannel(requestID, _, "design", "Visuals", true, members) = core.commands.last
+        else {
+            Issue.record("Expected a create-channel command")
+            return
+        }
+        #expect(members == [9, 22])
+        core.emit(.channelCreated(requestID: requestID, name: "design"))
+        await eventually { model.channelCreationState == .created(name: "design") }
+    }
+
     @Test("Reopening a conversation seen this session paints at once without a loading state")
     func reopenedConversationSkipsLoading() async {
         let core = RecordingCoreClient()

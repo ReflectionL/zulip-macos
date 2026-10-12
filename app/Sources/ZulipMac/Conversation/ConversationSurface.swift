@@ -22,6 +22,7 @@ struct ConversationSurface: View {
     var quoteMessage: ((MessageViewData) -> Void)?
     var forwardMessage: ((MessageViewData, ConversationKey) -> Void)?
     var forwardDestinations: ((String) -> [NavigationDestination])?
+    var mentionCandidates: [MentionCandidate] = []
     var attachmentUploadState = AttachmentUploadState.idle
     var attachmentInsertion: ComposerAttachmentInsertion?
     var uploadAttachment: ((URL) -> Void)?
@@ -64,6 +65,7 @@ struct ConversationSurface: View {
         quoteMessage: ((MessageViewData) -> Void)? = nil,
         forwardMessage: ((MessageViewData, ConversationKey) -> Void)? = nil,
         forwardDestinations: ((String) -> [NavigationDestination])? = nil,
+        mentionCandidates: [MentionCandidate] = [],
         attachmentUploadState: AttachmentUploadState = .idle,
         attachmentInsertion: ComposerAttachmentInsertion? = nil,
         uploadAttachment: ((URL) -> Void)? = nil,
@@ -95,6 +97,7 @@ struct ConversationSurface: View {
         self.quoteMessage = quoteMessage
         self.forwardMessage = forwardMessage
         self.forwardDestinations = forwardDestinations
+        self.mentionCandidates = mentionCandidates
         self.attachmentUploadState = attachmentUploadState
         self.attachmentInsertion = attachmentInsertion
         self.uploadAttachment = uploadAttachment
@@ -276,6 +279,7 @@ struct ConversationSurface: View {
                 isDisabled: isOffline,
                 quote: pendingQuote,
                 clearQuote: { pendingQuote = nil },
+                mentionCandidates: mentionCandidates,
                 attachmentUploadState: attachmentUploadState,
                 chooseAttachment: uploadAttachment == nil
                     ? nil
@@ -957,12 +961,105 @@ private struct ComposerView: View {
     let isDisabled: Bool
     let quote: ComposerQuote?
     let clearQuote: () -> Void
+    let mentionCandidates: [MentionCandidate]
     let attachmentUploadState: AttachmentUploadState
     let chooseAttachment: (() -> Void)?
     let retryAttachmentUpload: (() -> Void)?
     let send: () -> Void
 
     @State private var selection: TextSelection?
+    @State private var mentionIndex = 0
+    @State private var dismissedMentionDraft: String?
+
+    private var caret: String.Index {
+        if let selection, case let .selection(range) = selection.indices {
+            return min(range.upperBound, draft.endIndex)
+        }
+        return draft.endIndex
+    }
+
+    /// The `@` being typed with its matching people, if any.
+    private var mentionMatch: (trigger: MentionAutocomplete.Trigger, items: [MentionCandidate])? {
+        guard !isDisabled,
+              !mentionCandidates.isEmpty,
+              draft != dismissedMentionDraft,
+              let trigger = MentionAutocomplete.trigger(in: draft, caret: caret)
+        else {
+            return nil
+        }
+        let items = MentionAutocomplete.suggestions(mentionCandidates, query: trigger.query)
+        return items.isEmpty ? nil : (trigger, items)
+    }
+
+    private func acceptMention(
+        _ candidate: MentionCandidate,
+        trigger: MentionAutocomplete.Trigger
+    ) {
+        let text = MentionAutocomplete.replacement(
+            for: candidate,
+            isSilent: trigger.isSilent,
+            among: mentionCandidates
+        )
+        let offset = draft.distance(from: draft.startIndex, to: trigger.range.lowerBound)
+        draft.replaceSubrange(trigger.range, with: text)
+        let insertionPoint = draft.index(draft.startIndex, offsetBy: offset + text.count)
+        selection = TextSelection(insertionPoint: insertionPoint)
+        mentionIndex = 0
+    }
+
+    private func moveMentionSelection(by delta: Int) -> KeyPress.Result {
+        guard let match = mentionMatch else {
+            return .ignored
+        }
+        let count = match.items.count
+        mentionIndex = (min(mentionIndex, count - 1) + delta + count) % count
+        return .handled
+    }
+
+    private func acceptHighlightedMention() -> KeyPress.Result {
+        guard let match = mentionMatch else {
+            return .ignored
+        }
+        acceptMention(match.items[min(mentionIndex, match.items.count - 1)], trigger: match.trigger)
+        return .handled
+    }
+
+    @ViewBuilder
+    private func mentionList(_ match: (trigger: MentionAutocomplete.Trigger, items: [MentionCandidate])) -> some View {
+        let highlighted = min(mentionIndex, match.items.count - 1)
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(match.items.enumerated()), id: \.element.id) { index, item in
+                Button {
+                    acceptMention(item, trigger: match.trigger)
+                } label: {
+                    HStack(spacing: AppTheme.Spacing.small) {
+                        Image(systemName: item.systemImage)
+                            .foregroundStyle(AppTheme.Colors.tertiaryText)
+                            .frame(width: 18)
+                        Text(item.name)
+                        Text(item.detail)
+                            .foregroundStyle(AppTheme.Colors.secondaryText)
+                            .lineLimit(1)
+                        Spacer(minLength: 0)
+                    }
+                    .font(AppTheme.Typography.body)
+                    .padding(.horizontal, AppTheme.Spacing.medium)
+                    .padding(.vertical, 5)
+                    .background(index == highlighted ? AppTheme.Colors.accent.opacity(0.18) : Color.clear)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .background(AppTheme.Colors.sidebar)
+        .clipShape(
+            RoundedRectangle(
+                cornerRadius: AppTheme.Metrics.controlRadius,
+                style: .continuous
+            )
+        )
+        .accessibilityLabel("Mention suggestions")
+    }
 
     private var canSend: Bool {
         quote != nil || !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -1040,6 +1137,10 @@ private struct ComposerView: View {
                 )
             }
 
+            if let match = mentionMatch {
+                mentionList(match)
+            }
+
             TextField(
                 "Message \(conversationTitle)",
                 text: $draft,
@@ -1051,7 +1152,13 @@ private struct ComposerView: View {
             .lineLimit(1...6)
             .focused(isFocused)
             .disabled(isDisabled)
+            .onKeyPress(.upArrow) { moveMentionSelection(by: -1) }
+            .onKeyPress(.downArrow) { moveMentionSelection(by: 1) }
+            .onKeyPress(.tab) { acceptHighlightedMention() }
             .onKeyPress(.return, phases: .down) { press in
+                if press.modifiers.isEmpty, mentionMatch != nil {
+                    return acceptHighlightedMention()
+                }
                 guard press.modifiers.contains(.shift) || press.modifiers.contains(.option) else {
                     return .ignored
                 }
@@ -1059,8 +1166,15 @@ private struct ComposerView: View {
                 return .handled
             }
             .onSubmit(send)
+            .onChange(of: draft) {
+                mentionIndex = 0
+            }
             .onExitCommand {
-                isFocused.wrappedValue = false
+                if mentionMatch != nil {
+                    dismissedMentionDraft = draft
+                } else {
+                    isFocused.wrappedValue = false
+                }
             }
             .accessibilityLabel("Message \(conversationTitle)")
             .accessibilityHint(
