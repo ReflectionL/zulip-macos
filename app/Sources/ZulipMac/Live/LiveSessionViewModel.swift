@@ -264,6 +264,9 @@ final class LiveSessionViewModel {
     private var failedAttachmentUpload: PendingAttachmentUpload?
     private var mediaRequestsByRequestID: [UInt64: String] = [:]
     private var pendingMediaURLs = Set<String>()
+    /// Media wanted while only cached data is shown; the core has no account
+    /// session to download with until the live session starts.
+    private var deferredMediaURLs = Set<String>()
     private var knownTopics: [ConversationKey: LiveTopicSnapshot] = [:]
 
     init(
@@ -1170,6 +1173,10 @@ final class LiveSessionViewModel {
               mediaLocalURLs[remoteURL] == nil,
               !pendingMediaURLs.contains(remoteURL)
         else { return }
+        guard hasLiveSession else {
+            deferredMediaURLs.insert(remoteURL)
+            return
+        }
         let id = nextRequestID()
         pendingMediaURLs.insert(remoteURL)
         mediaRequestsByRequestID[id] = remoteURL
@@ -1181,6 +1188,16 @@ final class LiveSessionViewModel {
                 remoteURL: remoteURL
             )
         )
+    }
+
+    /// Requests the avatars, organization icon, and images asked for before the
+    /// live session existed (their first attempt could not have succeeded).
+    private func requestDeferredMedia() {
+        let urls = deferredMediaURLs.union(mediaFailures.keys)
+        deferredMediaURLs = []
+        for remoteURL in urls.sorted() {
+            loadMedia(remoteURL)
+        }
     }
 
     func retryMedia(_ remoteURL: String) {
@@ -1217,6 +1234,7 @@ final class LiveSessionViewModel {
             email = identity.email
             rememberLastAccount(identity)
             apply(snapshot)
+            requestDeferredMedia()
             notificationPlanner.prime(with: snapshot)
             notifier?.requestAuthorization()
             loadDrafts(for: identity.accountID)
@@ -1650,6 +1668,7 @@ final class LiveSessionViewModel {
         attachmentInsertion = nil
         mediaRequestsByRequestID = [:]
         pendingMediaURLs = []
+        deferredMediaURLs = []
         mediaLocalURLs = [:]
         mediaFailures = [:]
         messageSourceRequests = [:]
