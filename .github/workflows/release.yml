@@ -4,6 +4,15 @@ on:
   push:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create, for example v0.1.0-alpha.2"
+        required: true
+        type: string
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 permissions:
   contents: write
@@ -33,18 +42,19 @@ jobs:
         run: ./scripts/check.sh
 
       - name: Package DMG
-        run: ./scripts/package-dmg.sh release "$GITHUB_REF_NAME"
+        run: ./scripts/package-dmg.sh release "$RELEASE_TAG"
 
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           flags=()
-          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+          if [[ "$RELEASE_TAG" == *-* ]]; then
             flags+=(--prerelease)
           fi
-          gh release create "$GITHUB_REF_NAME" \
-            --title "Zulip Mac $GITHUB_REF_NAME" \
+          gh release create "$RELEASE_TAG" \
+            --target "$GITHUB_SHA" \
+            --title "Zulip Mac $RELEASE_TAG" \
             --notes "Apple Silicon (arm64) build for macOS 26 or later. Ad-hoc signed and not notarized; right-click and choose Open on first launch. Verify the download with the attached SHA-256 file." \
             "${flags[@]}" \
             dist/Zulip-Mac-*-arm64.dmg \
