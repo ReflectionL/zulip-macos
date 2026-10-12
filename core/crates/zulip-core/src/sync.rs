@@ -313,6 +313,12 @@ pub enum SyncError {
         /// Sanitized transport error without a request URL.
         message: String,
     },
+    /// The server rejected the stored credentials (HTTP 401).
+    ///
+    /// This is the only terminal synchronization failure: every other error is
+    /// retried with backoff so a transient problem never ends the session.
+    #[error("the Zulip server rejected the saved credentials; sign in again")]
+    Unauthorized,
     /// The endpoint returned a non-success status.
     #[error("event synchronization returned HTTP {0}")]
     HttpStatus(u16),
@@ -452,11 +458,21 @@ impl EventQueueClient {
             return Err(SyncError::InvalidResponse("queue identifier changed"));
         }
 
-        document
+        // One event this client cannot interpret must not poison the queue: a
+        // failed poll never advances the cursor, so the same event would be
+        // redelivered forever. Degrade it to an ignorable event instead.
+        Ok(document
             .events
             .into_iter()
-            .map(EventDocument::normalize)
-            .collect()
+            .map(|event| {
+                let event_id = event.id;
+                let event_type = event.event_type.clone();
+                event.normalize().unwrap_or_else(|_| SyncEvent::Unknown {
+                    event_id,
+                    event_type: format!("{event_type}/malformed"),
+                })
+            })
+            .collect())
     }
 }
 
@@ -745,14 +761,14 @@ impl SyncSession {
     }
 }
 
+/// Everything except a credential rejection or locally invalid configuration is
+/// retried with backoff, so an unexpected server response degrades the
+/// connection state instead of silently ending the session.
 fn is_retryable(error: &SyncError) -> bool {
-    match error {
-        SyncError::Transport { .. } => true,
-        SyncError::HttpStatus(status) => {
-            matches!(*status, 408 | 425 | 429) || (500..600).contains(status)
-        }
-        _ => false,
-    }
+    !matches!(
+        error,
+        SyncError::Unauthorized | SyncError::InvalidInput | SyncError::InvalidServer(_)
+    )
 }
 
 /// Ordered, idempotent reducer owned by the Rust core actor.
@@ -991,21 +1007,23 @@ impl RegisterDocument {
                     )
                 });
 
+        // A single unusable user, channel, or message must not make the whole
+        // account impossible to register.
         let users = self
             .realm_users
             .into_iter()
-            .map(UserDocument::normalize)
-            .collect::<Result<Vec<_>, _>>()?;
+            .filter_map(|user| user.normalize().ok())
+            .collect();
         let channels = self
             .subscriptions
             .into_iter()
-            .map(ChannelDocument::normalize)
-            .collect::<Result<Vec<_>, _>>()?;
+            .filter_map(|channel| channel.normalize().ok())
+            .collect();
         let messages = self
             .messages
             .into_iter()
-            .map(MessageDocument::normalize)
-            .collect::<Result<Vec<_>, _>>()?;
+            .filter_map(|message| message.normalize().ok())
+            .collect();
 
         Ok(RegisteredQueue {
             queue: EventQueue {
@@ -1443,6 +1461,9 @@ async fn decode_response<T: DeserializeOwned>(
         if code.as_deref() == Some("BAD_EVENT_QUEUE_ID") {
             return Err(SyncError::BadEventQueue);
         }
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(SyncError::Unauthorized);
+        }
         return Err(SyncError::HttpStatus(status.as_u16()));
     }
 
@@ -1468,8 +1489,8 @@ mod tests {
 
     use super::{
         BootstrapState, ChannelSummary, EventQueueClient, MessageSummary, MessageUpdate,
-        RecoveryPolicy, ResyncReason, RetryBackoff, RetryOperation, SyncCycle, SyncEvent,
-        SyncReducer, SyncSession, UserSummary,
+        RecoveryPolicy, ResyncReason, RetryBackoff, RetryOperation, SyncCycle, SyncError,
+        SyncEvent, SyncReducer, SyncSession, UserSummary,
     };
     use crate::auth::SecretString;
 
@@ -1821,6 +1842,118 @@ mod tests {
             } if delay == Duration::from_millis(200)
         ));
         assert_eq!(session.snapshot(), initial);
+    }
+
+    #[tokio::test]
+    async fn only_a_credential_rejection_is_fatal() {
+        let (server, _) = spawn_mock(vec![
+            (StatusCode::OK, register_body("queue-fixture", 40, "old")),
+            (
+                StatusCode::UNAUTHORIZED,
+                r#"{"result":"error","code":"UNAUTHORIZED","msg":"Invalid API key"}"#.to_owned(),
+            ),
+        ]);
+        let client = EventQueueClient::new(&server, "maya@example.com", SecretString::new(API_KEY))
+            .expect("sync client");
+        let (mut session, _) = SyncSession::start(client, RecoveryPolicy::default(), 3)
+            .await
+            .expect("initial registration");
+
+        assert!(matches!(
+            session.advance().await,
+            SyncCycle::Fatal {
+                error: SyncError::Unauthorized
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn unexpected_server_responses_are_retried_not_fatal() {
+        let (server, _) = spawn_mock(vec![
+            (StatusCode::OK, register_body("queue-fixture", 40, "old")),
+            (
+                StatusCode::BAD_REQUEST,
+                r#"{"result":"error","code":"BAD_REQUEST","msg":"nope"}"#.to_owned(),
+            ),
+            (StatusCode::OK, "not json".to_owned()),
+            (
+                StatusCode::OK,
+                r#"{"result":"error","code":"SOMETHING_NEW","msg":"new"}"#.to_owned(),
+            ),
+        ]);
+        let client = EventQueueClient::new(&server, "maya@example.com", SecretString::new(API_KEY))
+            .expect("sync client");
+        let (mut session, initial) = SyncSession::start(client, RecoveryPolicy::default(), 3)
+            .await
+            .expect("initial registration");
+
+        for _ in 0..3 {
+            assert!(matches!(
+                session.advance().await,
+                SyncCycle::RetryAfter {
+                    operation: RetryOperation::Poll,
+                    ..
+                }
+            ));
+        }
+        assert_eq!(session.snapshot(), initial);
+    }
+
+    #[tokio::test]
+    async fn uninterpretable_events_are_skipped_and_advance_the_cursor() {
+        let (server, _) = spawn_mock(vec![
+            (StatusCode::OK, register_body("queue-fixture", 40, "old")),
+            (
+                StatusCode::OK,
+                r#"{
+                    "result":"success",
+                    "queue_id":"queue-fixture",
+                    "events":[
+                        {"id":41,"type":"message","message":{"id":1}},
+                        {"id":42,"type":"delete_message"},
+                        {"id":43,"type":"heartbeat"}
+                    ]
+                }"#
+                .to_owned(),
+            ),
+        ]);
+        let client = EventQueueClient::new(&server, "maya@example.com", SecretString::new(API_KEY))
+            .expect("sync client");
+        let (mut session, initial) = SyncSession::start(client, RecoveryPolicy::default(), 3)
+            .await
+            .expect("initial registration");
+
+        let SyncCycle::Events(outcome) = session.advance().await else {
+            panic!("malformed events should not end the session");
+        };
+        assert_eq!(outcome.accepted_events, 3);
+        assert!(outcome.snapshot.is_none());
+        assert_eq!(session.queue().last_event_id, 43);
+        assert_eq!(session.snapshot().channels, initial.channels);
+    }
+
+    #[tokio::test]
+    async fn unusable_bootstrap_entries_do_not_block_registration() {
+        let body = r#"{
+            "result":"success",
+            "queue_id":"queue-fixture",
+            "last_event_id":5,
+            "realm_users":[
+                {"user_id":1,"full_name":"Maya"},
+                {"user_id":2,"full_name":"  "}
+            ],
+            "subscriptions":[
+                {"stream_id":7,"name":"general"},
+                {"stream_id":8,"name":""}
+            ]
+        }"#
+        .to_owned();
+        let (server, _) = spawn_mock(vec![(StatusCode::OK, body)]);
+        let client = EventQueueClient::new(&server, "maya@example.com", SecretString::new(API_KEY))
+            .expect("sync client");
+        let registered = client.register().await.expect("lenient registration");
+        assert_eq!(registered.bootstrap.users.len(), 1);
+        assert_eq!(registered.bootstrap.channels.len(), 1);
     }
 
     fn fixture_user(id: i64, full_name: &str) -> UserSummary {

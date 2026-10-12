@@ -119,6 +119,130 @@ struct LiveSessionTests {
         )
     }
 
+    @Test("A relaunch restores the last account from its saved API key")
+    func restoresSavedSession() async throws {
+        let accountID = "https://acme.zulipchat.com|maya@example.com"
+        let defaults = try #require(UserDefaults(suiteName: "restore-\(UUID().uuidString)"))
+        let credentials = MemoryCredentialStore()
+
+        let firstCore = RecordingCoreClient()
+        let signedIn = LiveSessionViewModel(
+            client: firstCore,
+            credentialStore: credentials,
+            defaults: defaults
+        )
+        signedIn.startObserving()
+        firstCore.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: accountID),
+                credential: StoredAPICredential(accountID: accountID, apiKey: "saved-key"),
+                snapshot: snapshot
+            )
+        )
+        await eventually { signedIn.connectionState == .connected }
+
+        let relaunchCore = RecordingCoreClient()
+        let relaunched = LiveSessionViewModel(
+            client: relaunchCore,
+            credentialStore: credentials,
+            defaults: defaults
+        )
+        await relaunched.restoreSavedSession()
+
+        let command = try #require(relaunchCore.commands.first)
+        guard case let .startAPIKeySession(_, restoredAccountID, _, restoredEmail, apiKey) = command
+        else {
+            Issue.record("Expected an API-key session command")
+            return
+        }
+        #expect(restoredAccountID == accountID)
+        #expect(restoredEmail == "maya@example.com")
+        #expect(apiKey == "saved-key")
+        #expect(relaunched.connectionState == .connecting)
+    }
+
+    @Test("Restoring without a remembered account or key stays quietly signed out")
+    func restoreWithoutAccountOrKey() async throws {
+        let defaults = try #require(UserDefaults(suiteName: "restore-\(UUID().uuidString)"))
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(
+            client: core,
+            credentialStore: MemoryCredentialStore(),
+            defaults: defaults
+        )
+        await model.restoreSavedSession()
+        #expect(core.commands.isEmpty)
+        #expect(model.connectionState == .signedOut)
+
+        defaults.set("https://acme.zulipchat.com", forKey: "lastAccount.serverURL")
+        defaults.set("maya@example.com", forKey: "lastAccount.email")
+        await model.restoreSavedSession()
+        #expect(core.commands.isEmpty)
+        #expect(model.connectionState == .signedOut)
+    }
+
+    @Test("An explicit disconnect is not undone by the next launch")
+    func disconnectForgetsLastAccount() async throws {
+        let accountID = "https://acme.zulipchat.com|maya@example.com"
+        let defaults = try #require(UserDefaults(suiteName: "restore-\(UUID().uuidString)"))
+        let core = RecordingCoreClient()
+        let credentials = MemoryCredentialStore()
+        let model = LiveSessionViewModel(
+            client: core,
+            credentialStore: credentials,
+            defaults: defaults
+        )
+        model.startObserving()
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: accountID),
+                credential: StoredAPICredential(accountID: accountID, apiKey: "saved-key"),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.connectionState == .connected }
+
+        core.emit(.disconnected(requestID: 2))
+        await eventually { model.connectionState == .signedOut }
+
+        let relaunchCore = RecordingCoreClient()
+        let relaunched = LiveSessionViewModel(
+            client: relaunchCore,
+            credentialStore: credentials,
+            defaults: defaults
+        )
+        await relaunched.restoreSavedSession()
+        #expect(relaunchCore.commands.isEmpty)
+    }
+
+    @Test("A core-ended session returns to sign-in with the reason")
+    func coreEndedSessionIsReported() async {
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(
+            client: core,
+            credentialStore: MemoryCredentialStore()
+        )
+        model.startObserving()
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: "account-1"),
+                credential: StoredAPICredential(accountID: "account-1", apiKey: "key"),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.connectionState == .connected }
+
+        core.emit(.failed(requestID: nil, message: "sign in again"))
+        await eventually { model.connectionState == .failed(message: "sign in again") }
+
+        #expect(model.identity == nil)
+        #expect(model.sidebarSnapshot == nil)
+        #expect(model.notice?.contains("Earlier messages") != true)
+    }
+
     @Test("A loaded conversation is mapped safely and marked read")
     func openConversation() async {
         let core = RecordingCoreClient()
