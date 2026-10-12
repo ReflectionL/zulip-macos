@@ -118,6 +118,47 @@ enum ReleaseFeed {
             .max { $0.version < $1.version }
     }
 
+    /// Reads the public `releases.atom` feed, which is not subject to the
+    /// unauthenticated REST API limit, and derives each release's asset URLs from
+    /// the naming scheme `package-dmg.sh` uses.
+    static func newest(fromAtom data: Data, repository: String) throws -> AvailableRelease? {
+        let collector = AtomTagCollector()
+        let parser = XMLParser(data: data)
+        parser.delegate = collector
+        guard parser.parse() else {
+            throw ReleaseFeedError.invalidResponse
+        }
+        return collector.tags
+            .compactMap { release(tag: $0, repository: repository) }
+            .max { $0.version < $1.version }
+    }
+
+    private static func release(tag: String, repository: String) -> AvailableRelease? {
+        guard tag.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || ".-".contains($0)) }),
+              let version = ReleaseVersion(tag)
+        else {
+            return nil
+        }
+        let base = "https://github.com/\(repository)/releases"
+        let name = "Zulip-Mac-\(version)-arm64.dmg"
+        guard let dmgURL = URL(string: "\(base)/download/\(tag)/\(name)"),
+              let checksumURL = URL(string: "\(base)/download/\(tag)/\(name).sha256"),
+              isTrustedDownload(dmgURL),
+              isTrustedDownload(checksumURL)
+        else {
+            return nil
+        }
+        return AvailableRelease(
+            version: version,
+            tag: tag,
+            notes: "",
+            pageURL: URL(string: "\(base)/tag/\(tag)"),
+            dmgURL: dmgURL,
+            checksumURL: checksumURL,
+            dmgName: name
+        )
+    }
+
     private static func release(from payload: Payload) -> AvailableRelease? {
         guard !payload.draft, let version = ReleaseVersion(payload.tagName) else {
             return nil
@@ -163,5 +204,41 @@ enum ReleaseFeed {
             }
         }
         return nil
+    }
+}
+
+/// Collects the tag of every `<entry>` in a GitHub releases Atom feed.
+private final class AtomTagCollector: NSObject, XMLParserDelegate {
+    private(set) var tags: [String] = []
+    private var insideEntry = false
+
+    func parser(
+        _ parser: XMLParser,
+        didStartElement elementName: String,
+        namespaceURI: String?,
+        qualifiedName qName: String?,
+        attributes attributeDict: [String: String] = [:]
+    ) {
+        if elementName == "entry" {
+            insideEntry = true
+        } else if insideEntry, elementName == "link",
+                  attributeDict["rel"] == nil || attributeDict["rel"] == "alternate",
+                  let href = attributeDict["href"],
+                  let range = href.range(of: "/releases/tag/")
+        {
+            let tag = String(href[range.upperBound...])
+            tags.append(tag.removingPercentEncoding ?? tag)
+        }
+    }
+
+    func parser(
+        _ parser: XMLParser,
+        didEndElement elementName: String,
+        namespaceURI: String?,
+        qualifiedName qName: String?
+    ) {
+        if elementName == "entry" {
+            insideEntry = false
+        }
     }
 }
