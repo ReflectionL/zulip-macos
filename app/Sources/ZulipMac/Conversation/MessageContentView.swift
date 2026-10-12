@@ -39,6 +39,10 @@ private struct ContentBlockView: View {
         case let .paragraph(content):
             InlineContentText(content: content)
 
+        case let .heading(level, content):
+            InlineContentText(content: content, font: Self.headingFont(level: level))
+                .accessibilityAddTraits(.isHeader)
+
         case let .quote(blocks):
             HStack(alignment: .top, spacing: AppTheme.Spacing.medium) {
                 RoundedRectangle(cornerRadius: 1)
@@ -148,12 +152,24 @@ private struct ContentBlockView: View {
     }
 }
 
+extension ContentBlockView {
+    static func headingFont(level: Int) -> Font {
+        switch level {
+        case 1: .system(size: 22, weight: .semibold)
+        case 2: .system(size: 19, weight: .semibold)
+        case 3: .system(size: 16.5, weight: .semibold)
+        default: .system(size: 14, weight: .semibold)
+        }
+    }
+}
+
 private struct InlineContentText: View {
     let content: [InlineContent]
+    var font: Font = AppTheme.Typography.body
 
     var body: some View {
         Text(attributedContent)
-            .font(AppTheme.Typography.body)
+            .font(font)
             .foregroundStyle(AppTheme.Colors.primaryText)
             .tint(AppTheme.Colors.accent)
             .textSelection(.enabled)
@@ -161,22 +177,53 @@ private struct InlineContentText: View {
     }
 
     private var attributedContent: AttributedString {
-        content.reduce(into: AttributedString()) { result, item in
-            var fragment = AttributedString(item.plainText)
+        Self.attributed(content, inherited: [])
+    }
+
+    private static func attributed(
+        _ items: [InlineContent],
+        inherited: InlinePresentationIntent
+    ) -> AttributedString {
+        items.reduce(into: AttributedString()) { result, item in
+            var fragment: AttributedString
 
             switch item {
+            case let .styled(style, children):
+                fragment = attributed(children, inherited: inherited.union(intent(for: style)))
+                if style == .code {
+                    fragment.backgroundColor = AppTheme.Colors.hover
+                }
             case .text, .emoji:
-                break
-            case let .link(_, url):
+                fragment = AttributedString(item.plainText)
+            case let .link(label, url):
+                fragment = AttributedString(label)
                 fragment.link = URL(string: url)
                 fragment.foregroundColor = AppTheme.Colors.accent
                 fragment.underlineStyle = .single
             case .mention:
+                fragment = AttributedString(item.plainText)
                 fragment.foregroundColor = AppTheme.Colors.accent
                 fragment.font = .system(size: 14, weight: .semibold)
             }
 
+            if !inherited.isEmpty, !isStyled(item) {
+                fragment.inlinePresentationIntent = inherited
+            }
             result.append(fragment)
+        }
+    }
+
+    private static func isStyled(_ item: InlineContent) -> Bool {
+        if case .styled = item { return true }
+        return false
+    }
+
+    private static func intent(for style: InlineStyle) -> InlinePresentationIntent {
+        switch style {
+        case .strong: .stronglyEmphasized
+        case .emphasis: .emphasized
+        case .strikethrough: .strikethrough
+        case .code: .code
         }
     }
 }
@@ -312,6 +359,8 @@ enum ContentSnapshot {
         switch block {
         case let .paragraph(content):
             "paragraph(\(content.map(describe).joined(separator: "|")))"
+        case let .heading(level, content):
+            "heading\(level)(\(content.map(describe).joined(separator: "|")))"
         case let .quote(blocks):
             "quote{\(describe(blocks))}"
         case let .list(items, ordered):
@@ -337,6 +386,8 @@ enum ContentSnapshot {
             "mention:\(displayName)#\(userID)"
         case let .emoji(name, value):
             "emoji:\(name)=\(value)"
+        case let .styled(style, content):
+            "\(style)[\(content.map(describe).joined(separator: "|"))]"
         }
     }
 }

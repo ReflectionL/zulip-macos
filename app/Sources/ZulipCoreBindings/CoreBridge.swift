@@ -7,19 +7,23 @@ public struct LiveUserSnapshot: Equatable, Sendable {
     public let email: String?
     public let isActive: Bool
     public let isBot: Bool
+    /// Avatar image location, absolute or relative to the server.
+    public let avatarURL: String?
 
     public init(
         userID: Int64,
         fullName: String,
         email: String?,
         isActive: Bool,
-        isBot: Bool
+        isBot: Bool,
+        avatarURL: String? = nil
     ) {
         self.userID = userID
         self.fullName = fullName
         self.email = email
         self.isActive = isActive
         self.isBot = isBot
+        self.avatarURL = avatarURL
     }
 }
 
@@ -107,6 +111,8 @@ public struct LiveSnapshot: Equatable, Sendable {
     public let channels: [LiveChannelSnapshot]
     public let topics: [LiveTopicSnapshot]
     public let messages: [LiveMessageSnapshot]
+    /// Organization icon location, absolute or relative to the server.
+    public let realmIconURL: String?
 
     public init(
         revision: UInt64,
@@ -114,7 +120,8 @@ public struct LiveSnapshot: Equatable, Sendable {
         users: [LiveUserSnapshot],
         channels: [LiveChannelSnapshot],
         topics: [LiveTopicSnapshot] = [],
-        messages: [LiveMessageSnapshot]
+        messages: [LiveMessageSnapshot],
+        realmIconURL: String? = nil
     ) {
         self.revision = revision
         self.lastEventID = lastEventID
@@ -122,6 +129,18 @@ public struct LiveSnapshot: Equatable, Sendable {
         self.channels = channels
         self.topics = topics
         self.messages = messages
+        self.realmIconURL = realmIconURL
+    }
+}
+
+/// One user's online state from the server.
+public struct LivePresence: Equatable, Sendable {
+    public let userID: Int64
+    public let state: PresenceState
+
+    public init(userID: Int64, state: PresenceState) {
+        self.userID = userID
+        self.state = state
     }
 }
 
@@ -284,6 +303,7 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
         password: String
     )
     case openConversation(requestID: UInt64, key: ConversationKey, limit: UInt16)
+    case loadCachedConversation(requestID: UInt64, key: ConversationKey)
     case loadOlderMessages(
         requestID: UInt64,
         key: ConversationKey,
@@ -359,6 +379,7 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
     )
     case loadMedia(requestID: UInt64, accountID: String, remoteURL: String)
     case markRead(requestID: UInt64, accountID: String, messageIDs: [Int64])
+    case refreshPresence(requestID: UInt64, accountID: String, isActive: Bool)
     case disconnect(requestID: UInt64)
     case loadCachedSession(requestID: UInt64, accountID: String)
     case saveDraft(requestID: UInt64, key: ConversationKey, content: String)
@@ -375,6 +396,7 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
              let .startAPIKeySession(requestID, _, _, _, _),
              let .startPasswordSession(requestID, _, _, _, _),
              let .openConversation(requestID, _, _),
+             let .loadCachedConversation(requestID, _),
              let .loadOlderMessages(requestID, _, _, _),
              let .searchMessages(requestID, _, _, _),
              let .openMessage(requestID, _, _, _, _),
@@ -389,6 +411,7 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
              let .uploadAttachment(requestID, _, _, _),
              let .loadMedia(requestID, _, _),
              let .markRead(requestID, _, _),
+             let .refreshPresence(requestID, _, _),
              let .disconnect(requestID),
              let .loadCachedSession(requestID, _),
              let .saveDraft(requestID, _, _),
@@ -407,6 +430,8 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
             "BridgeCommand.startPasswordSession(password: [REDACTED])"
         case .openConversation:
             "BridgeCommand.openConversation"
+        case .loadCachedConversation:
+            "BridgeCommand.loadCachedConversation"
         case .loadOlderMessages:
             "BridgeCommand.loadOlderMessages"
         case .searchMessages:
@@ -435,6 +460,8 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
             "BridgeCommand.loadMedia"
         case .markRead:
             "BridgeCommand.markRead"
+        case .refreshPresence:
+            "BridgeCommand.refreshPresence"
         case .disconnect:
             "BridgeCommand.disconnect"
         case .loadCachedSession:
@@ -474,6 +501,8 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
                 key: try key.ffiValue(),
                 limit: limit
             )
+        case let .loadCachedConversation(requestID, key):
+            .loadCachedConversation(requestId: requestID, key: try key.ffiValue())
         case let .loadOlderMessages(requestID, key, beforeMessageID, limit):
             .loadOlderMessages(
                 requestId: requestID,
@@ -588,6 +617,8 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
                 accountId: accountID,
                 messageIds: messageIDs
             )
+        case let .refreshPresence(requestID, accountID, isActive):
+            .refreshPresence(requestId: requestID, accountId: accountID, isActive: isActive)
         case let .disconnect(requestID):
             .disconnect(requestId: requestID)
         case let .loadCachedSession(requestID, accountID):
@@ -622,6 +653,7 @@ public enum BridgeEvent:
     case draftsLoaded(requestID: UInt64, accountID: String, drafts: [LiveDraft])
     case snapshotUpdated(accountID: String, snapshot: LiveSnapshot)
     case conversationOpened(requestID: UInt64, page: LiveConversationPage)
+    case cachedConversationLoaded(requestID: UInt64, page: LiveConversationPage)
     case conversationHistoryLoaded(requestID: UInt64, page: LiveConversationPage)
     case searchCompleted(
         requestID: UInt64,
@@ -654,6 +686,7 @@ public enum BridgeEvent:
     case messagesMarkedRead(requestID: UInt64, messageIDs: [Int64])
     case retryScheduled(accountID: String, delayMilliseconds: UInt64)
     case syncResumed(accountID: String)
+    case presenceUpdated(accountID: String, presences: [LivePresence])
     case disconnected(requestID: UInt64)
     case failed(requestID: UInt64?, message: String)
 
@@ -664,6 +697,7 @@ public enum BridgeEvent:
              let .cachedSessionLoaded(requestID, _, _),
              let .draftsLoaded(requestID, _, _),
              let .conversationOpened(requestID, _),
+             let .cachedConversationLoaded(requestID, _),
              let .conversationHistoryLoaded(requestID, _),
              let .searchCompleted(requestID, _, _),
              let .messageFocused(requestID, _, _),
@@ -680,7 +714,7 @@ public enum BridgeEvent:
             requestID
         case let .failed(requestID, _):
             requestID ?? 0
-        case .snapshotUpdated, .retryScheduled, .syncResumed:
+        case .snapshotUpdated, .retryScheduled, .syncResumed, .presenceUpdated:
             0
         }
     }
@@ -699,6 +733,8 @@ public enum BridgeEvent:
             "Live snapshot updated"
         case .conversationOpened:
             "Conversation opened"
+        case .cachedConversationLoaded:
+            "Cached conversation loaded"
         case .conversationHistoryLoaded:
             "Conversation history loaded"
         case .searchCompleted:
@@ -727,6 +763,8 @@ public enum BridgeEvent:
             "Retry scheduled"
         case .syncResumed:
             "Sync resumed"
+        case .presenceUpdated:
+            "Presence updated"
         case .disconnected:
             "Disconnected"
         }
@@ -867,6 +905,7 @@ private extension LiveSnapshot {
         channels = snapshot.channels.map(LiveChannelSnapshot.init)
         topics = snapshot.topics.map(LiveTopicSnapshot.init)
         messages = snapshot.messages.map(LiveMessageSnapshot.init)
+        realmIconURL = snapshot.realmIconUrl
     }
 }
 
@@ -877,6 +916,7 @@ private extension LiveUserSnapshot {
         email = user.email
         isActive = user.isActive
         isBot = user.isBot
+        avatarURL = user.avatarUrl
     }
 }
 
@@ -925,6 +965,29 @@ private extension InlineContent {
             self = .mention(displayName: displayName, userID: userID)
         case let .emoji(name, value):
             self = .emoji(name: name, value: value)
+        case let .styled(style, content):
+            self = .styled(InlineStyle(style), content.map(InlineContent.init))
+        }
+    }
+}
+
+private extension PresenceState {
+    init(_ status: CorePresenceStatus) {
+        switch status {
+        case .active: self = .active
+        case .idle: self = .idle
+        case .offline: self = .offline
+        }
+    }
+}
+
+private extension InlineStyle {
+    init(_ style: CoreInlineStyle) {
+        switch style {
+        case .strong: self = .strong
+        case .emphasis: self = .emphasis
+        case .strikethrough: self = .strikethrough
+        case .code: self = .code
         }
     }
 }
@@ -934,6 +997,8 @@ private extension ContentBlock {
         switch block {
         case let .paragraph(content):
             self = .paragraph(content.map(InlineContent.init))
+        case let .heading(level, content):
+            self = .heading(level: Int(level), content: content.map(InlineContent.init))
         case let .quote(blocks):
             self = .quote(blocks.map(ContentBlock.init))
         case let .list(items, ordered):
@@ -1037,6 +1102,11 @@ private extension BridgeEvent {
             )
         case let .conversationOpened(requestID, page):
             self = .conversationOpened(
+                requestID: requestID,
+                page: LiveConversationPage(page)
+            )
+        case let .cachedConversationLoaded(requestID, page):
+            self = .cachedConversationLoaded(
                 requestID: requestID,
                 page: LiveConversationPage(page)
             )
@@ -1147,6 +1217,13 @@ private extension BridgeEvent {
             )
         case let .syncResumed(accountID):
             self = .syncResumed(accountID: accountID)
+        case let .presenceUpdated(accountID, presences):
+            self = .presenceUpdated(
+                accountID: accountID,
+                presences: presences.map {
+                    LivePresence(userID: $0.userId, state: PresenceState($0.status))
+                }
+            )
         case let .disconnected(requestID):
             self = .disconnected(requestID: requestID)
         case let .failed(requestID, message):

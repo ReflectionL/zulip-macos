@@ -5,7 +5,7 @@ Last updated: 2026-10-12
 ## Current State
 
 - Milestone: MVP — daily use
-- Current step: none (`UPD-001`, `FIX-003`, `UI-008` closed)
+- Current step: `FIX-004` (started 2026-10-12)
 - Next step: `REL-001` (`ready`)
 - Overall status: in progress
 
@@ -48,6 +48,7 @@ Last updated: 2026-10-12
 | UPD-001 | done | 2026-10-12 | 2026-10-12 | Added `ReleaseVersion` (semver with prerelease ordering), `ReleaseFeed` (GitHub releases JSON to the newest installable release; drafts, missing checksum assets and non-GitHub hosts are skipped), `UpdateController` (launch check at most every 6 h, manual check, install state machine), and `SystemUpdateInstaller` (download, SHA-256 check, read-only mount, `ditto` stage beside the app, `codesign --verify`, bundle id and tag check, then a detached helper swaps the bundle after exit and relaunches). Packaging now stamps `ZulipReleaseTag` and `package-dmg.sh` verifies it. UI: app-menu ‘Check for Updates…’, a Settings ‘Updates’ section, and an ‘Update to vX…’ gear-menu entry. Known limit: the ad-hoc signature changes with every build, so macOS may ask for Keychain access again after an update until `REL-005` adds a stable Developer ID identity. Builds before the first release containing this change cannot self-update. macOS CI (`./scripts/check.sh`, run 38203793775) passed including the new version-ordering, release-selection, checksum, trust and controller tests; the real download-and-swap has not yet been exercised on a Mac. | — | PR #5 |
 | FIX-003 | done | 2026-10-12 | 2026-10-12 | `handleSystemWake` retries immediately when the Mac wakes while the session is retrying; `os.Logger` breadcrumbs (retry, resume, core-ended session, wake) keep dynamic values private; `rust-toolchain.toml` pins 1.95.0 with clippy and rustfmt. Rust fmt, clippy and 52 core + 12 FFI tests pass under the pinned toolchain; the Swift wake test passed in macOS CI. | — | PR #5 |
 | UI-008 | done | 2026-10-12 | 2026-10-12 | Colors now derive from the system (text/control backgrounds, label-tinted hover/selection/strokes, the user's accent color, system green/orange); the sidebar no longer paints an opaque background so the system material shows; control/panel radii are 10/16 pt; the sidebar divider, the inert account chevron, no-op Reply/Copy link/emoji controls and the “Return to send” hint were removed. Existing light/dark shell render tests pass in macOS CI. Not yet reviewed on screen: the owner should check the packaged build, especially the translucent sidebar behind the hidden titlebar. | — | PR #5 |
+| FIX-004 | in_progress | 2026-10-12 |  | Started from the owner's alpha.3 test report (six issues, see `PLAN.md`). Rust side done: headings and inline emphasis parsed into native content, public avatar and organization icon fetched without credentials and cached, `avatar_url` and `realm_icon_url` carried from `register` through the sync snapshot and the offline cache. Presence added: `MessageClient::update_presence` posts the user's own state and derives everyone's from Zulip's 140 s rule; Swift polls once a minute (first request 1.5 s after the session starts) and shows the state on the direct-message dots. Opening a conversation now shows its cached copy at once (`LoadCachedConversation` / `CachedConversationLoaded`; the first fresh page replaces it and only that page marks messages read). Swift side written, awaiting macOS CI. | — | — |
 
 Later milestones remain defined in `PLAN.md` and will be added here when they
 become active; completed rows are never removed.
@@ -56,6 +57,7 @@ become active; completed rows are never removed.
 
 ### 2026-10-12
 
+- Began `FIX-004` from the owner's alpha.3 test report: avatars, organization icon, send flash, message grouping, composer line breaks and Markdown rendering, batched into one PR and one CI run.
 - Delivered `UPD-001` (in-app updates), `FIX-003` (wake recovery, diagnostics, pinned toolchain) and `UI-008` (minimalist system-native visual pass) in PR #5 alongside `MVP-007`/`MVP-008`; one macOS CI run covered the whole batch. Remaining backlog: Chinese localization of error text, `REL-001`–`REL-005`.
 - Closed `MVP-006` (PR #4, green macOS CI) and delivered `MVP-007` notifications and `MVP-008` keyboard completion together with a sync correctness fix: the live reducer now applies `update_message_flags` and `reaction` events, conversations are only refetched when the changed message belongs to them, and topic discovery fetches 12 channels concurrently. `REL-001` is now `ready`.
 - Closed `FIX-002` (PR #3, green macOS CI) and began `MVP-006`: offline reading from a Rust-owned cache plus persisted drafts.

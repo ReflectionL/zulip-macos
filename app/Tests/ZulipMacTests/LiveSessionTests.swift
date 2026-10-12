@@ -305,6 +305,28 @@ struct LiveSessionTests {
         )
         await eventually { model.identity != nil }
         #expect(model.sidebarSnapshot?.channels.map(\.name) == ["engineering"])
+        #expect(model.sidebarSnapshot?.organizationIconURL == "/user_avatars/2/realm/icon.png")
+        #expect(model.sidebarSnapshot?.currentUserAvatarURL == "/user_avatars/2/maya.png")
+        #expect(
+            model.sidebarSnapshot?.directMessages.first { $0.userID == 22 }?.avatarURL
+                == "https://cdn.example.com/theo.png"
+        )
+
+        func presence(of userID: Int64) -> PresenceState? {
+            model.sidebarSnapshot?.directMessages.first { $0.userID == userID }?.presence
+        }
+        #expect(presence(of: 22) == .offline)
+        core.emit(
+            .presenceUpdated(
+                accountID: accountID,
+                presences: [
+                    LivePresence(userID: 22, state: .active),
+                    LivePresence(userID: 9, state: .idle),
+                ]
+            )
+        )
+        await eventually { presence(of: 22) == .active }
+        #expect(presence(of: 9) == .idle)
 
         core.emit(
             .conversationOpened(
@@ -331,6 +353,7 @@ struct LiveSessionTests {
         await eventually {
             if case let .offline(page) = model.conversationState {
                 return page.messages.first?.plainText == "Cached hello"
+                    && page.messages.first?.senderAvatarURL == "https://cdn.example.com/theo.png"
             }
             return false
         }
@@ -451,6 +474,81 @@ struct LiveSessionTests {
         #expect(model.draft(for: key).isEmpty)
     }
 
+    @Test("Opening a conversation shows its cached copy until the fresh page replaces it")
+    func cachedConversationShownFirst() async {
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(client: core, credentialStore: MemoryCredentialStore())
+        model.startObserving()
+        let accountID = "account-1"
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: accountID),
+                credential: StoredAPICredential(accountID: accountID, apiKey: "key"),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.connectionState == .connected }
+
+        let key = ConversationKey.topic(accountID: accountID, streamID: 5, topic: "macOS")
+        model.openConversation(key)
+        let commands = core.commands.suffix(2)
+        guard case .loadCachedConversation = commands.first,
+              case .openConversation = commands.last
+        else {
+            Issue.record("Expected the cache read to be submitted before the fetch")
+            return
+        }
+        func page(_ messageID: Int64, _ text: String) -> LiveConversationPage {
+            LiveConversationPage(
+                key: key,
+                messages: [
+                    LiveMessageSnapshot(
+                        messageID: messageID,
+                        senderID: 22,
+                        senderFullName: "Theo Martin",
+                        timestamp: Date(timeIntervalSince1970: 1_700_000_000),
+                        content: [.paragraph([.text(text)])],
+                        streamID: 5,
+                        topic: "macOS",
+                        recipientIDs: []
+                    ),
+                ],
+                foundOldest: true,
+                foundNewest: true
+            )
+        }
+
+        core.emit(.cachedConversationLoaded(requestID: 2, page: page(40, "Cached")))
+        await eventually {
+            if case let .loaded(shown) = model.conversationState {
+                return shown.messages.map(\.plainText) == ["Cached"]
+            }
+            return false
+        }
+        #expect(!core.commands.contains {
+            if case .markRead = $0 { return true }
+            return false
+        })
+
+        core.emit(.conversationOpened(requestID: 3, page: page(41, "Fresh")))
+        await eventually {
+            if case let .loaded(shown) = model.conversationState {
+                return shown.messages.map(\.plainText) == ["Fresh"]
+            }
+            return false
+        }
+
+        // A cache answer that arrives after the fresh page must not roll it back.
+        core.emit(.cachedConversationLoaded(requestID: 2, page: page(40, "Cached")))
+        for _ in 0..<30 { await Task.yield() }
+        if case let .loaded(shown) = model.conversationState {
+            #expect(shown.messages.map(\.plainText) == ["Fresh"])
+        } else {
+            Issue.record("Expected the fresh page to stay loaded")
+        }
+    }
+
     @Test("A loaded conversation is mapped safely and marked read")
     func openConversation() async {
         let core = RecordingCoreClient()
@@ -550,6 +648,48 @@ struct LiveSessionTests {
             return page.messages.allSatisfy { $0.deliveryState == .sent }
                 && refreshCount > refreshCountBeforeSendCompletion
         }
+        // The echo stays on screen until the server's rendered copy arrives, so
+        // the sent message never disappears and reappears.
+        if case let .loaded(page) = model.conversationState {
+            #expect(page.messages.map(\.id).filter { $0 > 0 } == [44])
+            #expect(page.messages.contains { $0.id < 0 })
+        }
+        core.emit(
+            .conversationOpened(
+                requestID: 90,
+                page: LiveConversationPage(
+                    key: key,
+                    messages: [
+                        LiveMessageSnapshot(
+                            messageID: 44,
+                            senderID: 22,
+                            senderFullName: "Theo Martin",
+                            timestamp: Date(timeIntervalSince1970: 1_700_000_000),
+                            content: [.paragraph([.text("Hello world")])],
+                            streamID: 5,
+                            topic: "macOS",
+                            recipientIDs: []
+                        ),
+                        LiveMessageSnapshot(
+                            messageID: 45,
+                            senderID: 21,
+                            senderFullName: "Maya Chen",
+                            timestamp: Date(timeIntervalSince1970: 1_700_000_100),
+                            content: [.paragraph([.text("A reply")])],
+                            streamID: 5,
+                            topic: "macOS",
+                            recipientIDs: []
+                        ),
+                    ],
+                    foundOldest: false,
+                    foundNewest: true
+                )
+            )
+        )
+        await eventually {
+            guard case let .loaded(page) = model.conversationState else { return false }
+            return page.messages.map(\.id) == [44, 45]
+        }
 
         model.loadOlderMessages(for: key)
         let historyCommand = core.commands.last {
@@ -608,7 +748,7 @@ struct LiveSessionTests {
             guard case let .loaded(page) = model.conversationState else {
                 return false
             }
-            return page.messages.map(\.id) == [42, 44]
+            return page.messages.map(\.id) == [42, 44, 45]
                 && page.beforeCursor == nil
                 && !model.isLoadingOlderMessages
         }
@@ -1231,14 +1371,16 @@ struct LiveSessionTests {
                     fullName: "Maya Chen",
                     email: "maya@example.com",
                     isActive: true,
-                    isBot: false
+                    isBot: false,
+                    avatarURL: "/user_avatars/2/maya.png"
                 ),
                 LiveUserSnapshot(
                     userID: 22,
                     fullName: "Theo Martin",
                     email: "theo@example.com",
                     isActive: true,
-                    isBot: false
+                    isBot: false,
+                    avatarURL: "https://cdn.example.com/theo.png"
                 ),
             ],
             channels: [
@@ -1267,7 +1409,8 @@ struct LiveSessionTests {
                     topic: "macOS",
                     recipientIDs: []
                 ),
-            ]
+            ],
+            realmIconURL: "/user_avatars/2/realm/icon.png"
         )
     }
 

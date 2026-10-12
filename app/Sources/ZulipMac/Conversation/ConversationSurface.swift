@@ -144,9 +144,11 @@ struct ConversationSurface: View {
                                 .padding(.vertical, AppTheme.Spacing.large)
                             }
 
+                            let continuations = MessageGrouping.continuationIDs(in: messages)
                             ForEach(messages) { message in
                                 MessageRow(
                                     message: message,
+                                    isContinuation: continuations.contains(message.id),
                                     isFocusedSearchResult: page.focusedMessageID == message.id,
                                     toggleReaction: {
                                         if let reactToMessage {
@@ -499,6 +501,7 @@ private struct ConversationToolbarModifier: ViewModifier {
 
 private struct MessageRow: View {
     let message: MessageViewData
+    let isContinuation: Bool
     let isFocusedSearchResult: Bool
     let toggleReaction: () -> Void
     let toggleStar: () -> Void
@@ -517,43 +520,41 @@ private struct MessageRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: AppTheme.Spacing.medium) {
-            Text(message.senderInitials)
-                .font(.system(size: 10, weight: .semibold))
-                .frame(width: 32, height: 32)
-                .background(AppTheme.Colors.hover)
-                .clipShape(Circle())
-                .accessibilityHidden(true)
+            if isContinuation {
+                Text(message.timestamp, format: .dateTime.hour(.twoDigits(amPM: .omitted)).minute())
+                    .font(.system(size: 9).monospacedDigit())
+                    .foregroundStyle(AppTheme.Colors.tertiaryText)
+                    .frame(width: Self.avatarSize, alignment: .center)
+                    .padding(.top, 3)
+                    .opacity(isHovered ? 1 : 0)
+                    .accessibilityHidden(true)
+            } else {
+                AvatarImage(
+                    initials: message.senderInitials,
+                    remoteURL: message.senderAvatarURL,
+                    size: Self.avatarSize,
+                    mediaLocalURLs: mediaLocalURLs,
+                    requestMedia: requestMedia
+                )
+            }
 
             VStack(alignment: .leading, spacing: AppTheme.Spacing.extraSmall) {
-                HStack(alignment: .firstTextBaseline, spacing: AppTheme.Spacing.small) {
-                    Text(message.senderName)
-                        .font(AppTheme.Typography.bodyEmphasized)
-
-                    Text(message.timestamp, style: .time)
-                        .font(AppTheme.Typography.metadata)
-                        .foregroundStyle(AppTheme.Colors.tertiaryText)
-
-                    if message.deliveryState == .pending {
-                        Text("Sending…")
-                            .font(AppTheme.Typography.metadata)
-                            .foregroundStyle(AppTheme.Colors.secondaryText)
-                    } else if message.deliveryState == .failed {
-                        Text("Failed")
-                            .font(AppTheme.Typography.metadata)
-                            .foregroundStyle(AppTheme.Colors.destructive)
+                if isContinuation {
+                    if hasStatus {
+                        HStack(spacing: AppTheme.Spacing.small) {
+                            statusLabels
+                        }
                     }
+                } else {
+                    HStack(alignment: .firstTextBaseline, spacing: AppTheme.Spacing.small) {
+                        Text(message.senderName)
+                            .font(AppTheme.Typography.bodyEmphasized)
 
-                    switch message.actionState {
-                    case let .pending(kind):
-                        Text(pendingLabel(kind))
+                        Text(message.timestamp, style: .time)
                             .font(AppTheme.Typography.metadata)
-                            .foregroundStyle(AppTheme.Colors.secondaryText)
-                    case .failed:
-                        Text("Action failed")
-                            .font(AppTheme.Typography.metadata)
-                            .foregroundStyle(AppTheme.Colors.destructive)
-                    case .idle:
-                        EmptyView()
+                            .foregroundStyle(AppTheme.Colors.tertiaryText)
+
+                        statusLabels
                     }
                 }
 
@@ -597,7 +598,8 @@ private struct MessageRow: View {
             Spacer(minLength: 0)
         }
         .padding(.horizontal, AppTheme.Spacing.medium)
-        .padding(.vertical, AppTheme.Spacing.small)
+        .padding(.top, isContinuation ? 1 : AppTheme.Spacing.small)
+        .padding(.bottom, isContinuation ? 1 : AppTheme.Spacing.small)
         .contentShape(Rectangle())
         .background {
             RoundedRectangle(
@@ -658,6 +660,38 @@ private struct MessageRow: View {
             if let toggleRead {
                 Button(message.isRead ? "Mark unread" : "Mark read", action: toggleRead)
             }
+        }
+    }
+
+    private static let avatarSize: CGFloat = 32
+
+    private var hasStatus: Bool {
+        message.deliveryState != .sent || message.actionState != .idle
+    }
+
+    @ViewBuilder
+    private var statusLabels: some View {
+        if message.deliveryState == .pending {
+            Text("Sending…")
+                .font(AppTheme.Typography.metadata)
+                .foregroundStyle(AppTheme.Colors.secondaryText)
+        } else if message.deliveryState == .failed {
+            Text("Failed")
+                .font(AppTheme.Typography.metadata)
+                .foregroundStyle(AppTheme.Colors.destructive)
+        }
+
+        switch message.actionState {
+        case let .pending(kind):
+            Text(pendingLabel(kind))
+                .font(AppTheme.Typography.metadata)
+                .foregroundStyle(AppTheme.Colors.secondaryText)
+        case .failed:
+            Text("Action failed")
+                .font(AppTheme.Typography.metadata)
+                .foregroundStyle(AppTheme.Colors.destructive)
+        case .idle:
+            EmptyView()
         }
     }
 
@@ -804,6 +838,21 @@ private struct ComposerView: View {
     let retryAttachmentUpload: (() -> Void)?
     let send: () -> Void
 
+    @State private var selection: TextSelection?
+
+    /// Return sends; Shift+Return or Option+Return inserts a line break at the
+    /// caret (or replaces the selection).
+    private func insertLineBreak() {
+        guard let selection, case let .selection(range) = selection.indices else {
+            draft.append("\n")
+            return
+        }
+        let offset = draft.distance(from: draft.startIndex, to: range.lowerBound)
+        draft.replaceSubrange(range, with: "\n")
+        let caret = draft.index(draft.startIndex, offsetBy: offset + 1)
+        self.selection = TextSelection(insertionPoint: caret)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: AppTheme.Spacing.small) {
             switch attachmentUploadState {
@@ -834,6 +883,7 @@ private struct ComposerView: View {
             TextField(
                 "Message \(conversationTitle)",
                 text: $draft,
+                selection: $selection,
                 axis: .vertical
             )
             .textFieldStyle(.plain)
@@ -841,6 +891,13 @@ private struct ComposerView: View {
             .lineLimit(1...6)
             .focused(isFocused)
             .disabled(isDisabled)
+            .onKeyPress(.return, phases: .down) { press in
+                guard press.modifiers.contains(.shift) || press.modifiers.contains(.option) else {
+                    return .ignored
+                }
+                insertLineBreak()
+                return .handled
+            }
             .onSubmit(send)
             .onExitCommand {
                 isFocused.wrappedValue = false

@@ -13,6 +13,19 @@ const MAX_URL_BYTES: usize = 4_096;
 const MAX_EMOJI_NAME_BYTES: usize = 128;
 const MAX_IMAGE_DIMENSION: u32 = 4_096;
 
+/// Emphasis applied to a run of inline content.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InlineStyle {
+    /// Bold text (`<strong>`).
+    Strong,
+    /// Italic text (`<em>`).
+    Emphasis,
+    /// Struck-through text (`<del>`).
+    Strikethrough,
+    /// Inline code (`<code>`); the content is a single text run.
+    Code,
+}
+
 /// Native inline content safe to cross the application bridge.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InlineContent {
@@ -39,13 +52,27 @@ pub enum InlineContent {
         /// Readable fallback value, normally `:name:`.
         value: String,
     },
+    /// Nested content with bold, italic, strikethrough or code styling.
+    Styled {
+        /// The applied emphasis.
+        style: InlineStyle,
+        /// Styled inline content.
+        content: Vec<InlineContent>,
+    },
 }
 
 /// Native block content produced from untrusted Zulip HTML.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ContentBlock {
-    /// One paragraph or heading.
+    /// One paragraph.
     Paragraph(Vec<InlineContent>),
+    /// A heading from level 1 (largest) to 6.
+    Heading {
+        /// Heading level, clamped to 1 through 6.
+        level: u8,
+        /// Inline values in display order.
+        content: Vec<InlineContent>,
+    },
     /// A nested quotation.
     Quote(Vec<ContentBlock>),
     /// An ordered or unordered list.
@@ -172,9 +199,14 @@ impl ContentParser {
                 "head" => Vec::new(),
                 "script" | "style" | "iframe" | "object" | "embed" | "template" | "svg"
                 | "math" => self.block(unsafe_block()),
-                "p" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
+                "p" => {
                     let inline = self.parse_inline_children(node, depth + 1);
                     self.block(ContentBlock::Paragraph(inline))
+                }
+                "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
+                    let level = element.name().as_bytes()[1] - b'0';
+                    let content = self.parse_inline_children(node, depth + 1);
+                    self.block(ContentBlock::Heading { level, content })
                 }
                 "blockquote" => {
                     let nested = self.parse_block_children(node, depth + 1);
@@ -404,10 +436,39 @@ impl ContentParser {
                     self.record_text(&alt);
                     vec![InlineContent::Text(alt)]
                 }
+                "strong" | "b" => self.styled(InlineStyle::Strong, node, depth),
+                "em" | "i" => self.styled(InlineStyle::Emphasis, node, depth),
+                "del" | "s" | "strike" => self.styled(InlineStyle::Strikethrough, node, depth),
+                "code" => {
+                    let value = self.descendant_text(node, depth + 1);
+                    self.record_text(&value);
+                    if value.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![InlineContent::Styled {
+                            style: InlineStyle::Code,
+                            content: vec![InlineContent::Text(value)],
+                        }]
+                    }
+                }
                 _ => self.parse_inline_children(node, depth + 1),
             },
             Node::Document | Node::Fragment => self.parse_inline_children(node, depth + 1),
             Node::Doctype(_) | Node::Comment(_) | Node::ProcessingInstruction(_) => Vec::new(),
+        }
+    }
+
+    fn styled(
+        &mut self,
+        style: InlineStyle,
+        node: NodeRef<'_, Node>,
+        depth: usize,
+    ) -> Vec<InlineContent> {
+        let content = self.parse_inline_children(node, depth + 1);
+        if content.is_empty() {
+            Vec::new()
+        } else {
+            vec![InlineContent::Styled { style, content }]
         }
     }
 
@@ -544,7 +605,10 @@ fn coalesce_text(inline: Vec<InlineContent>) -> Vec<InlineContent> {
 
 fn block_is_empty(block: &ContentBlock) -> bool {
     match block {
-        ContentBlock::Paragraph(inline) => inline.iter().all(|item| match item {
+        ContentBlock::Paragraph(inline)
+        | ContentBlock::Heading {
+            content: inline, ..
+        } => inline.iter().all(|item| match item {
             InlineContent::Text(value) => value.trim().is_empty(),
             _ => false,
         }),
@@ -588,7 +652,7 @@ fn readable_text_fallback(html: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ContentBlock, InlineContent, MAX_INPUT_BYTES, parse_zulip_html};
+    use super::{ContentBlock, InlineContent, InlineStyle, MAX_INPUT_BYTES, parse_zulip_html};
 
     #[test]
     fn parses_zulip_blocks_and_inline_semantics() {
@@ -684,6 +748,47 @@ mod tests {
             &unknown[0],
             ContentBlock::Unsupported { summary } if summary.contains("Readable cells")
         ));
+    }
+
+    #[test]
+    fn keeps_headings_and_inline_emphasis() {
+        let blocks = parse_zulip_html(
+            "<h2>Plan</h2><p>Use <strong>bold</strong>, <em>italic <del>gone</del></em> and \
+             <code>x &lt; y</code> with <a href=\"https://example.com\">a link</a>.</p>",
+        );
+        assert_eq!(
+            blocks[0],
+            ContentBlock::Heading {
+                level: 2,
+                content: vec![InlineContent::Text("Plan".to_owned())],
+            }
+        );
+        let ContentBlock::Paragraph(inline) = &blocks[1] else {
+            panic!("expected a paragraph");
+        };
+        assert!(inline.contains(&InlineContent::Styled {
+            style: InlineStyle::Strong,
+            content: vec![InlineContent::Text("bold".to_owned())],
+        }));
+        assert!(inline.contains(&InlineContent::Styled {
+            style: InlineStyle::Emphasis,
+            content: vec![
+                InlineContent::Text("italic ".to_owned()),
+                InlineContent::Styled {
+                    style: InlineStyle::Strikethrough,
+                    content: vec![InlineContent::Text("gone".to_owned())],
+                },
+            ],
+        }));
+        assert!(inline.contains(&InlineContent::Styled {
+            style: InlineStyle::Code,
+            content: vec![InlineContent::Text("x < y".to_owned())],
+        }));
+        assert!(
+            inline
+                .iter()
+                .any(|item| matches!(item, InlineContent::Link { label, .. } if label == "a link"))
+        );
     }
 
     #[test]

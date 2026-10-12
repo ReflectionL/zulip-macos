@@ -39,6 +39,8 @@ struct SidebarView: View {
     let openCommandPalette: () -> Void
     var startNewTopic: (ChannelSnapshot) -> Void = { _ in }
     var sessionControl: SidebarSessionControl?
+    var mediaLocalURLs: [String: String] = [:]
+    var requestMedia: ((String) -> Void)?
     @Environment(UpdateController.self) private var updates: UpdateController?
 
     var body: some View {
@@ -185,7 +187,10 @@ struct SidebarView: View {
                                 leading: {
                                     AvatarView(
                                         initials: directMessage.initials,
-                                        presence: directMessage.presence
+                                        presence: directMessage.presence,
+                                        avatarURL: directMessage.avatarURL,
+                                        mediaLocalURLs: mediaLocalURLs,
+                                        requestMedia: requestMedia
                                     )
                                 }
                             ) {
@@ -207,14 +212,16 @@ struct SidebarView: View {
 
     private var workspaceHeader: some View {
         HStack(spacing: AppTheme.Spacing.small) {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(AppTheme.Colors.accent)
-                .frame(width: 30, height: 30)
-                .overlay {
-                    Text(String(model.snapshot.organizationName.prefix(1)))
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(.white)
-                }
+            AvatarImage(
+                initials: String(model.snapshot.organizationName.prefix(1)),
+                remoteURL: model.snapshot.organizationIconURL,
+                size: 30,
+                cornerRadius: 8,
+                fallbackFill: AppTheme.Colors.accent,
+                fallbackForeground: .white,
+                mediaLocalURLs: mediaLocalURLs,
+                requestMedia: requestMedia
+            )
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(model.snapshot.organizationName)
@@ -235,11 +242,13 @@ struct SidebarView: View {
     private var profileRow: some View {
         HStack(spacing: AppTheme.Spacing.small) {
             HStack(spacing: AppTheme.Spacing.small) {
-                Text(model.snapshot.currentUserInitials)
-                    .font(.system(size: 10, weight: .semibold))
-                    .frame(width: 24, height: 24)
-                    .background(AppTheme.Colors.hover)
-                    .clipShape(Circle())
+                AvatarImage(
+                    initials: model.snapshot.currentUserInitials,
+                    remoteURL: model.snapshot.currentUserAvatarURL,
+                    size: 24,
+                    mediaLocalURLs: mediaLocalURLs,
+                    requestMedia: requestMedia
+                )
 
                 Text(model.snapshot.currentUserName)
                     .font(AppTheme.Typography.sidebar)
@@ -443,13 +452,18 @@ private extension SidebarRow where Leading == EmptyView {
 private struct AvatarView: View {
     let initials: String
     let presence: PresenceState
+    var avatarURL: String?
+    var mediaLocalURLs: [String: String] = [:]
+    var requestMedia: ((String) -> Void)?
 
     var body: some View {
-        Text(initials)
-            .font(.system(size: 7.5, weight: .semibold))
-            .frame(width: 18, height: 18)
-            .background(AppTheme.Colors.hover)
-            .clipShape(Circle())
+        AvatarImage(
+            initials: initials,
+            remoteURL: avatarURL,
+            size: 18,
+            mediaLocalURLs: mediaLocalURLs,
+            requestMedia: requestMedia
+        )
             .overlay(alignment: .bottomTrailing) {
                 Circle()
                     .fill(presenceColor)

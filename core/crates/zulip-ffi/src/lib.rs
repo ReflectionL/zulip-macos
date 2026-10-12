@@ -18,13 +18,14 @@ use tokio::{
 use zulip_core::{
     auth::{AuthenticatedAccount, AuthenticationClient, SecretString},
     content::{
-        ContentBlock as NativeContentBlock, InlineContent as NativeInlineContent, parse_zulip_html,
+        ContentBlock as NativeContentBlock, InlineContent as NativeInlineContent,
+        InlineStyle as NativeInlineStyle, parse_zulip_html,
     },
     database::{CacheDatabase, CachedAccount, CachedConversation, CachedSnapshot, DraftRecord},
     media::MediaClient,
     messages::{
         ConversationTarget, MessageClient, MessageFlag, MessageWriteOperation, OutgoingMessage,
-        TopicPropagation, TopicSummary,
+        PresenceStatus, TopicPropagation, TopicSummary,
     },
     sync::{
         EventQueueClient, MessageSummary, RecoveryPolicy, SyncCycle, SyncSession, SyncSnapshot,
@@ -275,6 +276,16 @@ pub enum CoreCommand {
         /// Number of newest messages, from 1 through 1000.
         limit: u16,
     },
+    /// Reads the locally cached copy of a conversation without touching the
+    /// network, so a view can show something while `OpenConversation` runs.
+    ///
+    /// Answers with `CachedConversationLoaded`, or with nothing when no copy exists.
+    LoadCachedConversation {
+        /// Correlates the response.
+        request_id: u64,
+        /// Stable account-scoped conversation.
+        key: CoreConversationKey,
+    },
     /// Loads a page ending immediately before a known message.
     LoadOlderMessages {
         /// Correlates the response.
@@ -435,6 +446,17 @@ pub enum CoreCommand {
         /// Server message identifiers.
         message_ids: Vec<i64>,
     },
+    /// Reports the user's own presence and fetches everyone else's.
+    ///
+    /// Failures are silent: presence is advisory and the next refresh retries.
+    RefreshPresence {
+        /// Correlates the response.
+        request_id: u64,
+        /// Client-owned account partition.
+        account_id: String,
+        /// Whether the app is in active use (otherwise reported as idle).
+        is_active: bool,
+    },
     /// Ends the current live account session and forgets its cached data.
     Disconnect {
         /// Correlates the response.
@@ -475,6 +497,7 @@ impl CoreCommand {
             | Self::SaveDraft { request_id, .. }
             | Self::LoadDrafts { request_id, .. }
             | Self::OpenConversation { request_id, .. }
+            | Self::LoadCachedConversation { request_id, .. }
             | Self::LoadOlderMessages { request_id, .. }
             | Self::SearchMessages { request_id, .. }
             | Self::OpenMessage { request_id, .. }
@@ -489,6 +512,7 @@ impl CoreCommand {
             | Self::UploadAttachment { request_id, .. }
             | Self::LoadMedia { request_id, .. }
             | Self::MarkRead { request_id, .. }
+            | Self::RefreshPresence { request_id, .. }
             | Self::Disconnect { request_id } => *request_id,
         }
     }
@@ -510,6 +534,36 @@ impl From<CoreMessageFlag> for MessageFlag {
             CoreMessageFlag::Starred => Self::Starred,
         }
     }
+}
+
+/// Derived online state of one user.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum CorePresenceStatus {
+    /// Recently active.
+    Active,
+    /// Connected but not recently active.
+    Idle,
+    /// No recent presence.
+    Offline,
+}
+
+impl From<PresenceStatus> for CorePresenceStatus {
+    fn from(status: PresenceStatus) -> Self {
+        match status {
+            PresenceStatus::Active => Self::Active,
+            PresenceStatus::Idle => Self::Idle,
+            PresenceStatus::Offline => Self::Offline,
+        }
+    }
+}
+
+/// One user's online state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct CorePresence {
+    /// Zulip user identifier.
+    pub user_id: i64,
+    /// Derived state.
+    pub status: CorePresenceStatus,
 }
 
 /// One-time API credential returned for immediate Keychain persistence.
@@ -538,6 +592,8 @@ pub struct CoreUser {
     pub is_active: bool,
     /// Bot account state.
     pub is_bot: bool,
+    /// Avatar image location, absolute or relative to the server.
+    pub avatar_url: Option<String>,
 }
 
 /// Channel projection in a bridge snapshot.
@@ -618,6 +674,26 @@ pub enum CoreInlineContent {
         /// Readable fallback value.
         value: String,
     },
+    /// Nested content with bold, italic, strikethrough or code styling.
+    Styled {
+        /// The applied emphasis.
+        style: CoreInlineStyle,
+        /// Styled inline content.
+        content: Vec<CoreInlineContent>,
+    },
+}
+
+/// Emphasis applied to a run of inline content.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum CoreInlineStyle {
+    /// Bold text.
+    Strong,
+    /// Italic text.
+    Emphasis,
+    /// Struck-through text.
+    Strikethrough,
+    /// Inline code.
+    Code,
 }
 
 /// One list item containing recursively nested native blocks.
@@ -630,8 +706,15 @@ pub struct CoreContentListItem {
 /// Sanitized native block content crossing the application bridge.
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Enum)]
 pub enum CoreContentBlock {
-    /// Paragraph or heading content.
+    /// Paragraph content.
     Paragraph {
+        /// Inline values in display order.
+        content: Vec<CoreInlineContent>,
+    },
+    /// Heading content.
+    Heading {
+        /// Heading level from 1 (largest) to 6.
+        level: u8,
         /// Inline values in display order.
         content: Vec<CoreInlineContent>,
     },
@@ -696,6 +779,8 @@ pub struct CoreSnapshot {
     pub topics: Vec<CoreTopic>,
     /// Messages sorted by identifier.
     pub messages: Vec<CoreMessage>,
+    /// Organization icon location, absolute or relative to the server.
+    pub realm_icon_url: Option<String>,
 }
 
 /// Newest message page for one stable conversation.
@@ -771,6 +856,13 @@ pub enum CoreEvent {
         /// Originating request.
         request_id: u64,
         /// Loaded page.
+        page: CoreConversationPage,
+    },
+    /// The cached copy of a conversation, which may be older than the server's.
+    CachedConversationLoaded {
+        /// Originating request.
+        request_id: u64,
+        /// Cached page.
         page: CoreConversationPage,
     },
     /// An older page loaded for merging ahead of the current timeline.
@@ -931,6 +1023,13 @@ pub enum CoreEvent {
         full_name: String,
         /// Last known immutable navigation state.
         snapshot: CoreSnapshot,
+    },
+    /// Fresh online states for users known to the server.
+    PresenceUpdated {
+        /// Active account partition.
+        account_id: String,
+        /// Users sorted by identifier.
+        presences: Vec<CorePresence>,
     },
     /// Polling succeeded again after one or more scheduled retries.
     SyncResumed {
@@ -1163,6 +1262,11 @@ async fn handle_command(
             key,
             limit,
         } => open_conversation(request_id, key, limit, account.as_ref(), cache, event_sink).await,
+        CoreCommand::LoadCachedConversation { request_id, key } => {
+            if let Some(page) = cached_conversation_page(&key, cache) {
+                event_sink.handle_event(CoreEvent::CachedConversationLoaded { request_id, page });
+            }
+        }
         CoreCommand::LoadOlderMessages {
             request_id,
             key,
@@ -1379,6 +1483,11 @@ async fn handle_command(
             account.as_ref(),
             event_sink,
         ),
+        CoreCommand::RefreshPresence {
+            account_id,
+            is_active,
+            ..
+        } => refresh_presence(account_id, is_active, account.as_ref(), event_sink),
         CoreCommand::MarkRead {
             request_id,
             account_id,
@@ -1423,6 +1532,33 @@ fn upload_attachment(
                 markdown: uploaded.markdown,
             }),
             Err(error) => emit_error(Some(request_id), error, &event_sink),
+        }
+    });
+}
+
+fn refresh_presence(
+    account_id: String,
+    is_active: bool,
+    account: Option<&AccountSession>,
+    event_sink: &Arc<dyn CoreEventSink>,
+) {
+    let Some(session) = account.filter(|item| item.account_id == account_id) else {
+        return;
+    };
+    let messages = Arc::clone(&session.messages);
+    let event_sink = Arc::clone(event_sink);
+    tokio::spawn(async move {
+        if let Ok(presences) = messages.update_presence(is_active).await {
+            event_sink.handle_event(CoreEvent::PresenceUpdated {
+                account_id,
+                presences: presences
+                    .into_iter()
+                    .map(|presence| CorePresence {
+                        user_id: presence.user_id,
+                        status: presence.status.into(),
+                    })
+                    .collect(),
+            });
         }
     });
 }
@@ -1767,6 +1903,22 @@ async fn open_conversation(
     }
 }
 
+/// Reads the cached copy of `key`, if any.
+fn cached_conversation_page(
+    key: &CoreConversationKey,
+    cache: &CacheHandle,
+) -> Option<CoreConversationPage> {
+    let cached = cache
+        .with(|database| database.conversation(key.account_id(), &key.cache_key()))
+        .flatten()?;
+    Some(CoreConversationPage {
+        key: key.clone(),
+        messages: cached.messages.into_iter().map(Into::into).collect(),
+        found_oldest: cached.found_oldest,
+        found_newest: cached.found_newest,
+    })
+}
+
 /// Emits the cached copy of `key`; returns whether one existed.
 fn emit_cached_conversation(
     request_id: u64,
@@ -1774,21 +1926,10 @@ fn emit_cached_conversation(
     cache: &CacheHandle,
     event_sink: &Arc<dyn CoreEventSink>,
 ) -> bool {
-    let Some(cached) = cache
-        .with(|database| database.conversation(key.account_id(), &key.cache_key()))
-        .flatten()
-    else {
+    let Some(page) = cached_conversation_page(key, cache) else {
         return false;
     };
-    event_sink.handle_event(CoreEvent::ConversationOpened {
-        request_id,
-        page: CoreConversationPage {
-            key: key.clone(),
-            messages: cached.messages.into_iter().map(Into::into).collect(),
-            found_oldest: cached.found_oldest,
-            found_newest: cached.found_newest,
-        },
-    });
+    event_sink.handle_event(CoreEvent::ConversationOpened { request_id, page });
     true
 }
 
@@ -2223,6 +2364,7 @@ fn cached_snapshot(snapshot: &SyncSnapshot, topics: &[TopicSummary]) -> CachedSn
         channels: snapshot.channels.clone(),
         topics: topics.to_vec(),
         messages: snapshot.messages.clone(),
+        realm_icon_url: snapshot.realm_icon_url.clone(),
     }
 }
 
@@ -2319,6 +2461,7 @@ fn load_cached_session(
         users: cached.users,
         channels: cached.channels,
         messages: cached.messages,
+        realm_icon_url: cached.realm_icon_url,
     };
     event_sink.handle_event(CoreEvent::CachedSessionLoaded {
         request_id,
@@ -2361,6 +2504,7 @@ impl From<UserSummary> for CoreUser {
             email: user.email,
             is_active: user.is_active,
             is_bot: user.is_bot,
+            avatar_url: user.avatar_url,
         }
     }
 }
@@ -2406,6 +2550,15 @@ impl From<NativeInlineContent> for CoreInlineContent {
                 user_id,
             },
             NativeInlineContent::Emoji { name, value } => Self::Emoji { name, value },
+            NativeInlineContent::Styled { style, content } => Self::Styled {
+                style: match style {
+                    NativeInlineStyle::Strong => CoreInlineStyle::Strong,
+                    NativeInlineStyle::Emphasis => CoreInlineStyle::Emphasis,
+                    NativeInlineStyle::Strikethrough => CoreInlineStyle::Strikethrough,
+                    NativeInlineStyle::Code => CoreInlineStyle::Code,
+                },
+                content: content.into_iter().map(Self::from).collect(),
+            },
         }
     }
 }
@@ -2414,6 +2567,10 @@ impl From<NativeContentBlock> for CoreContentBlock {
     fn from(block: NativeContentBlock) -> Self {
         match block {
             NativeContentBlock::Paragraph(content) => Self::Paragraph {
+                content: content.into_iter().map(CoreInlineContent::from).collect(),
+            },
+            NativeContentBlock::Heading { level, content } => Self::Heading {
+                level,
                 content: content.into_iter().map(CoreInlineContent::from).collect(),
             },
             NativeContentBlock::Quote(blocks) => Self::Quote {
@@ -2463,6 +2620,7 @@ impl CoreSnapshot {
                 .collect(),
             topics: topics.iter().cloned().map(Into::into).collect(),
             messages: snapshot.messages.into_iter().map(Into::into).collect(),
+            realm_icon_url: snapshot.realm_icon_url,
         }
     }
 }
@@ -2578,6 +2736,7 @@ mod tests {
                 users: Vec::new(),
                 channels: Vec::new(),
                 messages: Vec::new(),
+                realm_icon_url: Some("https://cdn.example.com/icon.png".to_owned()),
             },
             &[TopicSummary {
                 stream_id: 5,
@@ -2587,6 +2746,10 @@ mod tests {
         );
         assert_eq!(snapshot.topics.len(), 1);
         assert_eq!(snapshot.topics[0].stream_id, 5);
+        assert_eq!(
+            snapshot.realm_icon_url.as_deref(),
+            Some("https://cdn.example.com/icon.png")
+        );
         assert_eq!(snapshot.topics[0].name, "macOS");
         assert_eq!(snapshot.topics[0].max_message_id, 44);
     }
@@ -3210,6 +3373,22 @@ mod tests {
         assert_eq!(page.messages.len(), 1);
         assert_eq!(page.messages[0].message_id, 50);
         assert!(page.found_oldest);
+
+        offline.submit(CoreCommand::LoadCachedConversation {
+            request_id: 47,
+            key: page.key.clone(),
+        });
+        let cached = wait_for_event(&offline_receiver, &offline_sink, |event| {
+            matches!(
+                event,
+                CoreEvent::CachedConversationLoaded { request_id: 47, .. }
+            )
+        });
+        assert!(matches!(
+            cached,
+            CoreEvent::CachedConversationLoaded { page, .. }
+                if page.messages.len() == 1 && page.messages[0].message_id == 50
+        ));
 
         let draft_key = CoreConversationKey::Topic {
             account_id: "account-search".to_owned(),
