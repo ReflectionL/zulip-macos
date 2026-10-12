@@ -153,10 +153,13 @@ public struct LiveSnapshot: Equatable, Sendable {
 public struct LivePresence: Equatable, Sendable {
     public let userID: Int64
     public let state: PresenceState
+    /// When the user was last active, if the server knows.
+    public let lastActiveAt: Date?
 
-    public init(userID: Int64, state: PresenceState) {
+    public init(userID: Int64, state: PresenceState, lastActiveAt: Date? = nil) {
         self.userID = userID
         self.state = state
+        self.lastActiveAt = lastActiveAt
     }
 }
 
@@ -405,6 +408,7 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
         isPrivate: Bool,
         memberIDs: [Int64]
     )
+    case renameChannel(requestID: UInt64, accountID: String, streamID: Int64, newName: String)
     case disconnect(requestID: UInt64)
     case loadCachedSession(requestID: UInt64, accountID: String)
     case saveDraft(requestID: UInt64, key: ConversationKey, content: String)
@@ -439,6 +443,7 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
              let .refreshPresence(requestID, _, _),
              let .fetchMessageSource(requestID, _, _),
              let .createChannel(requestID, _, _, _, _, _),
+             let .renameChannel(requestID, _, _, _),
              let .disconnect(requestID),
              let .loadCachedSession(requestID, _),
              let .saveDraft(requestID, _, _),
@@ -493,6 +498,8 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
             "BridgeCommand.fetchMessageSource"
         case .createChannel:
             "BridgeCommand.createChannel"
+        case .renameChannel:
+            "BridgeCommand.renameChannel"
         case .disconnect:
             "BridgeCommand.disconnect"
         case .loadCachedSession:
@@ -659,6 +666,13 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
                 isPrivate: isPrivate,
                 memberIds: memberIDs
             )
+        case let .renameChannel(requestID, accountID, streamID, newName):
+            .renameChannel(
+                requestId: requestID,
+                accountId: accountID,
+                streamId: streamID,
+                newName: newName
+            )
         case let .fetchMessageSource(requestID, accountID, messageID):
             .fetchMessageSource(
                 requestId: requestID,
@@ -732,6 +746,7 @@ public enum BridgeEvent:
     case messagesMarkedRead(requestID: UInt64, messageIDs: [Int64])
     case messageSourceLoaded(requestID: UInt64, messageID: Int64, content: String)
     case channelCreated(requestID: UInt64, name: String)
+    case channelRenamed(requestID: UInt64, streamID: Int64, name: String)
     case retryScheduled(accountID: String, delayMilliseconds: UInt64)
     case syncResumed(accountID: String)
     case presenceUpdated(accountID: String, presences: [LivePresence])
@@ -760,6 +775,7 @@ public enum BridgeEvent:
              let .messagesMarkedRead(requestID, _),
              let .messageSourceLoaded(requestID, _, _),
              let .channelCreated(requestID, _),
+             let .channelRenamed(requestID, _, _),
              let .disconnected(requestID):
             requestID
         case let .failed(requestID, _):
@@ -813,6 +829,8 @@ public enum BridgeEvent:
             "Message source loaded"
         case .channelCreated:
             "Channel created"
+        case .channelRenamed:
+            "Channel renamed"
         case .retryScheduled:
             "Retry scheduled"
         case .syncResumed:
@@ -1269,6 +1287,8 @@ private extension BridgeEvent {
             )
         case let .channelCreated(requestID, name):
             self = .channelCreated(requestID: requestID, name: name)
+        case let .channelRenamed(requestID, streamId, name):
+            self = .channelRenamed(requestID: requestID, streamID: streamId, name: name)
         case let .messageSourceLoaded(requestID, messageID, content):
             self = .messageSourceLoaded(
                 requestID: requestID,
@@ -1285,8 +1305,14 @@ private extension BridgeEvent {
         case let .presenceUpdated(accountID, presences):
             self = .presenceUpdated(
                 accountID: accountID,
-                presences: presences.map {
-                    LivePresence(userID: $0.userId, state: PresenceState($0.status))
+                presences: presences.map { presence in
+                    LivePresence(
+                        userID: presence.userId,
+                        state: PresenceState(presence.status),
+                        lastActiveAt: presence.lastActiveAt.map { seconds in
+                            Date(timeIntervalSince1970: TimeInterval(seconds))
+                        }
+                    )
                 }
             )
         case let .disconnected(requestID):

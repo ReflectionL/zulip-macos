@@ -393,12 +393,16 @@ impl ContentParser {
                     }
                 }
                 "span" if is_emoji(element) => {
-                    let value = self.descendant_text(node, depth + 1);
-                    let value = if value.is_empty() {
-                        element.attr("alt").unwrap_or(":emoji:").to_owned()
-                    } else {
-                        value
-                    };
+                    // Zulip renders `:wave:` as `<span class="emoji emoji-1f44b">:wave:</span>`,
+                    // so the glyph itself comes from the class, not the text.
+                    let value = unicode_emoji(element).unwrap_or_else(|| {
+                        let text = self.descendant_text(node, depth + 1);
+                        if text.is_empty() {
+                            element.attr("alt").unwrap_or(":emoji:").to_owned()
+                        } else {
+                            text
+                        }
+                    });
                     let name = emoji_name(element, &value);
                     self.record_text(&value);
                     vec![InlineContent::Emoji { name, value }]
@@ -540,6 +544,19 @@ fn image_dimensions(element: &Element) -> (Option<u32>, Option<u32>) {
 
 fn is_emoji(element: &Element) -> bool {
     has_class(element, "emoji")
+}
+
+/// The Unicode glyph named by an `emoji-1f44b` / `emoji-1f468-200d-1f4bb` class.
+fn unicode_emoji(element: &Element) -> Option<String> {
+    let classes = element.attr("class")?;
+    classes.split_whitespace().find_map(|class| {
+        let code = class.strip_prefix("emoji-")?;
+        let glyph = code
+            .split('-')
+            .map(|part| u32::from_str_radix(part, 16).ok().and_then(char::from_u32))
+            .collect::<Option<String>>()?;
+        (!glyph.is_empty()).then_some(glyph)
+    })
 }
 
 fn emoji_name(element: &Element, value: &str) -> String {
@@ -792,6 +809,21 @@ mod tests {
     }
 
     #[test]
+    fn builds_emoji_glyphs_from_codepoint_classes() {
+        let blocks = parse_zulip_html(
+            r#"<p><span class="emoji emoji-1f468-200d-1f4bb" title="technologist">:technologist:</span></p>"#,
+        );
+        assert!(matches!(
+            &blocks[0],
+            ContentBlock::Paragraph(content)
+                if content.iter().any(|item| matches!(
+                    item,
+                    InlineContent::Emoji { value, .. } if value == "\u{1f468}\u{200d}\u{1f4bb}"
+                ))
+        ));
+    }
+
+    #[test]
     fn parses_current_zulip_emoji_code_and_image_markup() {
         let blocks = parse_zulip_html(
             r#"<p><span aria-label="waving hand" class="emoji emoji-1f44b"
@@ -815,7 +847,7 @@ mod tests {
                 if content.iter().any(|item| matches!(
                     item,
                     InlineContent::Emoji { name, value }
-                        if name == "wave" && value == ":wave:"
+                        if name == "wave" && value == "\u{1f44b}"
                 )) && content.iter().any(|item| matches!(
                     item,
                     InlineContent::Emoji { name, value }

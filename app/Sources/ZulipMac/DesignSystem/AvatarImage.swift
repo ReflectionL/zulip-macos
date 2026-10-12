@@ -1,6 +1,25 @@
 import AppKit
 import SwiftUI
 
+/// Decoded avatars kept in memory, so a row that is rebuilt (scrolling, switching
+/// conversations) paints its picture at once instead of flashing the initials.
+@MainActor
+enum AvatarImageCache {
+    private static let cache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 300
+        return cache
+    }()
+
+    static func image(for localURL: String?) -> NSImage? {
+        localURL.flatMap { cache.object(forKey: $0 as NSString) }
+    }
+
+    static func store(_ image: NSImage, for localURL: String) {
+        cache.setObject(image, forKey: localURL as NSString)
+    }
+}
+
 /// A rounded avatar backed by a file in the Rust media cache.
 ///
 /// The image is requested on demand through `requestMedia`; until it arrives,
@@ -23,8 +42,8 @@ struct AvatarImage: View {
 
     var body: some View {
         ZStack {
-            if let image {
-                Image(nsImage: image)
+            if let displayed = image ?? AvatarImageCache.image(for: localURL) {
+                Image(nsImage: displayed)
                     .resizable()
                     .scaledToFill()
             } else {
@@ -54,8 +73,14 @@ struct AvatarImage: View {
                 requestMedia?(remoteURL)
                 return
             }
+            if AvatarImageCache.image(for: localURL) != nil {
+                return
+            }
             let decoded = await NativeImageDecoder.load(fileURL)
             guard !Task.isCancelled else { return }
+            if let decodedImage = decoded.image {
+                AvatarImageCache.store(decodedImage, for: localURL)
+            }
             image = decoded.image
         }
     }

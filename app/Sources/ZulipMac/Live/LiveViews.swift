@@ -15,6 +15,9 @@ struct AppRootView: View {
                 }
             }
         }
+        .overlay {
+            InterfaceScaleShortcuts()
+        }
         .sheet(isPresented: $isLoginPresented) {
             LiveLoginView(session: session)
         }
@@ -179,6 +182,7 @@ private struct LiveWindowView: View {
     @State private var suppressedSelectionOpen: ConversationKey?
     @State private var topicSheet: LiveTopicSheetContext?
     @State private var isCreatingChannel = false
+    @State private var channelRenameTarget: ChannelSnapshot?
 
     init(session: LiveSessionViewModel) {
         self.session = session
@@ -220,6 +224,12 @@ private struct LiveWindowView: View {
                         topicSheet = .new(channel: channel)
                     },
                     createChannel: { isCreatingChannel = true },
+                    renameChannel: { channel in
+                        channelRenameTarget = channel
+                    },
+                    presenceDescription: { userID in
+                        session.presenceDescription(forUserID: userID)
+                    },
                     sessionControl: SidebarSessionControl(
                         action: .disconnect,
                         perform: session.disconnect
@@ -347,6 +357,11 @@ private struct LiveWindowView: View {
                 isCreatingChannel = false
             }
         }
+        .sheet(item: $channelRenameTarget) { channel in
+            RenameChannelSheet(session: session, channel: channel) {
+                channelRenameTarget = nil
+            }
+        }
         .sheet(item: $topicSheet) { context in
             LiveTopicActionSheet(
                 session: session,
@@ -381,6 +396,10 @@ private struct LiveWindowView: View {
                 },
                 openSearch: presentMessageSearch,
                 renameTopic: renameAction(for: page),
+                renameChannel: renameChannelAction(for: page),
+                openParent: parentAction(for: page),
+                headerStatus: session.presenceDescription(for: page.key),
+                composerHint: composerHint(for: page),
                 moveMessage: { message in
                     topicSheet = .move(message: message)
                 },
@@ -435,6 +454,8 @@ private struct LiveWindowView: View {
                 isOffline: true,
                 reconnect: session.reconnectNow,
                 openSearch: presentMessageSearch,
+                openParent: parentAction(for: page),
+                headerStatus: session.presenceDescription(for: page.key),
                 initialDraft: session.draft(for: page.key),
                 draftChanged: { session.updateDraft($0, for: page.key) }
             )
@@ -495,6 +516,38 @@ private struct LiveWindowView: View {
         return {
             topicSheet = .rename(key: page.key, anchorMessageID: anchor)
         }
+    }
+
+    /// Renaming a channel is offered while viewing the channel itself.
+    private func renameChannelAction(for page: ConversationPage) -> (() -> Void)? {
+        guard case let .channel(_, streamID) = page.key,
+              let channel = session.sidebarSnapshot?.channels.first(where: {
+                  $0.streamID == streamID
+              })
+        else {
+            return nil
+        }
+        return {
+            channelRenameTarget = channel
+        }
+    }
+
+    /// The channel part of a topic's breadcrumb opens the channel.
+    private func parentAction(for page: ConversationPage) -> (() -> Void)? {
+        guard case let .topic(accountID, streamID, _) = page.key else {
+            return nil
+        }
+        return {
+            navigation.select(ConversationKey.channel(accountID: accountID, streamID: streamID))
+        }
+    }
+
+    /// Writing in a channel without picking a topic goes to its general chat.
+    private func composerHint(for page: ConversationPage) -> String? {
+        guard case .channel = page.key else {
+            return nil
+        }
+        return TopicName.generalChat
     }
 
     private func beginTopic(_ streamID: Int64, _ name: String) {
@@ -583,7 +636,7 @@ private struct LiveTopicActionSheet: View {
             if !suggestions.isEmpty, case .move = context {
                 Menu("Choose an existing topic") {
                     ForEach(suggestions) { topic in
-                        Button(topic.name.isEmpty ? "(no topic)" : topic.name) {
+                        Button(TopicName.display(topic.name)) {
                             topicName = topic.name
                         }
                     }

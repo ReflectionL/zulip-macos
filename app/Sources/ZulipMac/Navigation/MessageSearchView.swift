@@ -85,7 +85,7 @@ struct MessageSearchView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
         }
         .padding(.horizontal, AppTheme.Spacing.large)
-        .frame(height: 52)
+        .frame(minHeight: 52)
     }
 
     @ViewBuilder
@@ -161,7 +161,7 @@ struct MessageSearchView: View {
         .font(AppTheme.Typography.metadata)
         .foregroundStyle(AppTheme.Colors.tertiaryText)
         .padding(.horizontal, AppTheme.Spacing.large)
-        .frame(height: 34)
+        .frame(minHeight: 34)
     }
 
     private var results: [MessageSearchResult] {
@@ -211,7 +211,7 @@ private struct MessageSearchRow: View {
         Button(action: action) {
             HStack(alignment: .top, spacing: AppTheme.Spacing.medium) {
                 Image(systemName: result.systemImage)
-                    .font(.system(size: 13, weight: .medium))
+                    .font(AppTheme.Typography.scaled(13, weight: .medium))
                     .foregroundStyle(AppTheme.Colors.secondaryText)
                     .frame(width: 20, height: 20)
 
@@ -246,7 +246,7 @@ private struct MessageSearchRow: View {
 
                 if isHighlighted {
                     Image(systemName: "return")
-                        .font(.system(size: 10))
+                        .font(AppTheme.Typography.scaled(10))
                         .foregroundStyle(AppTheme.Colors.tertiaryText)
                         .padding(.top, 4)
                 }

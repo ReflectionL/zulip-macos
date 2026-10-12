@@ -267,6 +267,13 @@ public struct MessageViewData: Identifiable, Equatable, Sendable {
     public var deliveryState: MessageDeliveryState
     public var actionState: MessageActionState
     public var senderAvatarURL: String?
+    /// Identity of the timeline row. It equals `id` except for a sent message whose
+    /// server copy replaced its local echo: the copy keeps the echo's row so the
+    /// row updates in place instead of being torn down and rebuilt.
+    public var rowID: Int64
+    /// A local echo whose final rendering belongs to the server (the text uses
+    /// Markdown), so the timeline shows a placeholder until the server copy arrives.
+    public var isProvisional: Bool
 
     public init(
         id: Int64,
@@ -286,9 +293,12 @@ public struct MessageViewData: Identifiable, Equatable, Sendable {
         isRead: Bool = true,
         deliveryState: MessageDeliveryState = .sent,
         actionState: MessageActionState = .idle,
-        senderAvatarURL: String? = nil
+        senderAvatarURL: String? = nil,
+        isProvisional: Bool = false
     ) {
         self.id = id
+        self.rowID = id
+        self.isProvisional = isProvisional
         self.accountID = accountID
         self.conversationKey = conversationKey
         self.senderID = senderID

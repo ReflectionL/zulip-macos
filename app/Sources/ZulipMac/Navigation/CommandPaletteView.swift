@@ -28,7 +28,7 @@ struct CommandPaletteView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
             }
             .padding(.horizontal, AppTheme.Spacing.large)
-            .frame(height: 52)
+            .frame(minHeight: 52)
 
             Divider()
 
@@ -72,7 +72,7 @@ struct CommandPaletteView: View {
             .font(AppTheme.Typography.metadata)
             .foregroundStyle(AppTheme.Colors.tertiaryText)
             .padding(.horizontal, AppTheme.Spacing.large)
-            .frame(height: 34)
+            .frame(minHeight: 34)
         }
         .frame(width: 560)
         .elevatedSurface(radius: 14)
@@ -127,7 +127,7 @@ private struct CommandPaletteRow: View {
         Button(action: action) {
             HStack(spacing: AppTheme.Spacing.medium) {
                 Image(systemName: destination.systemImage)
-                    .font(.system(size: 13, weight: .medium))
+                    .font(AppTheme.Typography.scaled(13, weight: .medium))
                     .foregroundStyle(AppTheme.Colors.secondaryText)
                     .frame(width: 20)
 
@@ -144,12 +144,12 @@ private struct CommandPaletteRow: View {
 
                 if isHighlighted {
                     Image(systemName: "return")
-                        .font(.system(size: 10))
+                        .font(AppTheme.Typography.scaled(10))
                         .foregroundStyle(AppTheme.Colors.tertiaryText)
                 }
             }
             .padding(.horizontal, AppTheme.Spacing.medium)
-            .frame(height: 46)
+            .frame(minHeight: 46)
             .contentShape(Rectangle())
             .background {
                 RoundedRectangle(

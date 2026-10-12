@@ -140,6 +140,13 @@ enum ChannelCreationState: Equatable, Sendable {
     case created(name: String)
 }
 
+enum ChannelRenameState: Equatable, Sendable {
+    case idle
+    case renaming
+    case failed(message: String)
+    case renamed(name: String)
+}
+
 /// A message whose Markdown source is being fetched to quote or forward it.
 private struct PendingMessageSource: Sendable {
     enum Purpose: Sendable {
@@ -173,7 +180,7 @@ final class LiveSessionViewModel {
     private static let lastServerURLKey = "lastAccount.serverURL"
     private static let lastEmailKey = "lastAccount.email"
     static let defaultServerURL = ""
-    private static let conversationPageSize: UInt16 = 10
+    private static let conversationPageSize: UInt16 = 50
     private static let searchResultLimit: UInt16 = 20
     private static let searchContextRadius: UInt16 = 10
 
@@ -223,6 +230,9 @@ final class LiveSessionViewModel {
     @ObservationIgnored private var recentPageOrder: [ConversationKey] = []
     private static let recentPageLimit = 24
     @ObservationIgnored private var presenceStates: [Int64: PresenceState] = [:]
+    @ObservationIgnored private var lastActiveDates: [Int64: Date] = [:]
+    /// Bumps whenever presence is refreshed, so views showing it redraw.
+    private(set) var presenceRevision = 0
     @ObservationIgnored private var presenceTask: Task<Void, Never>?
     private(set) var drafts: [ConversationKey: String] = [:]
     @ObservationIgnored private var draftSaveTasks: [ConversationKey: Task<Void, Never>] = [:]
@@ -241,6 +251,8 @@ final class LiveSessionViewModel {
     /// People who can be added to a new channel (everyone active except the user).
     private(set) var channelMemberCandidates: [MentionCandidate] = []
     private(set) var channelCreationState = ChannelCreationState.idle
+    private(set) var channelRenameState = ChannelRenameState.idle
+    @ObservationIgnored private var channelRenameRequestID: UInt64?
     private var messageActionsByRequestID: [UInt64: SubmittedMessageAction] = [:]
     private var failedMessageActions: [Int64: MessageAction] = [:]
     private var sendsByRequestID: [UInt64: PendingSend] = [:]
@@ -758,6 +770,19 @@ final class LiveSessionViewModel {
                     localID: localID
                 )
             )
+        case let .channel(_, streamID):
+            // Writing in a channel without picking a topic goes to its default
+            // topic, which Zulip stores as an empty name ("general chat").
+            client.submit(
+                .sendChannelMessage(
+                    requestID: id,
+                    accountID: identity.accountID,
+                    streamID: streamID,
+                    topic: "",
+                    content: trimmed,
+                    localID: localID
+                )
+            )
         case let .directMessage(_, recipientIDs):
             client.submit(
                 .sendDirectMessage(
@@ -962,6 +987,79 @@ final class LiveSessionViewModel {
         channelCreationState = .idle
     }
 
+    /// Renames a channel. Whether the user may is the server's call; its refusal is
+    /// shown in the rename sheet.
+    func renameChannel(streamID: Int64, to newName: String) {
+        guard let identity else {
+            return
+        }
+        let name = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty,
+              name.count <= 60,
+              !name.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
+        else {
+            channelRenameState = .failed(message: "Enter a channel name of up to 60 characters.")
+            return
+        }
+        guard let current = sidebarSnapshot?.channels.first(where: { $0.streamID == streamID }) else {
+            channelRenameState = .failed(message: "This channel is no longer available.")
+            return
+        }
+        if current.name == name {
+            channelRenameState = .failed(message: "Enter a different name.")
+            return
+        }
+        if sidebarSnapshot?.channels.contains(where: {
+            $0.streamID != streamID
+                && $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame
+        }) == true {
+            channelRenameState = .failed(message: "A channel named “\(name)” already exists.")
+            return
+        }
+        if case .renaming = channelRenameState {
+            return
+        }
+        let id = nextRequestID()
+        channelRenameRequestID = id
+        channelRenameState = .renaming
+        client.submit(
+            .renameChannel(
+                requestID: id,
+                accountID: identity.accountID,
+                streamID: streamID,
+                newName: name
+            )
+        )
+    }
+
+    func resetChannelRename() {
+        channelRenameRequestID = nil
+        channelRenameState = .idle
+    }
+
+    /// Whether someone is online, or how long ago they were last active.
+    func presenceDescription(forUserID userID: Int64) -> String? {
+        _ = presenceRevision
+        guard userID != identity?.userID else {
+            return nil
+        }
+        return PresenceDescription.text(
+            state: presenceStates[userID] ?? .offline,
+            lastActive: lastActiveDates[userID]
+        )
+    }
+
+    /// The header status of a one-to-one conversation.
+    func presenceDescription(for key: ConversationKey) -> String? {
+        guard case let .directMessage(_, recipientIDs) = key,
+              recipientIDs.count == 1,
+              let userID = recipientIDs.first
+        else {
+            return nil
+        }
+        return presenceDescription(forUserID: userID)
+    }
+
     func retryMessageAction(for messageID: Int64) {
         guard let action = failedMessageActions[messageID] else {
             return
@@ -986,6 +1084,17 @@ final class LiveSessionViewModel {
                     accountID: send.key.accountID,
                     streamID: streamID,
                     topic: topic,
+                    content: send.content,
+                    localID: send.localID
+                )
+            )
+        case let .channel(_, streamID):
+            client.submit(
+                .sendChannelMessage(
+                    requestID: id,
+                    accountID: send.key.accountID,
+                    streamID: streamID,
+                    topic: "",
                     content: send.content,
                     localID: send.localID
                 )
@@ -1315,6 +1424,14 @@ final class LiveSessionViewModel {
             channelCreationState = .created(name: name)
             notice = "Created channel “\(name)”."
 
+        case let .channelRenamed(requestID, _, name):
+            guard channelRenameRequestID == requestID else {
+                return
+            }
+            channelRenameRequestID = nil
+            channelRenameState = .renamed(name: name)
+            notice = "Renamed the channel to “\(name)”."
+
         case let .messageSourceLoaded(requestID, _, source):
             guard let pending = messageSourceRequests.removeValue(forKey: requestID),
                   identity?.accountID == pending.message.accountID
@@ -1434,10 +1551,17 @@ final class LiveSessionViewModel {
                 modifyLoadedMessage(send.localMessageID) { value in
                     value.deliveryState = .failed
                 }
-                notice = "Message could not be sent. You can retry it."
+                notice = "Message could not be sent: \(message). You can retry it."
             } else if let requestID, channelCreationRequestID == requestID {
                 channelCreationRequestID = nil
                 channelCreationState = .failed(
+                    message: message.contains("CHANNEL_ALREADY_EXISTS")
+                        ? "A channel with this name already exists."
+                        : message
+                )
+            } else if let requestID, channelRenameRequestID == requestID {
+                channelRenameRequestID = nil
+                channelRenameState = .failed(
                     message: message.contains("CHANNEL_ALREADY_EXISTS")
                         ? "A channel with this name already exists."
                         : message
@@ -1493,6 +1617,7 @@ final class LiveSessionViewModel {
         presenceTask?.cancel()
         presenceTask = nil
         presenceStates = [:]
+        lastActiveDates = [:]
         cachedPlaceholderKey = nil
         recentPages = [:]
         recentPageOrder = []
@@ -1614,6 +1739,13 @@ final class LiveSessionViewModel {
             presences.map { ($0.userID, $0.state) },
             uniquingKeysWith: { _, latest in latest }
         )
+        lastActiveDates = Dictionary(
+            presences.compactMap { presence in
+                presence.lastActiveAt.map { (presence.userID, $0) }
+            },
+            uniquingKeysWith: { _, latest in latest }
+        )
+        presenceRevision += 1
         guard let sidebar = sidebarSnapshot else {
             return
         }
@@ -1892,7 +2024,17 @@ final class LiveSessionViewModel {
         }
         resolved.keys.forEach { confirmedEchoes.removeValue(forKey: $0) }
         let localIDs = Set(resolved.values)
-        return messages.filter { !localIDs.contains($0.id) }
+        return messages
+            .filter { !localIDs.contains($0.id) }
+            .map { message in
+                // The server copy takes over the echo's row so the row updates in place.
+                guard let localID = resolved[message.id] else {
+                    return message
+                }
+                var inherited = message
+                inherited.rowID = localID
+                return inherited
+            }
     }
 
     private func appendLocalEcho(_ send: PendingSend, id: Int64) {
@@ -1903,9 +2045,12 @@ final class LiveSessionViewModel {
             return
         }
         let source: (Int64?, String?)
-        if case let .topic(_, streamID, topic) = send.key {
+        switch send.key {
+        case let .topic(_, streamID, topic):
             source = (streamID, topic)
-        } else {
+        case let .channel(_, streamID):
+            source = (streamID, "")
+        default:
             source = (nil, nil)
         }
         let echo = MessageViewData(
@@ -1921,7 +2066,8 @@ final class LiveSessionViewModel {
             sourceStreamID: source.0,
             sourceTopic: source.1,
             deliveryState: .pending,
-            senderAvatarURL: avatarURLs[identity.userID]
+            senderAvatarURL: avatarURLs[identity.userID],
+            isProvisional: LocalEcho.needsServerRendering(send.content)
         )
         replaceConversationMessages(page.messages + [echo], in: page)
     }
@@ -1999,7 +2145,7 @@ final class LiveSessionViewModel {
         case let .topic(_, streamID, topic):
             let channel = sidebarSnapshot?.channels
                 .first(where: { $0.streamID == streamID })?.name ?? "channel"
-            title = topic.isEmpty ? "(no topic)" : topic
+            title = TopicName.display(topic)
             subtitle = "#\(channel)"
             systemImage = "text.bubble"
         case let .channel(_, streamID):
@@ -2044,11 +2190,16 @@ final class LiveSessionViewModel {
         var messagesByID = Dictionary(
             uniqueKeysWithValues: first.map { ($0.id, $0) }
         )
-        for message in second {
-            if let existing = messagesByID[message.id],
-               existing.deliveryState != .sent || existing.actionState != .idle
-            {
-                continue
+        for incoming in second {
+            var message = incoming
+            if let existing = messagesByID[message.id] {
+                if existing.deliveryState != .sent || existing.actionState != .idle {
+                    continue
+                }
+                // Keep the row a replaced echo handed over to this message.
+                if existing.rowID != existing.id {
+                    message.rowID = existing.rowID
+                }
             }
             messagesByID[message.id] = message
         }
@@ -2261,6 +2412,40 @@ final class LiveSessionViewModel {
         )
         sidebarSnapshot = updated
         navigationDirectory = Self.makeDirectory(sidebar: updated, topics: topics)
+        refreshOpenPageTitle()
+    }
+
+    /// Keeps the open conversation's title current when its channel is renamed.
+    private func refreshOpenPageTitle() {
+        switch conversationState {
+        case let .loaded(page):
+            if let renamed = retitled(page) {
+                conversationState = .loaded(renamed)
+            }
+        case let .offline(page):
+            if let renamed = retitled(page) {
+                conversationState = .offline(renamed)
+            }
+        default:
+            break
+        }
+    }
+
+    private func retitled(_ page: ConversationPage) -> ConversationPage? {
+        guard let destination = navigationDirectory.destination(for: page.key),
+              destination.title != page.title || destination.subtitle != page.subtitle
+        else {
+            return nil
+        }
+        return ConversationPage(
+            key: page.key,
+            title: destination.title,
+            subtitle: destination.subtitle,
+            messages: page.messages,
+            beforeCursor: page.beforeCursor,
+            afterCursor: page.afterCursor,
+            focusedMessageID: page.focusedMessageID
+        )
     }
 
     private var organizationName: String {
@@ -2472,7 +2657,7 @@ final class LiveSessionViewModel {
                 let channel = channelNames[streamID] ?? "channel"
                 return NavigationDestination(
                     key: key,
-                    title: topicName.isEmpty ? "(no topic)" : topicName,
+                    title: TopicName.display(topicName),
                     subtitle: "#\(channel)",
                     systemImage: "text.bubble",
                     keywords: ["topic", channel]

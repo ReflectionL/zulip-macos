@@ -30,6 +30,15 @@ struct MessageGroupingTests {
         #expect(MessageGrouping.continuationIDs(in: messages) == [5])
     }
 
+    @Test("Topic names are compared without regard to case")
+    func topicCase() {
+        let messages = [
+            message(1, sender: 9, at: 0, topic: "macOS"),
+            message(2, sender: 9, at: 10, topic: "MACOS"),
+        ]
+        #expect(MessageGrouping.continuationIDs(in: messages) == [2])
+    }
+
     @Test("Each pause is measured from the previous message, not the block start")
     func chainedWindow() {
         let messages = [

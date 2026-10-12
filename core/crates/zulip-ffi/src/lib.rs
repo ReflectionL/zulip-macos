@@ -461,6 +461,17 @@ pub enum CoreCommand {
         /// Initial subscribers, including the current user.
         member_ids: Vec<i64>,
     },
+    /// Renames a channel; the server decides whether the user may.
+    RenameChannel {
+        /// Correlates the response.
+        request_id: u64,
+        /// Client-owned account partition.
+        account_id: String,
+        /// Channel to rename.
+        stream_id: i64,
+        /// New channel name.
+        new_name: String,
+    },
     /// Fetches the original Markdown of one message so it can be quoted or forwarded.
     FetchMessageSource {
         /// Correlates the response.
@@ -539,6 +550,7 @@ impl CoreCommand {
             | Self::RefreshPresence { request_id, .. }
             | Self::FetchMessageSource { request_id, .. }
             | Self::CreateChannel { request_id, .. }
+            | Self::RenameChannel { request_id, .. }
             | Self::Disconnect { request_id } => *request_id,
         }
     }
@@ -590,6 +602,8 @@ pub struct CorePresence {
     pub user_id: i64,
     /// Derived state.
     pub status: CorePresenceStatus,
+    /// When the user was last active, in Unix seconds, if the server knows.
+    pub last_active_at: Option<i64>,
 }
 
 /// One-time API credential returned for immediate Keychain persistence.
@@ -1074,6 +1088,15 @@ pub enum CoreEvent {
     ChannelCreated {
         /// Matches the originating command.
         request_id: u64,
+        /// Name the server accepted.
+        name: String,
+    },
+    /// A channel was renamed.
+    ChannelRenamed {
+        /// Matches the originating command.
+        request_id: u64,
+        /// Renamed channel.
+        stream_id: i64,
         /// Name the server accepted.
         name: String,
     },
@@ -1567,6 +1590,19 @@ async fn handle_command(
             account.as_ref(),
             event_sink,
         ),
+        CoreCommand::RenameChannel {
+            request_id,
+            account_id,
+            stream_id,
+            new_name,
+        } => rename_channel(
+            request_id,
+            &account_id,
+            stream_id,
+            new_name,
+            account.as_ref(),
+            event_sink,
+        ),
         CoreCommand::FetchMessageSource {
             request_id,
             account_id,
@@ -1657,6 +1693,32 @@ fn create_channel(
     });
 }
 
+fn rename_channel(
+    request_id: u64,
+    account_id: &str,
+    stream_id: i64,
+    new_name: String,
+    account: Option<&AccountSession>,
+    event_sink: &Arc<dyn CoreEventSink>,
+) {
+    let Some(session) = account.filter(|item| item.account_id == account_id) else {
+        emit_no_session(request_id, event_sink);
+        return;
+    };
+    let messages = Arc::clone(&session.messages);
+    let event_sink = Arc::clone(event_sink);
+    tokio::spawn(async move {
+        match messages.rename_channel(stream_id, &new_name).await {
+            Ok(()) => event_sink.handle_event(CoreEvent::ChannelRenamed {
+                request_id,
+                stream_id,
+                name: new_name.trim().to_owned(),
+            }),
+            Err(error) => emit_error(Some(request_id), error, &event_sink),
+        }
+    });
+}
+
 fn fetch_message_source(
     request_id: u64,
     account_id: &str,
@@ -1702,6 +1764,7 @@ fn refresh_presence(
                     .map(|presence| CorePresence {
                         user_id: presence.user_id,
                         status: presence.status.into(),
+                        last_active_at: presence.last_active_at,
                     })
                     .collect(),
             });
@@ -3005,7 +3068,7 @@ mod tests {
         assert!(content.iter().any(|item| matches!(
             item,
             CoreInlineContent::Emoji { name, value }
-                if name == "wave" && value == ":wave:"
+                if name == "wave" && value == "\u{1f44b}"
         )));
         assert!(content.iter().any(|item| matches!(
             item,
