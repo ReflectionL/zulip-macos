@@ -6,25 +6,48 @@ protocol ReleaseFetching: Sendable {
 }
 
 struct GitHubReleaseFetcher: ReleaseFetching {
+    /// Reads the public releases feed first because the REST API allows only 60
+    /// anonymous requests per hour per address, which shared networks exhaust.
     func newestRelease() async throws -> AvailableRelease? {
-        guard let url = URL(
-            string: "https://api.github.com/repos/\(AppIdentity.releaseRepository)/releases?per_page=30"
-        ) else {
+        if let data = try? await fetch(
+            "https://github.com/\(AppIdentity.releaseRepository)/releases.atom",
+            accept: "application/atom+xml"
+        ),
+            let release = try? ReleaseFeed.newest(
+                fromAtom: data,
+                repository: AppIdentity.releaseRepository
+            )
+        {
+            return release
+        }
+        let data = try await fetch(
+            "https://api.github.com/repos/\(AppIdentity.releaseRepository)/releases?per_page=30",
+            accept: "application/vnd.github+json"
+        )
+        return try ReleaseFeed.newest(from: data)
+    }
+
+    private func fetch(_ address: String, accept: String) async throws -> Data {
+        guard let url = URL(string: address) else {
             throw ReleaseFeedError.invalidResponse
         }
         var request = URLRequest(url: url, timeoutInterval: 20)
-        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue(accept, forHTTPHeaderField: "Accept")
         request.setValue("ZulipMac-Updater", forHTTPHeaderField: "User-Agent")
         let (data, response) = try await URLSession.shared.data(for: request)
         if let http = response as? HTTPURLResponse {
-            if http.statusCode == 403 || http.statusCode == 429 {
+            // A bare 403 can be a block rather than a quota, so only report a rate
+            // limit when GitHub says the quota is spent or asks us to back off.
+            let quotaSpent = http.value(forHTTPHeaderField: "x-ratelimit-remaining") == "0"
+                || http.value(forHTTPHeaderField: "retry-after") != nil
+            if http.statusCode == 429 || (http.statusCode == 403 && quotaSpent) {
                 throw ReleaseFeedError.rateLimited
             }
             guard (200 ..< 300).contains(http.statusCode) else {
                 throw ReleaseFeedError.http(http.statusCode)
             }
         }
-        return try ReleaseFeed.newest(from: data)
+        return data
     }
 }
 
@@ -110,9 +133,11 @@ final class UpdateController {
 
     private func check(silently: Bool) async {
         state = .checking
+        // Count the attempt, not just successes, so a failing network is not retried
+        // on every launch and every new window.
+        defaults.set(now(), forKey: Self.lastCheckKey)
         do {
             let newest = try await fetcher.newestRelease()
-            defaults.set(now(), forKey: Self.lastCheckKey)
             if let newest, newest.version > (installedVersion ?? ReleaseVersion("0.0.0")!) {
                 state = .available(newest)
             } else {
@@ -142,7 +167,7 @@ final class UpdateController {
         if let feedError = error as? ReleaseFeedError {
             switch feedError {
             case .rateLimited:
-                return "GitHub is limiting requests right now. Try again in a little while."
+                return "GitHub is limiting requests from this network right now. Try again later, or download the latest version from the releases page."
             case let .http(status):
                 return "GitHub answered with HTTP \(status)."
             case .invalidResponse:

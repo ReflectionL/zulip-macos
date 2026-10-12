@@ -178,6 +178,7 @@ private struct LiveWindowView: View {
     @State private var isMessageSearchPresented = false
     @State private var suppressedSelectionOpen: ConversationKey?
     @State private var topicSheet: LiveTopicSheetContext?
+    @State private var isCreatingChannel = false
 
     init(session: LiveSessionViewModel) {
         self.session = session
@@ -218,6 +219,7 @@ private struct LiveWindowView: View {
                         }
                         topicSheet = .new(channel: channel)
                     },
+                    createChannel: { isCreatingChannel = true },
                     sessionControl: SidebarSessionControl(
                         action: .disconnect,
                         perform: session.disconnect
@@ -340,6 +342,11 @@ private struct LiveWindowView: View {
                 topicSheet = nil
             }
         }
+        .sheet(isPresented: $isCreatingChannel) {
+            CreateChannelSheet(session: session) {
+                isCreatingChannel = false
+            }
+        }
         .sheet(item: $topicSheet) { context in
             LiveTopicActionSheet(
                 session: session,
@@ -398,6 +405,16 @@ private struct LiveWindowView: View {
                 retrySend: { message in
                     session.retrySend(message)
                 },
+                quoteMessage: { message in
+                    session.quote(message)
+                },
+                forwardMessage: { message, key in
+                    session.forward(message, to: key)
+                },
+                forwardDestinations: { query in
+                    session.forwardDestinations(matching: query)
+                },
+                mentionCandidates: session.mentionCandidates(for: page.key),
                 attachmentUploadState: session.attachmentUploadState,
                 attachmentInsertion: session.attachmentInsertion,
                 uploadAttachment: { url in
@@ -422,12 +439,7 @@ private struct LiveWindowView: View {
                 draftChanged: { session.updateDraft($0, for: page.key) }
             )
         case let .loading(title, subtitle):
-            LivePlaceholder(
-                title: title,
-                subtitle: subtitle,
-                symbol: "ellipsis",
-                message: "Loading messages…"
-            )
+            DelayedLoadingPlaceholder(title: title, subtitle: subtitle)
         case let .empty(title, subtitle, message):
             LivePlaceholder(
                 title: title,
@@ -699,6 +711,40 @@ private struct LiveTopicActionSheet: View {
             )
         case let .move(message):
             _ = session.moveMessage(message, to: trimmedTopic)
+        }
+    }
+}
+
+/// Shows a blank canvas first and the loading message only if loading takes
+/// longer than a moment, so quick opens never flash a spinner-like placeholder.
+private struct DelayedLoadingPlaceholder: View {
+    private static let delay: Duration = .milliseconds(400)
+
+    let title: String
+    let subtitle: String
+    @State private var isVisible = false
+
+    var body: some View {
+        Group {
+            if isVisible {
+                LivePlaceholder(
+                    title: title,
+                    subtitle: subtitle,
+                    symbol: "ellipsis",
+                    message: "Loading messages…"
+                )
+            } else {
+                AppTheme.Colors.canvas
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .conversationToolbar(title: title, subtitle: subtitle, isOffline: false)
+            }
+        }
+        .task(id: title + "\u{1F}" + subtitle) {
+            isVisible = false
+            try? await Task.sleep(for: Self.delay)
+            if !Task.isCancelled {
+                isVisible = true
+            }
         }
     }
 }

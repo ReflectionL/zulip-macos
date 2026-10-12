@@ -11,18 +11,99 @@ struct MessageContentView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppTheme.Spacing.small) {
-            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
-                ContentBlockView(
-                    block: block,
+            ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in
+                if case let .quote(quoted) = block,
+                   index > 0,
+                   let attribution = QuoteAttribution.match(blocks[index - 1])
+                {
+                    QuoteCard(
+                        attribution: attribution,
+                        blocks: quoted,
+                        mediaLocalURLs: mediaLocalURLs,
+                        mediaFailures: mediaFailures,
+                        requestMedia: requestMedia,
+                        retryMedia: retryMedia
+                    )
+                } else if index + 1 < blocks.count,
+                          case .quote = blocks[index + 1],
+                          QuoteAttribution.match(block) != nil
+                {
+                    // Shown in the card that follows.
+                    EmptyView()
+                } else {
+                    ContentBlockView(
+                        block: block,
+                        mediaLocalURLs: mediaLocalURLs,
+                        mediaFailures: mediaFailures,
+                        requestMedia: requestMedia,
+                        retryMedia: retryMedia
+                    )
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .contain)
+    }
+}
+
+/// A quoted message: who said it, then the text on a soft tinted panel.
+private struct QuoteCard: View {
+    let attribution: QuoteAttribution.Match
+    let blocks: [ContentBlock]
+    let mediaLocalURLs: [String: String]
+    let mediaFailures: [String: String]
+    let requestMedia: ((String) -> Void)?
+    let retryMedia: ((String) -> Void)?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppTheme.Spacing.extraSmall) {
+            header
+            AnyView(
+                MessageContentView(
+                    blocks: blocks,
                     mediaLocalURLs: mediaLocalURLs,
                     mediaFailures: mediaFailures,
                     requestMedia: requestMedia,
                     retryMedia: retryMedia
                 )
-            }
+            )
+            .foregroundStyle(AppTheme.Colors.secondaryText)
         }
+        .padding(.vertical, AppTheme.Spacing.small)
+        .padding(.leading, AppTheme.Spacing.medium + 2)
+        .padding(.trailing, AppTheme.Spacing.medium)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .background(AppTheme.Colors.sidebar)
+        .overlay(alignment: .leading) {
+            Rectangle()
+                .fill(AppTheme.Colors.tertiaryText.opacity(0.7))
+                .frame(width: 2)
+        }
+        .clipShape(
+            RoundedRectangle(cornerRadius: AppTheme.Metrics.controlRadius, style: .continuous)
+        )
         .accessibilityElement(children: .contain)
+        .accessibilityLabel(
+            "Quote from \(attribution.name), \(blocks.map(\.plainText).joined(separator: " "))"
+        )
+    }
+
+    @ViewBuilder
+    private var header: some View {
+        let label = HStack(spacing: 4) {
+            Image(systemName: "arrowshape.turn.up.left")
+            Text(attribution.name)
+                .fontWeight(.medium)
+        }
+        .font(AppTheme.Typography.metadata)
+        .foregroundStyle(AppTheme.Colors.secondaryText)
+
+        if let link = attribution.link {
+            Link(destination: link) { label }
+                .help("Open the original message")
+        } else {
+            label
+        }
     }
 }
 

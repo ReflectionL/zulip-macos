@@ -91,6 +91,8 @@ struct ComposerAttachmentInsertion: Equatable, Sendable {
     let key: ConversationKey
     let filename: String
     let markdown: String
+    /// Set for a quote, which waits above the composer instead of entering the text.
+    var quote: ComposerQuote?
 }
 
 private enum MessageAction: Equatable, Sendable {
@@ -129,6 +131,24 @@ private struct PendingSend: Sendable {
     let content: String
     let localID: String
     let localMessageID: Int64
+}
+
+enum ChannelCreationState: Equatable, Sendable {
+    case idle
+    case creating
+    case failed(message: String)
+    case created(name: String)
+}
+
+/// A message whose Markdown source is being fetched to quote or forward it.
+private struct PendingMessageSource: Sendable {
+    enum Purpose: Sendable {
+        case quote(into: ConversationKey)
+        case forward(to: ConversationKey)
+    }
+
+    let purpose: Purpose
+    let message: MessageViewData
 }
 
 private struct PendingAttachmentUpload: Sendable {
@@ -197,6 +217,11 @@ final class LiveSessionViewModel {
     /// Set while the visible page is only the local cache of that conversation, which
     /// the first fresh page replaces outright instead of merging into.
     @ObservationIgnored private var cachedPlaceholderKey: ConversationKey?
+    /// Pages already shown this session, newest use last, so reopening a chat,
+    /// topic or thread paints at once instead of passing through a loading state.
+    @ObservationIgnored private var recentPages: [ConversationKey: ConversationPage] = [:]
+    @ObservationIgnored private var recentPageOrder: [ConversationKey] = []
+    private static let recentPageLimit = 24
     @ObservationIgnored private var presenceStates: [Int64: PresenceState] = [:]
     @ObservationIgnored private var presenceTask: Task<Void, Never>?
     private(set) var drafts: [ConversationKey: String] = [:]
@@ -210,6 +235,12 @@ final class LiveSessionViewModel {
     private var pendingFocusedMessageRequestID: UInt64?
     private var issuedFocusedMessageRequestIDs = Set<UInt64>()
     private var topicActionsByRequestID: [UInt64: TopicAction] = [:]
+    @ObservationIgnored private var messageSourceRequests: [UInt64: PendingMessageSource] = [:]
+    @ObservationIgnored private var channelCreationRequestID: UInt64?
+    @ObservationIgnored private var mentionPeople: [MentionCandidate] = []
+    /// People who can be added to a new channel (everyone active except the user).
+    private(set) var channelMemberCandidates: [MentionCandidate] = []
+    private(set) var channelCreationState = ChannelCreationState.idle
     private var messageActionsByRequestID: [UInt64: SubmittedMessageAction] = [:]
     private var failedMessageActions: [Int64: MessageAction] = [:]
     private var sendsByRequestID: [UInt64: PendingSend] = [:]
@@ -500,17 +531,24 @@ final class LiveSessionViewModel {
         guard identity?.accountID == key.accountID else {
             return
         }
+        stashVisiblePage()
         pendingFocusedMessageRequestID = nil
         pendingOlderRequestID = nil
         isLoadingOlderMessages = false
         activeSelection = key
-        let destination = navigationDirectory.destination(for: key)
-        conversationState = .loading(
-            title: destination?.title ?? "Conversation",
-            subtitle: destination?.subtitle ?? organizationName
-        )
-        // Show the last copy we have right away while the fresh page loads.
-        cachedPlaceholderKey = nil
+        if let page = recentPages[key] {
+            // Seen earlier this session: show it synchronously while the fresh page loads.
+            cachedPlaceholderKey = key
+            conversationState = isServingCachedData ? .offline(page) : .loaded(page)
+        } else {
+            let destination = navigationDirectory.destination(for: key)
+            conversationState = .loading(
+                title: destination?.title ?? "Conversation",
+                subtitle: destination?.subtitle ?? organizationName
+            )
+            // Otherwise show the last on-disk copy as soon as the core reads it.
+            cachedPlaceholderKey = nil
+        }
         client.submit(.loadCachedConversation(requestID: nextRequestID(), key: key))
         client.submit(
             .openConversation(
@@ -645,6 +683,7 @@ final class LiveSessionViewModel {
         pendingSearchRequestID = nil
         pendingSearchQuery = nil
         messageSearchState = .idle
+        stashVisiblePage()
         pendingOlderRequestID = nil
         isLoadingOlderMessages = false
         activeSelection = result.conversationKey
@@ -772,6 +811,155 @@ final class LiveSessionViewModel {
         submitMessageAction(
             .flag(messageID: message.id, flag: .read, add: read)
         )
+    }
+
+    /// Puts a quote of `message` into the open conversation's composer.
+    func quote(_ message: MessageViewData) {
+        guard let activeSelection else {
+            return
+        }
+        requestMessageSource(for: message, purpose: .quote(into: activeSelection))
+    }
+
+    /// Posts a quote of `message` into another conversation.
+    func forward(_ message: MessageViewData, to key: ConversationKey) {
+        requestMessageSource(for: message, purpose: .forward(to: key))
+    }
+
+    /// Topics and direct messages a message can be forwarded to.
+    func forwardDestinations(matching query: String) -> [NavigationDestination] {
+        navigationDirectory
+            .search(query, limit: 400)
+            .filter {
+                switch $0.key {
+                case .topic, .directMessage: true
+                default: false
+                }
+            }
+            .prefix(30)
+            .map { $0 }
+    }
+
+    private func requestMessageSource(
+        for message: MessageViewData,
+        purpose: PendingMessageSource.Purpose
+    ) {
+        guard let identity, message.id > 0, message.accountID == identity.accountID else {
+            notice = "This message is not available to quote."
+            return
+        }
+        let id = nextRequestID()
+        messageSourceRequests[id] = PendingMessageSource(purpose: purpose, message: message)
+        notice = nil
+        client.submit(
+            .fetchMessageSource(
+                requestID: id,
+                accountID: identity.accountID,
+                messageID: message.id
+            )
+        )
+    }
+
+    private func messageSourceMarkdown(_ pending: PendingMessageSource, source: String) -> String {
+        let message = pending.message
+        let streamID: Int64?
+        let topic: String?
+        var recipientIDs: [Int64] = []
+        switch message.conversationKey {
+        case let .topic(_, keyStreamID, keyTopic):
+            streamID = message.sourceStreamID ?? keyStreamID
+            topic = message.sourceTopic ?? keyTopic
+        case let .directMessage(_, ids):
+            streamID = nil
+            topic = nil
+            recipientIDs = ids
+        default:
+            streamID = message.sourceStreamID
+            topic = message.sourceTopic
+        }
+        let streamName = streamID.flatMap {
+            navigationDirectory.destination(
+                for: .channel(accountID: message.accountID, streamID: $0)
+            )?.title
+        }
+        let link = identity.flatMap {
+            MessageQuote.permalink(
+                serverURL: $0.serverURL,
+                streamID: streamID,
+                streamName: streamName,
+                topic: topic,
+                recipientIDs: recipientIDs,
+                messageID: message.id
+            )
+        }
+        return MessageQuote.markdown(
+            senderName: message.senderName,
+            senderID: message.senderID,
+            permalink: link,
+            source: source
+        )
+    }
+
+    /// People the composer can offer after `@`; group mentions only make sense in a topic.
+    func mentionCandidates(for key: ConversationKey) -> [MentionCandidate] {
+        guard case .topic = key else {
+            return mentionPeople
+        }
+        return [
+            MentionCandidate(kind: .everyone, name: "all", detail: "Notify everyone in the channel"),
+            MentionCandidate(kind: .topic, name: "topic", detail: "Notify people in this topic"),
+        ] + mentionPeople
+    }
+
+    /// Creates a channel and subscribes the chosen people (and the user) to it.
+    func createChannel(
+        name: String,
+        description: String,
+        isPrivate: Bool,
+        memberIDs: [Int64]
+    ) {
+        guard let identity else {
+            return
+        }
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty,
+              name.count <= 60,
+              !name.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
+        else {
+            channelCreationState = .failed(
+                message: "Enter a channel name of up to 60 characters."
+            )
+            return
+        }
+        if sidebarSnapshot?.channels.contains(where: {
+            $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame
+        }) == true {
+            channelCreationState = .failed(message: "A channel named “\(name)” already exists.")
+            return
+        }
+        if case .creating = channelCreationState {
+            return
+        }
+        var members = Array(Set(memberIDs.filter { $0 > 0 && $0 != identity.userID }))
+        members.sort()
+        let id = nextRequestID()
+        channelCreationRequestID = id
+        channelCreationState = .creating
+        client.submit(
+            .createChannel(
+                requestID: id,
+                accountID: identity.accountID,
+                name: name,
+                description: description.trimmingCharacters(in: .whitespacesAndNewlines),
+                isPrivate: isPrivate,
+                memberIDs: [identity.userID] + members
+            )
+        )
+    }
+
+    func resetChannelCreation() {
+        channelCreationRequestID = nil
+        channelCreationState = .idle
     }
 
     func retryMessageAction(for messageID: Int64) {
@@ -1119,6 +1307,41 @@ final class LiveSessionViewModel {
             topicActionState = .idle
             applyTopicUpdate(update, action: action)
 
+        case let .channelCreated(requestID, name):
+            guard channelCreationRequestID == requestID else {
+                return
+            }
+            channelCreationRequestID = nil
+            channelCreationState = .created(name: name)
+            notice = "Created channel “\(name)”."
+
+        case let .messageSourceLoaded(requestID, _, source):
+            guard let pending = messageSourceRequests.removeValue(forKey: requestID),
+                  identity?.accountID == pending.message.accountID
+            else {
+                return
+            }
+            let markdown = messageSourceMarkdown(pending, source: source)
+            switch pending.purpose {
+            case let .quote(key):
+                attachmentInsertion = ComposerAttachmentInsertion(
+                    id: requestID,
+                    key: key,
+                    filename: "quote",
+                    markdown: markdown + "\n\n",
+                    quote: ComposerQuote(
+                        senderName: pending.message.senderName,
+                        snippet: ComposerQuote.snippet(from: pending.message.plainText),
+                        markdown: markdown
+                    )
+                )
+            case let .forward(key):
+                if sendText(markdown, to: key) {
+                    let name = navigationDirectory.destination(for: key)?.title ?? "the conversation"
+                    notice = "Forwarded to \(name)."
+                }
+            }
+
         case .messagesMarkedRead, .pong:
             break
 
@@ -1212,6 +1435,17 @@ final class LiveSessionViewModel {
                     value.deliveryState = .failed
                 }
                 notice = "Message could not be sent. You can retry it."
+            } else if let requestID, channelCreationRequestID == requestID {
+                channelCreationRequestID = nil
+                channelCreationState = .failed(
+                    message: message.contains("CHANNEL_ALREADY_EXISTS")
+                        ? "A channel with this name already exists."
+                        : message
+                )
+            } else if let requestID,
+                      messageSourceRequests.removeValue(forKey: requestID) != nil
+            {
+                notice = "The original message could not be loaded: \(message)"
             } else if requestID != nil,
                       identity != nil,
                       connectionState != .connected,
@@ -1260,6 +1494,8 @@ final class LiveSessionViewModel {
         presenceTask = nil
         presenceStates = [:]
         cachedPlaceholderKey = nil
+        recentPages = [:]
+        recentPageOrder = []
         notificationPlanner.reset()
         unseenNotificationCount = 0
         notifier?.setBadge(0)
@@ -1291,6 +1527,11 @@ final class LiveSessionViewModel {
         pendingMediaURLs = []
         mediaLocalURLs = [:]
         mediaFailures = [:]
+        messageSourceRequests = [:]
+        channelCreationRequestID = nil
+        channelCreationState = .idle
+        mentionPeople = []
+        channelMemberCandidates = []
         isLoadingOlderMessages = false
         messageSearchState = .idle
         topicActionState = .idle
@@ -1417,6 +1658,25 @@ final class LiveSessionViewModel {
             },
             uniquingKeysWith: { _, latest in latest }
         )
+        let others = snapshot.users
+            .filter { $0.isActive && $0.userID != identity.userID }
+            .sorted { $0.fullName.localizedCaseInsensitiveCompare($1.fullName) == .orderedAscending }
+        mentionPeople = others.map {
+            MentionCandidate(
+                kind: .person(userID: $0.userID),
+                name: $0.fullName,
+                detail: $0.isBot ? "Bot" : ($0.email ?? "")
+            )
+        }
+        channelMemberCandidates = others
+            .filter { !$0.isBot }
+            .map {
+                MentionCandidate(
+                    kind: .person(userID: $0.userID),
+                    name: $0.fullName,
+                    detail: $0.email ?? ""
+                )
+            }
         rememberTopics(from: snapshot.topics)
         rememberTopics(from: snapshot.messages)
         sidebarSnapshot = Self.makeSidebar(
@@ -1806,6 +2066,38 @@ final class LiveSessionViewModel {
         }
     }
 
+    /// Remembers the page on screen (without unsent echoes or a search focus) so it
+    /// can be shown immediately the next time that conversation opens.
+    private func stashVisiblePage() {
+        let page: ConversationPage
+        switch conversationState {
+        case let .loaded(visible), let .offline(visible):
+            page = visible
+        default:
+            return
+        }
+        guard page.focusedMessageID == nil else {
+            return
+        }
+        let confirmed = page.messages.filter { $0.id > 0 }
+        guard !confirmed.isEmpty else {
+            return
+        }
+        recentPages[page.key] = ConversationPage(
+            key: page.key,
+            title: page.title,
+            subtitle: page.subtitle,
+            messages: confirmed,
+            beforeCursor: page.beforeCursor,
+            afterCursor: page.afterCursor
+        )
+        recentPageOrder.removeAll { $0 == page.key }
+        recentPageOrder.append(page.key)
+        while recentPageOrder.count > Self.recentPageLimit {
+            recentPages[recentPageOrder.removeFirst()] = nil
+        }
+    }
+
     private func loadedPage(for key: ConversationKey) -> ConversationPage? {
         guard case let .loaded(page) = conversationState, page.key == key else {
             return nil
@@ -1998,6 +2290,44 @@ final class LiveSessionViewModel {
         return value
     }
 
+    /// Newest message ID per one-to-one conversation partner, so the list can put
+    /// whoever wrote (or was written to) most recently first. The server's recent
+    /// conversation list seeds the result and live messages raise it. Group
+    /// conversations are not listed in the sidebar and so do not count.
+    static func directMessageRecency(
+        in messages: [LiveMessageSnapshot],
+        currentUserID: Int64,
+        serverConversations: [LiveRecentDirectConversation] = []
+    ) -> [Int64: Int64] {
+        var newest: [Int64: Int64] = [:]
+        for conversation in serverConversations {
+            let others = Set(conversation.userIDs.filter { $0 > 0 && $0 != currentUserID })
+            let partner: Int64
+            if others.isEmpty {
+                partner = currentUserID
+            } else if others.count == 1, let only = others.first {
+                partner = only
+            } else {
+                continue
+            }
+            newest[partner] = max(newest[partner] ?? 0, conversation.maxMessageID)
+        }
+        for message in messages where message.streamID == nil {
+            let participants = message.recipientIDs + [message.senderID]
+            let others = Set(participants.filter { $0 > 0 && $0 != currentUserID })
+            let partner: Int64
+            if others.isEmpty {
+                partner = currentUserID
+            } else if others.count == 1, let only = others.first {
+                partner = only
+            } else {
+                continue
+            }
+            newest[partner] = max(newest[partner] ?? 0, message.messageID)
+        }
+        return newest
+    }
+
     private static func makeSidebar(
         snapshot: LiveSnapshot,
         identity: LiveSessionIdentity,
@@ -2008,6 +2338,11 @@ final class LiveSessionViewModel {
         let organization = host.split(separator: ".").first
             .map { String($0).capitalized } ?? host
         let currentName = identity.fullName.isEmpty ? identity.email : identity.fullName
+        let recency = directMessageRecency(
+            in: snapshot.messages,
+            currentUserID: identity.userID,
+            serverConversations: snapshot.recentDirectConversations
+        )
         let directMessages = snapshot.users
             .filter {
                 $0.isActive
@@ -2024,7 +2359,12 @@ final class LiveSessionViewModel {
                 )
             }
             .sorted {
-                $0.displayName.localizedCaseInsensitiveCompare($1.displayName)
+                let first = recency[$0.userID] ?? 0
+                let second = recency[$1.userID] ?? 0
+                if first != second {
+                    return first > second
+                }
+                return $0.displayName.localizedCaseInsensitiveCompare($1.displayName)
                     == .orderedAscending
             }
 

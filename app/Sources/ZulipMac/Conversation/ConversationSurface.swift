@@ -19,6 +19,10 @@ struct ConversationSurface: View {
     var setMessageRead: ((MessageViewData, Bool) -> Bool)?
     var retryMessageAction: ((MessageViewData) -> Void)?
     var retrySend: ((MessageViewData) -> Void)?
+    var quoteMessage: ((MessageViewData) -> Void)?
+    var forwardMessage: ((MessageViewData, ConversationKey) -> Void)?
+    var forwardDestinations: ((String) -> [NavigationDestination])?
+    var mentionCandidates: [MentionCandidate] = []
     var attachmentUploadState = AttachmentUploadState.idle
     var attachmentInsertion: ComposerAttachmentInsertion?
     var uploadAttachment: ((URL) -> Void)?
@@ -36,6 +40,8 @@ struct ConversationSurface: View {
     @State private var followsNewest = true
     @State private var editingMessage: MessageViewData?
     @State private var deletingMessage: MessageViewData?
+    @State private var forwardingMessage: MessageViewData?
+    @State private var pendingQuote: ComposerQuote?
     @State private var isChoosingAttachment = false
     @FocusState private var isComposerFocused: Bool
 
@@ -56,6 +62,10 @@ struct ConversationSurface: View {
         setMessageRead: ((MessageViewData, Bool) -> Bool)? = nil,
         retryMessageAction: ((MessageViewData) -> Void)? = nil,
         retrySend: ((MessageViewData) -> Void)? = nil,
+        quoteMessage: ((MessageViewData) -> Void)? = nil,
+        forwardMessage: ((MessageViewData, ConversationKey) -> Void)? = nil,
+        forwardDestinations: ((String) -> [NavigationDestination])? = nil,
+        mentionCandidates: [MentionCandidate] = [],
         attachmentUploadState: AttachmentUploadState = .idle,
         attachmentInsertion: ComposerAttachmentInsertion? = nil,
         uploadAttachment: ((URL) -> Void)? = nil,
@@ -84,6 +94,10 @@ struct ConversationSurface: View {
         self.setMessageRead = setMessageRead
         self.retryMessageAction = retryMessageAction
         self.retrySend = retrySend
+        self.quoteMessage = quoteMessage
+        self.forwardMessage = forwardMessage
+        self.forwardDestinations = forwardDestinations
+        self.mentionCandidates = mentionCandidates
         self.attachmentUploadState = attachmentUploadState
         self.attachmentInsertion = attachmentInsertion
         self.uploadAttachment = uploadAttachment
@@ -173,6 +187,12 @@ struct ConversationSurface: View {
                                     delete: message.isOwnMessage && deleteMessage != nil
                                         ? { deletingMessage = message }
                                         : nil,
+                                    quote: quoteMessage == nil
+                                        ? nil
+                                        : { quoteMessage?(message) },
+                                    forward: forwardMessage == nil || forwardDestinations == nil
+                                        ? nil
+                                        : { forwardingMessage = message },
                                     toggleRead: setMessageRead == nil
                                         ? nil
                                         : { _ = setMessageRead?(message, !message.isRead) },
@@ -257,6 +277,9 @@ struct ConversationSurface: View {
                 draft: $draft,
                 isFocused: $isComposerFocused,
                 isDisabled: isOffline,
+                quote: pendingQuote,
+                clearQuote: { pendingQuote = nil },
+                mentionCandidates: mentionCandidates,
                 attachmentUploadState: attachmentUploadState,
                 chooseAttachment: uploadAttachment == nil
                     ? nil
@@ -288,6 +311,9 @@ struct ConversationSurface: View {
         .onChange(of: draft) {
             draftChanged?(draft)
         }
+        .onChange(of: page.key) {
+            pendingQuote = nil
+        }
         .onChange(of: initialDraft) {
             // Persisted drafts can arrive after the surface appears.
             if draft.isEmpty {
@@ -311,6 +337,17 @@ struct ConversationSurface: View {
             EditMessageSheet(message: message) { content in
                 if editMessage?(message, content) == true {
                     editingMessage = nil
+                }
+            }
+        }
+        .sheet(item: $forwardingMessage) { message in
+            if let forwardDestinations {
+                ForwardMessageSheet(
+                    message: message,
+                    destinations: forwardDestinations
+                ) { key in
+                    forwardMessage?(message, key)
+                    forwardingMessage = nil
                 }
             }
         }
@@ -351,7 +388,10 @@ struct ConversationSurface: View {
     }
 
     private func sendDraft() {
-        let content = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let typed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let content = [pendingQuote?.markdown, typed.isEmpty ? nil : typed]
+            .compactMap { $0 }
+            .joined(separator: "\n\n")
         guard !content.isEmpty else {
             return
         }
@@ -359,6 +399,7 @@ struct ConversationSurface: View {
         guard submitMessage?(content) ?? true else {
             return
         }
+        pendingQuote = nil
         let nextID = submitMessage == nil
             ? (messages.last?.id ?? 0) + 1
             : min(messages.last?.id ?? 0, 0) - 1
@@ -386,6 +427,12 @@ struct ConversationSurface: View {
         guard let attachmentInsertion,
               attachmentInsertion.key == page.key
         else { return }
+        if let quote = attachmentInsertion.quote {
+            pendingQuote = quote
+            consumeAttachmentInsertion?(attachmentInsertion.id)
+            isComposerFocused = true
+            return
+        }
         if !draft.isEmpty, draft.last?.isWhitespace == false {
             draft.append("\n")
         }
@@ -508,6 +555,8 @@ private struct MessageRow: View {
     let moveToTopic: (() -> Void)?
     let edit: (() -> Void)?
     let delete: (() -> Void)?
+    let quote: (() -> Void)?
+    let forward: (() -> Void)?
     let toggleRead: (() -> Void)?
     let retryAction: () -> Void
     let retrySend: () -> Void
@@ -631,6 +680,8 @@ private struct MessageRow: View {
                 moveToTopic: moveToTopic,
                 edit: edit,
                 delete: delete,
+                quote: quote,
+                forward: forward,
                 toggleRead: toggleRead,
                 isRead: message.isRead,
                 isDisabled: message.actionState.isPending || message.deliveryState != .sent
@@ -651,6 +702,12 @@ private struct MessageRow: View {
             toggleStar()
         }
         .accessibilityActions {
+            if let quote {
+                Button("Quote and reply", action: quote)
+            }
+            if let forward {
+                Button("Forward message", action: forward)
+            }
             if let edit {
                 Button("Edit message", action: edit)
             }
@@ -713,6 +770,8 @@ private struct MessageActions: View {
     let moveToTopic: (() -> Void)?
     let edit: (() -> Void)?
     let delete: (() -> Void)?
+    let quote: (() -> Void)?
+    let forward: (() -> Void)?
     let toggleRead: (() -> Void)?
     let isRead: Bool
     let isDisabled: Bool
@@ -729,8 +788,24 @@ private struct MessageActions: View {
                 systemImage: isStarred ? "star.fill" : "star",
                 action: toggleStar
             )
+            if let quote {
+                actionButton(
+                    title: "Quote and reply",
+                    systemImage: "quote.bubble",
+                    action: quote
+                )
+            }
             Menu {
+                if let quote {
+                    Button("Quote and reply", action: quote)
+                }
+                if let forward {
+                    Button("Forward message…", action: forward)
+                }
                 if let edit {
+                    if quote != nil || forward != nil {
+                        Divider()
+                    }
                     Button("Edit message…", action: edit)
                 }
                 if let moveToTopic {
@@ -780,6 +855,57 @@ private extension MessageActionState {
             return true
         }
         return false
+    }
+}
+
+private struct ForwardMessageSheet: View {
+    let message: MessageViewData
+    let destinations: (String) -> [NavigationDestination]
+    let choose: (ConversationKey) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var query = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppTheme.Spacing.medium) {
+            Text("Forward message")
+                .font(AppTheme.Typography.title)
+            Text("\(message.senderName): \(message.plainText)")
+                .font(AppTheme.Typography.metadata)
+                .foregroundStyle(AppTheme.Colors.secondaryText)
+                .lineLimit(2)
+            TextField("Search topics and people", text: $query)
+                .textFieldStyle(.roundedBorder)
+            List(destinations(query)) { destination in
+                Button {
+                    choose(destination.key)
+                } label: {
+                    HStack {
+                        Image(systemName: destination.systemImage)
+                            .frame(width: 20)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(destination.title)
+                            Text(destination.subtitle)
+                                .font(AppTheme.Typography.metadata)
+                                .foregroundStyle(AppTheme.Colors.secondaryText)
+                        }
+                        Spacer()
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            .frame(minHeight: 220)
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(AppTheme.Spacing.large)
+        .frame(width: 420)
     }
 }
 
@@ -833,12 +959,111 @@ private struct ComposerView: View {
     @Binding var draft: String
     var isFocused: FocusState<Bool>.Binding
     let isDisabled: Bool
+    let quote: ComposerQuote?
+    let clearQuote: () -> Void
+    let mentionCandidates: [MentionCandidate]
     let attachmentUploadState: AttachmentUploadState
     let chooseAttachment: (() -> Void)?
     let retryAttachmentUpload: (() -> Void)?
     let send: () -> Void
 
     @State private var selection: TextSelection?
+    @State private var mentionIndex = 0
+    @State private var dismissedMentionDraft: String?
+
+    private var caret: String.Index {
+        if let selection, case let .selection(range) = selection.indices {
+            return min(range.upperBound, draft.endIndex)
+        }
+        return draft.endIndex
+    }
+
+    /// The `@` being typed with its matching people, if any.
+    private var mentionMatch: (trigger: MentionAutocomplete.Trigger, items: [MentionCandidate])? {
+        guard !isDisabled,
+              !mentionCandidates.isEmpty,
+              draft != dismissedMentionDraft,
+              let trigger = MentionAutocomplete.trigger(in: draft, caret: caret)
+        else {
+            return nil
+        }
+        let items = MentionAutocomplete.suggestions(mentionCandidates, query: trigger.query)
+        return items.isEmpty ? nil : (trigger, items)
+    }
+
+    private func acceptMention(
+        _ candidate: MentionCandidate,
+        trigger: MentionAutocomplete.Trigger
+    ) {
+        let text = MentionAutocomplete.replacement(
+            for: candidate,
+            isSilent: trigger.isSilent,
+            among: mentionCandidates
+        )
+        let offset = draft.distance(from: draft.startIndex, to: trigger.range.lowerBound)
+        draft.replaceSubrange(trigger.range, with: text)
+        let insertionPoint = draft.index(draft.startIndex, offsetBy: offset + text.count)
+        selection = TextSelection(insertionPoint: insertionPoint)
+        mentionIndex = 0
+    }
+
+    private func moveMentionSelection(by delta: Int) -> KeyPress.Result {
+        guard let match = mentionMatch else {
+            return .ignored
+        }
+        let count = match.items.count
+        mentionIndex = (min(mentionIndex, count - 1) + delta + count) % count
+        return .handled
+    }
+
+    private func acceptHighlightedMention() -> KeyPress.Result {
+        guard let match = mentionMatch else {
+            return .ignored
+        }
+        acceptMention(match.items[min(mentionIndex, match.items.count - 1)], trigger: match.trigger)
+        return .handled
+    }
+
+    @ViewBuilder
+    private func mentionList(_ match: (trigger: MentionAutocomplete.Trigger, items: [MentionCandidate])) -> some View {
+        let highlighted = min(mentionIndex, match.items.count - 1)
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(match.items.enumerated()), id: \.element.id) { index, item in
+                Button {
+                    acceptMention(item, trigger: match.trigger)
+                } label: {
+                    HStack(spacing: AppTheme.Spacing.small) {
+                        Image(systemName: item.systemImage)
+                            .foregroundStyle(AppTheme.Colors.tertiaryText)
+                            .frame(width: 18)
+                        Text(item.name)
+                        Text(item.detail)
+                            .foregroundStyle(AppTheme.Colors.secondaryText)
+                            .lineLimit(1)
+                        Spacer(minLength: 0)
+                    }
+                    .font(AppTheme.Typography.body)
+                    .padding(.horizontal, AppTheme.Spacing.medium)
+                    .padding(.vertical, 5)
+                    .background(index == highlighted ? AppTheme.Colors.accent.opacity(0.18) : Color.clear)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .background(AppTheme.Colors.sidebar)
+        .clipShape(
+            RoundedRectangle(
+                cornerRadius: AppTheme.Metrics.controlRadius,
+                style: .continuous
+            )
+        )
+        .accessibilityLabel("Mention suggestions")
+    }
+
+    private var canSend: Bool {
+        quote != nil || !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     /// Return sends; Shift+Return or Option+Return inserts a line break at the
     /// caret (or replaces the selection).
@@ -880,6 +1105,42 @@ private struct ComposerView: View {
                 .foregroundStyle(AppTheme.Colors.destructive)
             }
 
+            if let quote {
+                HStack(alignment: .top, spacing: AppTheme.Spacing.small) {
+                    Image(systemName: "arrowshape.turn.up.left")
+                        .foregroundStyle(AppTheme.Colors.tertiaryText)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Replying to \(quote.senderName)")
+                            .fontWeight(.medium)
+                        Text(quote.snippet)
+                            .foregroundStyle(AppTheme.Colors.secondaryText)
+                            .lineLimit(2)
+                    }
+                    Spacer(minLength: 0)
+                    Button(action: clearQuote) {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(AppTheme.Colors.tertiaryText)
+                    .help("Remove quote")
+                    .accessibilityLabel("Remove quote")
+                }
+                .font(AppTheme.Typography.metadata)
+                .padding(.vertical, AppTheme.Spacing.small)
+                .padding(.horizontal, AppTheme.Spacing.medium)
+                .background(AppTheme.Colors.sidebar)
+                .clipShape(
+                    RoundedRectangle(
+                        cornerRadius: AppTheme.Metrics.controlRadius,
+                        style: .continuous
+                    )
+                )
+            }
+
+            if let match = mentionMatch {
+                mentionList(match)
+            }
+
             TextField(
                 "Message \(conversationTitle)",
                 text: $draft,
@@ -891,7 +1152,13 @@ private struct ComposerView: View {
             .lineLimit(1...6)
             .focused(isFocused)
             .disabled(isDisabled)
+            .onKeyPress(.upArrow) { moveMentionSelection(by: -1) }
+            .onKeyPress(.downArrow) { moveMentionSelection(by: 1) }
+            .onKeyPress(.tab) { acceptHighlightedMention() }
             .onKeyPress(.return, phases: .down) { press in
+                if press.modifiers.isEmpty, mentionMatch != nil {
+                    return acceptHighlightedMention()
+                }
                 guard press.modifiers.contains(.shift) || press.modifiers.contains(.option) else {
                     return .ignored
                 }
@@ -899,8 +1166,15 @@ private struct ComposerView: View {
                 return .handled
             }
             .onSubmit(send)
+            .onChange(of: draft) {
+                mentionIndex = 0
+            }
             .onExitCommand {
-                isFocused.wrappedValue = false
+                if mentionMatch != nil {
+                    dismissedMentionDraft = draft
+                } else {
+                    isFocused.wrappedValue = false
+                }
             }
             .accessibilityLabel("Message \(conversationTitle)")
             .accessibilityHint(
@@ -932,13 +1206,9 @@ private struct ComposerView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.white)
-                .background(
-                    draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        ? AppTheme.Colors.tertiaryText
-                        : AppTheme.Colors.accent
-                )
+                .background(canSend ? AppTheme.Colors.accent : AppTheme.Colors.tertiaryText)
                 .clipShape(Circle())
-                .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(!canSend)
                 .help("Send message")
                 .accessibilityLabel("Send message")
             }

@@ -28,8 +28,8 @@ use zulip_core::{
         PresenceStatus, TopicPropagation, TopicSummary,
     },
     sync::{
-        EventQueueClient, MessageSummary, RecoveryPolicy, SyncCycle, SyncSession, SyncSnapshot,
-        UserSummary,
+        EventQueueClient, MessageSummary, RecentDirectConversation, RecoveryPolicy, SyncCycle,
+        SyncSession, SyncSnapshot, UserSummary,
     },
 };
 
@@ -446,6 +446,30 @@ pub enum CoreCommand {
         /// Server message identifiers.
         message_ids: Vec<i64>,
     },
+    /// Creates a channel and subscribes the listed members to it.
+    CreateChannel {
+        /// Correlates the response.
+        request_id: u64,
+        /// Client-owned account partition.
+        account_id: String,
+        /// Channel name.
+        name: String,
+        /// Optional channel description.
+        description: String,
+        /// Whether the channel is invite-only.
+        is_private: bool,
+        /// Initial subscribers, including the current user.
+        member_ids: Vec<i64>,
+    },
+    /// Fetches the original Markdown of one message so it can be quoted or forwarded.
+    FetchMessageSource {
+        /// Correlates the response.
+        request_id: u64,
+        /// Client-owned account partition.
+        account_id: String,
+        /// Server message identifier.
+        message_id: i64,
+    },
     /// Reports the user's own presence and fetches everyone else's.
     ///
     /// Failures are silent: presence is advisory and the next refresh retries.
@@ -513,6 +537,8 @@ impl CoreCommand {
             | Self::LoadMedia { request_id, .. }
             | Self::MarkRead { request_id, .. }
             | Self::RefreshPresence { request_id, .. }
+            | Self::FetchMessageSource { request_id, .. }
+            | Self::CreateChannel { request_id, .. }
             | Self::Disconnect { request_id } => *request_id,
         }
     }
@@ -781,6 +807,26 @@ pub struct CoreSnapshot {
     pub messages: Vec<CoreMessage>,
     /// Organization icon location, absolute or relative to the server.
     pub realm_icon_url: Option<String>,
+    /// Direct-message conversations ordered by the server, newest first.
+    pub recent_direct_conversations: Vec<CoreRecentDirectConversation>,
+}
+
+/// A direct-message conversation and its newest message.
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct CoreRecentDirectConversation {
+    /// Other participants, as reported by the server.
+    pub user_ids: Vec<i64>,
+    /// Identifier of the newest message in the conversation.
+    pub max_message_id: i64,
+}
+
+impl From<RecentDirectConversation> for CoreRecentDirectConversation {
+    fn from(item: RecentDirectConversation) -> Self {
+        Self {
+            user_ids: item.user_ids,
+            max_message_id: item.max_message_id,
+        }
+    }
 }
 
 /// Newest message page for one stable conversation.
@@ -1023,6 +1069,22 @@ pub enum CoreEvent {
         full_name: String,
         /// Last known immutable navigation state.
         snapshot: CoreSnapshot,
+    },
+    /// A channel was created.
+    ChannelCreated {
+        /// Matches the originating command.
+        request_id: u64,
+        /// Name the server accepted.
+        name: String,
+    },
+    /// The original Markdown source of a requested message.
+    MessageSourceLoaded {
+        /// Matches the originating command.
+        request_id: u64,
+        /// Server message identifier.
+        message_id: i64,
+        /// Markdown exactly as its author wrote it.
+        content: String,
     },
     /// Fresh online states for users known to the server.
     PresenceUpdated {
@@ -1488,6 +1550,34 @@ async fn handle_command(
             is_active,
             ..
         } => refresh_presence(account_id, is_active, account.as_ref(), event_sink),
+        CoreCommand::CreateChannel {
+            request_id,
+            account_id,
+            name,
+            description,
+            is_private,
+            member_ids,
+        } => create_channel(
+            request_id,
+            &account_id,
+            name,
+            description,
+            is_private,
+            member_ids,
+            account.as_ref(),
+            event_sink,
+        ),
+        CoreCommand::FetchMessageSource {
+            request_id,
+            account_id,
+            message_id,
+        } => fetch_message_source(
+            request_id,
+            &account_id,
+            message_id,
+            account.as_ref(),
+            event_sink,
+        ),
         CoreCommand::MarkRead {
             request_id,
             account_id,
@@ -1530,6 +1620,62 @@ fn upload_attachment(
                 filename: uploaded.filename,
                 url: uploaded.url,
                 markdown: uploaded.markdown,
+            }),
+            Err(error) => emit_error(Some(request_id), error, &event_sink),
+        }
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_channel(
+    request_id: u64,
+    account_id: &str,
+    name: String,
+    description: String,
+    is_private: bool,
+    member_ids: Vec<i64>,
+    account: Option<&AccountSession>,
+    event_sink: &Arc<dyn CoreEventSink>,
+) {
+    let Some(session) = account.filter(|item| item.account_id == account_id) else {
+        emit_no_session(request_id, event_sink);
+        return;
+    };
+    let messages = Arc::clone(&session.messages);
+    let event_sink = Arc::clone(event_sink);
+    tokio::spawn(async move {
+        match messages
+            .create_channel(&name, &description, is_private, &member_ids)
+            .await
+        {
+            Ok(()) => event_sink.handle_event(CoreEvent::ChannelCreated {
+                request_id,
+                name: name.trim().to_owned(),
+            }),
+            Err(error) => emit_error(Some(request_id), error, &event_sink),
+        }
+    });
+}
+
+fn fetch_message_source(
+    request_id: u64,
+    account_id: &str,
+    message_id: i64,
+    account: Option<&AccountSession>,
+    event_sink: &Arc<dyn CoreEventSink>,
+) {
+    let Some(session) = account.filter(|item| item.account_id == account_id) else {
+        emit_no_session(request_id, event_sink);
+        return;
+    };
+    let messages = Arc::clone(&session.messages);
+    let event_sink = Arc::clone(event_sink);
+    tokio::spawn(async move {
+        match messages.fetch_message_source(message_id).await {
+            Ok(content) => event_sink.handle_event(CoreEvent::MessageSourceLoaded {
+                request_id,
+                message_id,
+                content,
             }),
             Err(error) => emit_error(Some(request_id), error, &event_sink),
         }
@@ -2365,6 +2511,7 @@ fn cached_snapshot(snapshot: &SyncSnapshot, topics: &[TopicSummary]) -> CachedSn
         topics: topics.to_vec(),
         messages: snapshot.messages.clone(),
         realm_icon_url: snapshot.realm_icon_url.clone(),
+        recent_direct_conversations: snapshot.recent_direct_conversations.clone(),
     }
 }
 
@@ -2462,6 +2609,7 @@ fn load_cached_session(
         channels: cached.channels,
         messages: cached.messages,
         realm_icon_url: cached.realm_icon_url,
+        recent_direct_conversations: cached.recent_direct_conversations,
     };
     event_sink.handle_event(CoreEvent::CachedSessionLoaded {
         request_id,
@@ -2621,6 +2769,11 @@ impl CoreSnapshot {
             topics: topics.iter().cloned().map(Into::into).collect(),
             messages: snapshot.messages.into_iter().map(Into::into).collect(),
             realm_icon_url: snapshot.realm_icon_url,
+            recent_direct_conversations: snapshot
+                .recent_direct_conversations
+                .into_iter()
+                .map(Into::into)
+                .collect(),
         }
     }
 }
@@ -2653,7 +2806,7 @@ mod tests {
     use tempfile::TempDir;
     use zulip_core::{
         messages::{ConversationTarget, TopicSummary},
-        sync::{MessageSummary, SyncSnapshot},
+        sync::{MessageSummary, RecentDirectConversation, SyncSnapshot},
     };
 
     #[derive(Default)]
@@ -2737,6 +2890,10 @@ mod tests {
                 channels: Vec::new(),
                 messages: Vec::new(),
                 realm_icon_url: Some("https://cdn.example.com/icon.png".to_owned()),
+                recent_direct_conversations: vec![RecentDirectConversation {
+                    user_ids: vec![7],
+                    max_message_id: 9,
+                }],
             },
             &[TopicSummary {
                 stream_id: 5,
@@ -2750,6 +2907,8 @@ mod tests {
             snapshot.realm_icon_url.as_deref(),
             Some("https://cdn.example.com/icon.png")
         );
+        assert_eq!(snapshot.recent_direct_conversations.len(), 1);
+        assert_eq!(snapshot.recent_direct_conversations[0].max_message_id, 9);
         assert_eq!(snapshot.topics[0].name, "macOS");
         assert_eq!(snapshot.topics[0].max_message_id, 44);
     }

@@ -84,6 +84,46 @@ struct UpdateTests {
         #expect(try ReleaseFeed.newest(from: feed([])) == nil)
     }
 
+    @Test("The public Atom feed yields the newest release with derived download URLs")
+    func atomFeed() throws {
+        func entry(_ tag: String) -> String {
+            """
+            <entry>
+              <id>tag:github.com,2008:Repository/1/\(tag)</id>
+              <link rel="alternate" type="text/html" href="https://github.com/ReflectionL/zulip-macos/releases/tag/\(tag)"/>
+              <title>Zulip Mac \(tag)</title>
+            </entry>
+            """
+        }
+        let xml = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <feed xmlns="http://www.w3.org/2005/Atom">
+          <id>tag:github.com,2008:https://github.com/ReflectionL/zulip-macos/releases</id>
+          <link type="text/html" rel="alternate" href="https://github.com/ReflectionL/zulip-macos/releases"/>
+          \(entry("v0.1.0-alpha.3"))
+          \(entry("v0.1.0-alpha.4"))
+          \(entry("not-a-version"))
+        </feed>
+        """
+        let release = try #require(
+            try ReleaseFeed.newest(fromAtom: Data(xml.utf8), repository: "ReflectionL/zulip-macos")
+        )
+        #expect(release.tag == "v0.1.0-alpha.4")
+        #expect(release.version == version("0.1.0-alpha.4"))
+        #expect(release.dmgName == "Zulip-Mac-0.1.0-alpha.4-arm64.dmg")
+        #expect(
+            release.dmgURL.absoluteString
+                == "https://github.com/ReflectionL/zulip-macos/releases/download/v0.1.0-alpha.4/Zulip-Mac-0.1.0-alpha.4-arm64.dmg"
+        )
+        #expect(release.checksumURL.absoluteString == release.dmgURL.absoluteString + ".sha256")
+        #expect(
+            try ReleaseFeed.newest(fromAtom: Data("<feed/>".utf8), repository: "a/b") == nil
+        )
+        #expect(throws: ReleaseFeedError.self) {
+            try ReleaseFeed.newest(fromAtom: Data("not xml".utf8), repository: "a/b")
+        }
+    }
+
     @Test("A malformed feed is reported rather than ignored")
     func malformedFeed() {
         #expect(throws: ReleaseFeedError.invalidResponse) {
@@ -212,6 +252,37 @@ struct UpdateTests {
         let automatic = controller(fetcher: failing)
         await automatic.checkAutomatically()
         #expect(automatic.state == .idle)
+    }
+
+    private final class CountingFetcher: ReleaseFetching, @unchecked Sendable {
+        private(set) var calls = 0
+
+        func newestRelease() async throws -> AvailableRelease? {
+            calls += 1
+            throw ReleaseFeedError.rateLimited
+        }
+    }
+
+    @Test("A failed automatic check is not retried until the interval passes")
+    func failedAutomaticCheckBacksOff() async {
+        let fetcher = CountingFetcher()
+        var current = Date(timeIntervalSince1970: 1_000_000)
+        let defaults = UserDefaults(suiteName: "updates-\(UUID().uuidString)")!
+        let subject = UpdateController(
+            installedVersion: ReleaseVersion("0.1.0-alpha.3"),
+            appURL: URL(fileURLWithPath: "/Applications/Zulip Mac.app"),
+            fetcher: fetcher,
+            installer: StubInstaller(),
+            defaults: defaults,
+            now: { current }
+        )
+        await subject.checkAutomatically()
+        await subject.checkAutomatically()
+        #expect(fetcher.calls == 1)
+
+        current.addTimeInterval(UpdateController.automaticCheckInterval + 1)
+        await subject.checkAutomatically()
+        #expect(fetcher.calls == 2)
     }
 
     @Test("Automatic checks are rate limited and skipped for unpackaged builds")

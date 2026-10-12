@@ -474,6 +474,68 @@ struct LiveSessionTests {
         #expect(model.draft(for: key).isEmpty)
     }
 
+    @Test("Direct messages are ordered by who wrote or was written to most recently")
+    func directMessageRecency() {
+        func direct(_ id: Int64, sender: Int64, recipients: [Int64]) -> LiveMessageSnapshot {
+            LiveMessageSnapshot(
+                messageID: id,
+                senderID: sender,
+                senderFullName: "Sender",
+                timestamp: Date(timeIntervalSince1970: 1_700_000_000),
+                content: [],
+                streamID: nil,
+                topic: nil,
+                recipientIDs: recipients
+            )
+        }
+        let stream = LiveMessageSnapshot(
+            messageID: 99,
+            senderID: 30,
+            senderFullName: "Sender",
+            timestamp: Date(timeIntervalSince1970: 1_700_000_000),
+            content: [],
+            streamID: 5,
+            topic: "macOS",
+            recipientIDs: []
+        )
+        let recency = LiveSessionViewModel.directMessageRecency(
+            in: [
+                direct(10, sender: 22, recipients: [9, 22]),
+                direct(12, sender: 9, recipients: [30]),
+                direct(11, sender: 22, recipients: [9]),
+                direct(13, sender: 22, recipients: [9, 22, 30]),
+                stream,
+            ],
+            currentUserID: 9
+        )
+        #expect(recency == [22: 11, 30: 12])
+    }
+
+    @Test("Server recent conversations seed direct message order and live messages raise it")
+    func directMessageRecencyUsesServerConversations() {
+        let live = LiveMessageSnapshot(
+            messageID: 500,
+            senderID: 22,
+            senderFullName: "Sender",
+            timestamp: Date(timeIntervalSince1970: 1_700_000_000),
+            content: [],
+            streamID: nil,
+            topic: nil,
+            recipientIDs: [9, 22]
+        )
+        let recency = LiveSessionViewModel.directMessageRecency(
+            in: [live],
+            currentUserID: 9,
+            serverConversations: [
+                LiveRecentDirectConversation(userIDs: [22, 9], maxMessageID: 300),
+                LiveRecentDirectConversation(userIDs: [30], maxMessageID: 400),
+                LiveRecentDirectConversation(userIDs: [9], maxMessageID: 50),
+                LiveRecentDirectConversation(userIDs: [22, 30, 9], maxMessageID: 900),
+            ]
+        )
+        #expect(recency == [22: 500, 30: 400, 9: 50])
+    }
+
     @Test("Opening a conversation shows its cached copy until the fresh page replaces it")
     func cachedConversationShownFirst() async {
         let core = RecordingCoreClient()
@@ -547,6 +609,185 @@ struct LiveSessionTests {
         } else {
             Issue.record("Expected the fresh page to stay loaded")
         }
+    }
+
+    @Test("Quoting fetches the source and inserts a quote; forwarding posts it elsewhere")
+    func quoteAndForward() async {
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(client: core, credentialStore: MemoryCredentialStore())
+        model.startObserving()
+        let accountID = "account-1"
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: accountID),
+                credential: StoredAPICredential(accountID: accountID, apiKey: "key"),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.connectionState == .connected }
+
+        let key = ConversationKey.topic(accountID: accountID, streamID: 5, topic: "macOS")
+        model.openConversation(key)
+        core.emit(
+            .conversationOpened(
+                requestID: 2,
+                page: LiveConversationPage(
+                    key: key,
+                    messages: [
+                        LiveMessageSnapshot(
+                            messageID: 40,
+                            senderID: 22,
+                            senderFullName: "Theo Martin",
+                            timestamp: Date(timeIntervalSince1970: 1_700_000_000),
+                            content: [.paragraph([.text("Rendered")])],
+                            streamID: 5,
+                            topic: "macOS",
+                            recipientIDs: []
+                        ),
+                    ],
+                    foundOldest: true,
+                    foundNewest: true
+                )
+            )
+        )
+        await eventually {
+            if case .loaded = model.conversationState { return true }
+            return false
+        }
+        guard case let .loaded(page) = model.conversationState,
+              let message = page.messages.first
+        else {
+            Issue.record("Expected a loaded message")
+            return
+        }
+
+        model.quote(message)
+        guard case let .fetchMessageSource(quoteID, _, 40) = core.commands.last else {
+            Issue.record("Expected the message source to be requested")
+            return
+        }
+        core.emit(.messageSourceLoaded(requestID: quoteID, messageID: 40, content: "**raw**"))
+        await eventually { model.attachmentInsertion != nil }
+        let insertion = model.attachmentInsertion
+        #expect(insertion?.key == key)
+        #expect(insertion?.markdown.contains("@_**Theo Martin|22**") == true)
+        #expect(insertion?.quote?.senderName == "Theo Martin")
+        #expect(insertion?.quote?.snippet == "Rendered")
+        #expect(insertion?.markdown.contains("```quote\n**raw**\n```") == true)
+
+        let other = ConversationKey.topic(accountID: accountID, streamID: 5, topic: "other")
+        model.forward(message, to: other)
+        guard case let .fetchMessageSource(forwardID, _, 40) = core.commands.last else {
+            Issue.record("Expected a second source request")
+            return
+        }
+        core.emit(.messageSourceLoaded(requestID: forwardID, messageID: 40, content: "**raw**"))
+        await eventually {
+            if case let .sendChannelMessage(_, _, 5, "other", content, _) = core.commands.last {
+                return content.contains("**raw**")
+            }
+            return false
+        }
+    }
+
+    @Test("Mentions offer other people, and a new channel subscribes the user too")
+    func mentionsAndChannelCreation() async {
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(client: core, credentialStore: MemoryCredentialStore())
+        model.startObserving()
+        let accountID = "account-1"
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: accountID),
+                credential: StoredAPICredential(accountID: accountID, apiKey: "key"),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.connectionState == .connected }
+
+        let topicKey = ConversationKey.topic(accountID: accountID, streamID: 5, topic: "macOS")
+        let inTopic = model.mentionCandidates(for: topicKey)
+        #expect(inTopic.map(\.name) == ["all", "topic", "Theo Martin"])
+        let inDirect = model.mentionCandidates(
+            for: .directMessage(accountID: accountID, recipientIDs: [22])
+        )
+        #expect(inDirect.map(\.name) == ["Theo Martin"])
+        #expect(model.channelMemberCandidates.map(\.name) == ["Theo Martin"])
+
+        model.createChannel(name: "engineering", description: "", isPrivate: false, memberIDs: [])
+        if case .failed = model.channelCreationState {} else {
+            Issue.record("An existing channel name must be refused before any request")
+        }
+
+        model.createChannel(name: " design ", description: "Visuals", isPrivate: true, memberIDs: [22, 22])
+        guard case let .createChannel(requestID, _, "design", "Visuals", true, members) = core.commands.last
+        else {
+            Issue.record("Expected a create-channel command")
+            return
+        }
+        #expect(members == [9, 22])
+        core.emit(.channelCreated(requestID: requestID, name: "design"))
+        await eventually { model.channelCreationState == .created(name: "design") }
+    }
+
+    @Test("Reopening a conversation seen this session paints at once without a loading state")
+    func reopenedConversationSkipsLoading() async {
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(client: core, credentialStore: MemoryCredentialStore())
+        model.startObserving()
+        let accountID = "account-1"
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: accountID),
+                credential: StoredAPICredential(accountID: accountID, apiKey: "key"),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.connectionState == .connected }
+
+        let first = ConversationKey.topic(accountID: accountID, streamID: 5, topic: "macOS")
+        let second = ConversationKey.topic(accountID: accountID, streamID: 5, topic: "release")
+        func page(_ key: ConversationKey, topic: String, _ text: String) -> LiveConversationPage {
+            LiveConversationPage(
+                key: key,
+                messages: [
+                    LiveMessageSnapshot(
+                        messageID: 40,
+                        senderID: 22,
+                        senderFullName: "Theo Martin",
+                        timestamp: Date(timeIntervalSince1970: 1_700_000_000),
+                        content: [.paragraph([.text(text)])],
+                        streamID: 5,
+                        topic: topic,
+                        recipientIDs: []
+                    ),
+                ],
+                foundOldest: true,
+                foundNewest: true
+            )
+        }
+
+        model.openConversation(first)
+        core.emit(.conversationOpened(requestID: 2, page: page(first, topic: "macOS", "Hello")))
+        await eventually {
+            if case .loaded = model.conversationState { return true }
+            return false
+        }
+        model.openConversation(second)
+        if case .loading = model.conversationState {} else {
+            Issue.record("A never-opened conversation still waits for its first page")
+        }
+
+        // Going back to the first one shows its earlier content in the same turn.
+        model.openConversation(first)
+        guard case let .loaded(shown) = model.conversationState else {
+            Issue.record("Expected the remembered page to be shown immediately")
+            return
+        }
+        #expect(shown.messages.map(\.plainText) == ["Hello"])
     }
 
     @Test("A loaded conversation is mapped safely and marked read")
