@@ -1262,6 +1262,50 @@ struct LiveSessionTests {
         #expect(core.commands.filter { if case .loadMedia = $0 { true } else { false } }.count == 3)
     }
 
+    @Test("Media wanted before the live session starts is requested once it does")
+    func mediaDeferredUntilLiveSession() async throws {
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(
+            client: core,
+            credentialStore: MemoryCredentialStore()
+        )
+        model.startObserving()
+        let accountID = "account-deferred"
+        core.emit(
+            .cachedSessionLoaded(
+                requestID: 1,
+                identity: identity(accountID: accountID),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.identity != nil }
+
+        // The core has no account session while only cached data is shown, so
+        // asking now would fail for good.
+        let iconURL = "/user_avatars/2/realm/icon.png"
+        model.loadMedia(iconURL)
+        func mediaRequests() -> [String] {
+            core.commands.compactMap { command -> String? in
+                if case let .loadMedia(_, _, remoteURL) = command {
+                    return remoteURL
+                }
+                return nil
+            }
+        }
+        #expect(mediaRequests().isEmpty)
+
+        core.emit(
+            .sessionStarted(
+                requestID: 2,
+                identity: identity(accountID: accountID),
+                credential: StoredAPICredential(accountID: accountID, apiKey: "key"),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.connectionState == .connected }
+        #expect(mediaRequests() == [iconURL])
+    }
+
     @Test("Message actions expose pending, rollback, retry, and success states")
     func messageActions() async throws {
         let core = RecordingCoreClient()
