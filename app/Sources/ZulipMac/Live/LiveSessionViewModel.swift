@@ -1999,13 +1999,27 @@ final class LiveSessionViewModel {
     }
 
     /// Newest message ID per one-to-one conversation partner, so the list can put
-    /// whoever wrote (or was written to) most recently first. Group messages are
-    /// not listed in the sidebar and so do not count.
+    /// whoever wrote (or was written to) most recently first. The server's recent
+    /// conversation list seeds the result and live messages raise it. Group
+    /// conversations are not listed in the sidebar and so do not count.
     static func directMessageRecency(
         in messages: [LiveMessageSnapshot],
-        currentUserID: Int64
+        currentUserID: Int64,
+        serverConversations: [LiveRecentDirectConversation] = []
     ) -> [Int64: Int64] {
         var newest: [Int64: Int64] = [:]
+        for conversation in serverConversations {
+            let others = Set(conversation.userIDs.filter { $0 > 0 && $0 != currentUserID })
+            let partner: Int64
+            if others.isEmpty {
+                partner = currentUserID
+            } else if others.count == 1, let only = others.first {
+                partner = only
+            } else {
+                continue
+            }
+            newest[partner] = max(newest[partner] ?? 0, conversation.maxMessageID)
+        }
         for message in messages where message.streamID == nil {
             let others = Set(message.recipientIDs.filter { $0 > 0 && $0 != currentUserID })
             let partner: Int64
@@ -2033,7 +2047,8 @@ final class LiveSessionViewModel {
         let currentName = identity.fullName.isEmpty ? identity.email : identity.fullName
         let recency = directMessageRecency(
             in: snapshot.messages,
-            currentUserID: identity.userID
+            currentUserID: identity.userID,
+            serverConversations: snapshot.recentDirectConversations
         )
         let directMessages = snapshot.users
             .filter {

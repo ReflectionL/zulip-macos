@@ -28,7 +28,7 @@ const EVENT_TYPES_JSON: &str = concat!(
 /// Initial state additionally includes organization settings (for the icon);
 /// realm change events are not consumed, so they are not subscribed to.
 const FETCH_EVENT_TYPES_JSON: &str = concat!(
-    r#"["message","subscription","realm_user","realm","update_message","#,
+    r#"["message","recent_private_conversations","subscription","realm_user","realm","update_message","#,
     r#""delete_message","reaction","update_message_flags","heartbeat","restart"]"#
 );
 
@@ -110,6 +110,15 @@ pub struct ReactionSummary {
     pub user_id: i64,
 }
 
+/// A one-to-one or group direct-message conversation and its newest message.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RecentDirectConversation {
+    /// Other participants, as reported by the server.
+    pub user_ids: Vec<i64>,
+    /// Identifier of the newest message in the conversation.
+    pub max_message_id: i64,
+}
+
 /// Immutable state seeded by the atomic `register` response.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct BootstrapState {
@@ -121,6 +130,8 @@ pub struct BootstrapState {
     pub messages: Vec<MessageSummary>,
     /// Organization icon location, absolute or relative to the server.
     pub realm_icon_url: Option<String>,
+    /// Direct-message conversations ordered by the server, newest first.
+    pub recent_direct_conversations: Vec<RecentDirectConversation>,
 }
 
 /// Result of registering a live event queue.
@@ -322,6 +333,8 @@ pub struct SyncSnapshot {
     pub messages: Vec<MessageSummary>,
     /// Organization icon location, absolute or relative to the server.
     pub realm_icon_url: Option<String>,
+    /// Direct-message conversations known at registration, newest first.
+    pub recent_direct_conversations: Vec<RecentDirectConversation>,
 }
 
 /// Reduction statistics and at most one snapshot for a complete poll batch.
@@ -819,6 +832,7 @@ pub struct SyncReducer {
     channels: BTreeMap<i64, ChannelSummary>,
     messages: BTreeMap<i64, MessageSummary>,
     realm_icon_url: Option<String>,
+    recent_direct_conversations: Vec<RecentDirectConversation>,
 }
 
 impl SyncReducer {
@@ -848,6 +862,7 @@ impl SyncReducer {
                 .map(|message| (message.id, message))
                 .collect(),
             realm_icon_url: bootstrap.realm_icon_url,
+            recent_direct_conversations: bootstrap.recent_direct_conversations,
         }
     }
 
@@ -861,6 +876,7 @@ impl SyncReducer {
             channels: self.channels.values().cloned().collect(),
             messages: self.messages.values().cloned().collect(),
             realm_icon_url: self.realm_icon_url.clone(),
+            recent_direct_conversations: self.recent_direct_conversations.clone(),
         }
     }
 
@@ -1076,6 +1092,16 @@ struct RegisterDocument {
     messages: Vec<MessageDocument>,
     #[serde(default)]
     realm_icon_url: Option<String>,
+    #[serde(default)]
+    recent_private_conversations: Vec<RecentConversationDocument>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RecentConversationDocument {
+    #[serde(default)]
+    user_ids: Vec<i64>,
+    #[serde(default)]
+    max_message_id: i64,
 }
 
 impl RegisterDocument {
@@ -1135,6 +1161,19 @@ impl RegisterDocument {
                 channels,
                 messages,
                 realm_icon_url: self.realm_icon_url.filter(|value| !value.trim().is_empty()),
+                recent_direct_conversations: {
+                    let mut conversations = self
+                        .recent_private_conversations
+                        .into_iter()
+                        .filter(|item| item.max_message_id > 0)
+                        .map(|item| RecentDirectConversation {
+                            user_ids: item.user_ids,
+                            max_message_id: item.max_message_id,
+                        })
+                        .collect::<Vec<_>>();
+                    conversations.sort_by_key(|item| std::cmp::Reverse(item.max_message_id));
+                    conversations
+                },
             },
             zulip_feature_level: self.zulip_feature_level,
         })
@@ -1648,6 +1687,11 @@ mod tests {
                         "avatar_url":"/user_avatars/2/maya.png?x=1"
                     }],
                     "realm_icon_url":"https://cdn.example.com/icon.png",
+                    "recent_private_conversations":[
+                        {"max_message_id":120,"user_ids":[7]},
+                        {"max_message_id":300,"user_ids":[7,9]},
+                        {"max_message_id":0,"user_ids":[4]}
+                    ],
                     "subscriptions":[{
                         "stream_id":5,
                         "name":"engineering",
@@ -1717,6 +1761,15 @@ mod tests {
             registered.bootstrap.realm_icon_url.as_deref(),
             Some("https://cdn.example.com/icon.png")
         );
+        assert_eq!(
+            registered
+                .bootstrap
+                .recent_direct_conversations
+                .iter()
+                .map(|item| (item.max_message_id, item.user_ids.clone()))
+                .collect::<Vec<_>>(),
+            vec![(300, vec![7, 9]), (120, vec![7])]
+        );
         assert_eq!(registered.bootstrap.channels[0].name, "engineering");
 
         let register_request = requests.recv().expect("register request");
@@ -1753,6 +1806,7 @@ mod tests {
                 channels: vec![fixture_channel(5, "engineering")],
                 messages: vec![],
                 realm_icon_url: None,
+                recent_direct_conversations: Vec::new(),
             },
         );
         let message = fixture_message(100, "<p>first</p>");
@@ -1811,6 +1865,7 @@ mod tests {
                 channels: vec![fixture_channel(5, "old-channel")],
                 messages: vec![fixture_message(100, "<p>old</p>")],
                 realm_icon_url: None,
+                recent_direct_conversations: Vec::new(),
             },
         );
 

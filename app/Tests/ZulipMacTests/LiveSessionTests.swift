@@ -511,6 +511,31 @@ struct LiveSessionTests {
         #expect(recency == [22: 11, 30: 12])
     }
 
+    @Test("Server recent conversations seed direct message order and live messages raise it")
+    func directMessageRecencyUsesServerConversations() {
+        let live = LiveMessageSnapshot(
+            messageID: 500,
+            senderID: 22,
+            senderFullName: "Sender",
+            timestamp: Date(timeIntervalSince1970: 1_700_000_000),
+            content: [],
+            streamID: nil,
+            topic: nil,
+            recipientIDs: [9, 22]
+        )
+        let recency = LiveSessionViewModel.directMessageRecency(
+            in: [live],
+            currentUserID: 9,
+            serverConversations: [
+                LiveRecentDirectConversation(userIDs: [22, 9], maxMessageID: 300),
+                LiveRecentDirectConversation(userIDs: [30], maxMessageID: 400),
+                LiveRecentDirectConversation(userIDs: [9], maxMessageID: 50),
+                LiveRecentDirectConversation(userIDs: [22, 30, 9], maxMessageID: 900),
+            ]
+        )
+        #expect(recency == [22: 500, 30: 400, 9: 50])
+    }
+
     @Test("Opening a conversation shows its cached copy until the fresh page replaces it")
     func cachedConversationShownFirst() async {
         let core = RecordingCoreClient()

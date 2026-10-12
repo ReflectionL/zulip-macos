@@ -28,8 +28,8 @@ use zulip_core::{
         PresenceStatus, TopicPropagation, TopicSummary,
     },
     sync::{
-        EventQueueClient, MessageSummary, RecoveryPolicy, SyncCycle, SyncSession, SyncSnapshot,
-        UserSummary,
+        EventQueueClient, MessageSummary, RecentDirectConversation, RecoveryPolicy, SyncCycle,
+        SyncSession, SyncSnapshot, UserSummary,
     },
 };
 
@@ -781,6 +781,26 @@ pub struct CoreSnapshot {
     pub messages: Vec<CoreMessage>,
     /// Organization icon location, absolute or relative to the server.
     pub realm_icon_url: Option<String>,
+    /// Direct-message conversations ordered by the server, newest first.
+    pub recent_direct_conversations: Vec<CoreRecentDirectConversation>,
+}
+
+/// A direct-message conversation and its newest message.
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct CoreRecentDirectConversation {
+    /// Other participants, as reported by the server.
+    pub user_ids: Vec<i64>,
+    /// Identifier of the newest message in the conversation.
+    pub max_message_id: i64,
+}
+
+impl From<RecentDirectConversation> for CoreRecentDirectConversation {
+    fn from(item: RecentDirectConversation) -> Self {
+        Self {
+            user_ids: item.user_ids,
+            max_message_id: item.max_message_id,
+        }
+    }
 }
 
 /// Newest message page for one stable conversation.
@@ -2365,6 +2385,7 @@ fn cached_snapshot(snapshot: &SyncSnapshot, topics: &[TopicSummary]) -> CachedSn
         topics: topics.to_vec(),
         messages: snapshot.messages.clone(),
         realm_icon_url: snapshot.realm_icon_url.clone(),
+        recent_direct_conversations: snapshot.recent_direct_conversations.clone(),
     }
 }
 
@@ -2462,6 +2483,7 @@ fn load_cached_session(
         channels: cached.channels,
         messages: cached.messages,
         realm_icon_url: cached.realm_icon_url,
+        recent_direct_conversations: cached.recent_direct_conversations,
     };
     event_sink.handle_event(CoreEvent::CachedSessionLoaded {
         request_id,
@@ -2621,6 +2643,11 @@ impl CoreSnapshot {
             topics: topics.iter().cloned().map(Into::into).collect(),
             messages: snapshot.messages.into_iter().map(Into::into).collect(),
             realm_icon_url: snapshot.realm_icon_url,
+            recent_direct_conversations: snapshot
+                .recent_direct_conversations
+                .into_iter()
+                .map(Into::into)
+                .collect(),
         }
     }
 }
@@ -2653,7 +2680,7 @@ mod tests {
     use tempfile::TempDir;
     use zulip_core::{
         messages::{ConversationTarget, TopicSummary},
-        sync::{MessageSummary, SyncSnapshot},
+        sync::{MessageSummary, RecentDirectConversation, SyncSnapshot},
     };
 
     #[derive(Default)]
@@ -2737,6 +2764,10 @@ mod tests {
                 channels: Vec::new(),
                 messages: Vec::new(),
                 realm_icon_url: Some("https://cdn.example.com/icon.png".to_owned()),
+                recent_direct_conversations: vec![RecentDirectConversation {
+                    user_ids: vec![7],
+                    max_message_id: 9,
+                }],
             },
             &[TopicSummary {
                 stream_id: 5,
@@ -2750,6 +2781,8 @@ mod tests {
             snapshot.realm_icon_url.as_deref(),
             Some("https://cdn.example.com/icon.png")
         );
+        assert_eq!(snapshot.recent_direct_conversations.len(), 1);
+        assert_eq!(snapshot.recent_direct_conversations[0].max_message_id, 9);
         assert_eq!(snapshot.topics[0].name, "macOS");
         assert_eq!(snapshot.topics[0].max_message_id, 44);
     }

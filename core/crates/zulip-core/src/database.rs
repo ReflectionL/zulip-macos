@@ -8,7 +8,7 @@ use thiserror::Error;
 
 use crate::{
     messages::TopicSummary,
-    sync::{ChannelSummary, MessageSummary, UserSummary},
+    sync::{ChannelSummary, MessageSummary, RecentDirectConversation, UserSummary},
 };
 
 const ACCOUNT_STATE_KEY: &str = "account";
@@ -212,6 +212,9 @@ pub struct CachedSnapshot {
     /// Organization icon location, absolute or relative to the server.
     #[serde(default)]
     pub realm_icon_url: Option<String>,
+    /// Direct-message conversations ordered by the server, newest first.
+    #[serde(default)]
+    pub recent_direct_conversations: Vec<RecentDirectConversation>,
 }
 
 /// One conversation as last fetched from the server.
@@ -696,7 +699,7 @@ mod tests {
         AccountRecord, CacheDatabase, CachedAccount, CachedConversation, CachedSnapshot,
         DatabaseError, DraftRecord, MessageRecord, SCHEMA_VERSION, apply_migrations,
     };
-    use crate::sync::MessageSummary;
+    use crate::sync::{MessageSummary, RecentDirectConversation};
 
     #[test]
     fn drafts_list_delete_and_stay_account_scoped() {
@@ -771,6 +774,10 @@ mod tests {
             topics: Vec::new(),
             messages: messages.clone(),
             realm_icon_url: Some("/user_avatars/2/realm/icon.png".to_owned()),
+            recent_direct_conversations: vec![RecentDirectConversation {
+                user_ids: vec![7],
+                max_message_id: 12,
+            }],
         };
         assert!(database.account_cache("acme|maya").expect("read").is_none());
         database

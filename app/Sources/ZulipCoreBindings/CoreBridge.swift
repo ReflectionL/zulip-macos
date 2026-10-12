@@ -103,6 +103,18 @@ public struct LiveReactionSnapshot: Equatable, Sendable {
     }
 }
 
+/// One recent direct-message conversation as the server reports it.
+public struct LiveRecentDirectConversation: Equatable, Sendable {
+    /// Every participant ID the server lists for the conversation.
+    public let userIDs: [Int64]
+    public let maxMessageID: Int64
+
+    public init(userIDs: [Int64], maxMessageID: Int64) {
+        self.userIDs = userIDs
+        self.maxMessageID = maxMessageID
+    }
+}
+
 /// Immutable live state emitted after register or a changed event batch.
 public struct LiveSnapshot: Equatable, Sendable {
     public let revision: UInt64
@@ -113,6 +125,8 @@ public struct LiveSnapshot: Equatable, Sendable {
     public let messages: [LiveMessageSnapshot]
     /// Organization icon location, absolute or relative to the server.
     public let realmIconURL: String?
+    /// Server-side recent one-to-one and group conversations, newest first.
+    public let recentDirectConversations: [LiveRecentDirectConversation]
 
     public init(
         revision: UInt64,
@@ -121,7 +135,8 @@ public struct LiveSnapshot: Equatable, Sendable {
         channels: [LiveChannelSnapshot],
         topics: [LiveTopicSnapshot] = [],
         messages: [LiveMessageSnapshot],
-        realmIconURL: String? = nil
+        realmIconURL: String? = nil,
+        recentDirectConversations: [LiveRecentDirectConversation] = []
     ) {
         self.revision = revision
         self.lastEventID = lastEventID
@@ -130,6 +145,7 @@ public struct LiveSnapshot: Equatable, Sendable {
         self.topics = topics
         self.messages = messages
         self.realmIconURL = realmIconURL
+        self.recentDirectConversations = recentDirectConversations
     }
 }
 
@@ -906,6 +922,9 @@ private extension LiveSnapshot {
         topics = snapshot.topics.map(LiveTopicSnapshot.init)
         messages = snapshot.messages.map(LiveMessageSnapshot.init)
         realmIconURL = snapshot.realmIconUrl
+        recentDirectConversations = snapshot.recentDirectConversations.map {
+            LiveRecentDirectConversation(userIDs: $0.userIds, maxMessageID: $0.maxMessageId)
+        }
     }
 }
 
