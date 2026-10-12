@@ -1,0 +1,61 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create, for example v0.1.0-alpha.2"
+        required: true
+        type: string
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish DMG
+    runs-on: macos-26
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Install host tools
+        run: brew install ripgrep
+
+      - name: Install Rust 1.95
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal --component clippy,rustfmt
+          rustup default 1.95.0
+
+      - name: Verify toolchain
+        run: ./scripts/bootstrap.sh
+
+      - name: Run checks and tests
+        run: ./scripts/check.sh
+
+      - name: Package DMG
+        run: ./scripts/package-dmg.sh release "$RELEASE_TAG"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          flags=()
+          if [[ "$RELEASE_TAG" == *-* ]]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "$RELEASE_TAG" \
+            --target "$GITHUB_SHA" \
+            --title "Zulip Mac $RELEASE_TAG" \
+            --notes "Apple Silicon (arm64) build for macOS 26 or later. Ad-hoc signed and not notarized; right-click and choose Open on first launch. Verify the download with the attached SHA-256 file." \
+            "${flags[@]}" \
+            dist/Zulip-Mac-*-arm64.dmg \
+            dist/Zulip-Mac-*-arm64.dmg.sha256
