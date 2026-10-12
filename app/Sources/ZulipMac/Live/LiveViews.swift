@@ -153,6 +153,23 @@ struct LiveLoginView: View {
     }
 }
 
+private struct ConnectionStatusPill: View {
+    let text: String
+
+    var body: some View {
+        HStack(spacing: AppTheme.Spacing.small) {
+            ProgressView()
+                .controlSize(.small)
+            Text(text)
+                .font(AppTheme.Typography.metadata)
+                .foregroundStyle(AppTheme.Colors.secondaryText)
+        }
+        .padding(.horizontal, AppTheme.Spacing.medium)
+        .padding(.vertical, AppTheme.Spacing.small)
+        .background(.regularMaterial, in: Capsule())
+    }
+}
+
 private struct LiveWindowView: View {
     let session: LiveSessionViewModel
 
@@ -242,6 +259,12 @@ private struct LiveWindowView: View {
                 .transition(.move(edge: .top).combined(with: .opacity))
             }
 
+            if case .retrying = session.connectionState {
+                ConnectionStatusPill(text: "Reconnecting…")
+                    .padding(.top, AppTheme.Spacing.small)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+
             Button("Open quick switcher") {
                 presentQuickSwitcher()
             }
@@ -258,6 +281,7 @@ private struct LiveWindowView: View {
         }
         .animation(.snappy(duration: 0.2), value: navigation.isCommandPalettePresented)
         .animation(.snappy(duration: 0.2), value: isMessageSearchPresented)
+        .animation(.snappy(duration: 0.2), value: session.connectionState)
         .onChange(of: navigation.selection) {
             navigation.dismissCommandPalette()
             if suppressedSelectionOpen == navigation.selection {

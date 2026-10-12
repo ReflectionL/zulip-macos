@@ -146,7 +146,7 @@ private struct PendingAttachmentUpload: Sendable {
 final class LiveSessionViewModel {
     private static let lastServerURLKey = "lastAccount.serverURL"
     private static let lastEmailKey = "lastAccount.email"
-    static let defaultServerURL = "https://shitcreator.zulipchat.com"
+    static let defaultServerURL = ""
     private static let conversationPageSize: UInt16 = 10
     private static let searchResultLimit: UInt16 = 20
     private static let searchContextRadius: UInt16 = 10
@@ -898,6 +898,11 @@ final class LiveSessionViewModel {
         case let .retryScheduled(_, delayMilliseconds):
             connectionState = .retrying(delayMilliseconds: delayMilliseconds)
 
+        case let .syncResumed(accountID):
+            if identity?.accountID == accountID, case .retrying = connectionState {
+                connectionState = .connected
+            }
+
         case .disconnected:
             forgetLastAccount()
             resetSessionState()
@@ -963,7 +968,14 @@ final class LiveSessionViewModel {
                 // The Rust core ended the live session (for example after the
                 // server rejected the stored key). Return to the login surface
                 // with the reason instead of leaving a window that never updates.
+                // Only a credential rejection ends a session, so the saved key is
+                // known to be unusable and must not be offered again.
+                let rejectedAccountID = identity?.accountID
                 resetSessionState()
+                if let rejectedAccountID {
+                    try? await credentialStore.delete(accountID: rejectedAccountID)
+                }
+                forgetLastAccount()
                 connectionState = .failed(message: message)
             } else {
                 connectionState = .failed(message: message)
