@@ -7,19 +7,23 @@ public struct LiveUserSnapshot: Equatable, Sendable {
     public let email: String?
     public let isActive: Bool
     public let isBot: Bool
+    /// Avatar image location, absolute or relative to the server.
+    public let avatarURL: String?
 
     public init(
         userID: Int64,
         fullName: String,
         email: String?,
         isActive: Bool,
-        isBot: Bool
+        isBot: Bool,
+        avatarURL: String? = nil
     ) {
         self.userID = userID
         self.fullName = fullName
         self.email = email
         self.isActive = isActive
         self.isBot = isBot
+        self.avatarURL = avatarURL
     }
 }
 
@@ -107,6 +111,8 @@ public struct LiveSnapshot: Equatable, Sendable {
     public let channels: [LiveChannelSnapshot]
     public let topics: [LiveTopicSnapshot]
     public let messages: [LiveMessageSnapshot]
+    /// Organization icon location, absolute or relative to the server.
+    public let realmIconURL: String?
 
     public init(
         revision: UInt64,
@@ -114,7 +120,8 @@ public struct LiveSnapshot: Equatable, Sendable {
         users: [LiveUserSnapshot],
         channels: [LiveChannelSnapshot],
         topics: [LiveTopicSnapshot] = [],
-        messages: [LiveMessageSnapshot]
+        messages: [LiveMessageSnapshot],
+        realmIconURL: String? = nil
     ) {
         self.revision = revision
         self.lastEventID = lastEventID
@@ -122,6 +129,7 @@ public struct LiveSnapshot: Equatable, Sendable {
         self.channels = channels
         self.topics = topics
         self.messages = messages
+        self.realmIconURL = realmIconURL
     }
 }
 
@@ -867,6 +875,7 @@ private extension LiveSnapshot {
         channels = snapshot.channels.map(LiveChannelSnapshot.init)
         topics = snapshot.topics.map(LiveTopicSnapshot.init)
         messages = snapshot.messages.map(LiveMessageSnapshot.init)
+        realmIconURL = snapshot.realmIconUrl
     }
 }
 
@@ -877,6 +886,7 @@ private extension LiveUserSnapshot {
         email = user.email
         isActive = user.isActive
         isBot = user.isBot
+        avatarURL = user.avatarUrl
     }
 }
 
@@ -925,6 +935,19 @@ private extension InlineContent {
             self = .mention(displayName: displayName, userID: userID)
         case let .emoji(name, value):
             self = .emoji(name: name, value: value)
+        case let .styled(style, content):
+            self = .styled(InlineStyle(style), content.map(InlineContent.init))
+        }
+    }
+}
+
+private extension InlineStyle {
+    init(_ style: CoreInlineStyle) {
+        switch style {
+        case .strong: self = .strong
+        case .emphasis: self = .emphasis
+        case .strikethrough: self = .strikethrough
+        case .code: self = .code
         }
     }
 }
@@ -934,6 +957,8 @@ private extension ContentBlock {
         switch block {
         case let .paragraph(content):
             self = .paragraph(content.map(InlineContent.init))
+        case let .heading(level, content):
+            self = .heading(level: Int(level), content: content.map(InlineContent.init))
         case let .quote(blocks):
             self = .quote(blocks.map(ContentBlock.init))
         case let .list(items, ordered):

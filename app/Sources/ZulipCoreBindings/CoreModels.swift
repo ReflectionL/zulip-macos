@@ -110,6 +110,7 @@ public struct DirectMessageSnapshot: Identifiable, Equatable, Sendable {
     public let initials: String
     public let unreadCount: Int
     public let presence: PresenceState
+    public let avatarURL: String?
 
     public var id: Int64 { userID }
 
@@ -118,13 +119,15 @@ public struct DirectMessageSnapshot: Identifiable, Equatable, Sendable {
         displayName: String,
         initials: String,
         unreadCount: Int = 0,
-        presence: PresenceState
+        presence: PresenceState,
+        avatarURL: String? = nil
     ) {
         self.userID = userID
         self.displayName = displayName
         self.initials = initials
         self.unreadCount = unreadCount
         self.presence = presence
+        self.avatarURL = avatarURL
     }
 }
 
@@ -138,6 +141,8 @@ public struct SidebarSnapshot: Equatable, Sendable {
     public let directMessages: [DirectMessageSnapshot]
     public let currentUserName: String
     public let currentUserInitials: String
+    public let organizationIconURL: String?
+    public let currentUserAvatarURL: String?
 
     public init(
         accountID: String,
@@ -147,7 +152,9 @@ public struct SidebarSnapshot: Equatable, Sendable {
         channels: [ChannelSnapshot],
         directMessages: [DirectMessageSnapshot],
         currentUserName: String,
-        currentUserInitials: String
+        currentUserInitials: String,
+        organizationIconURL: String? = nil,
+        currentUserAvatarURL: String? = nil
     ) {
         self.accountID = accountID
         self.organizationName = organizationName
@@ -157,7 +164,16 @@ public struct SidebarSnapshot: Equatable, Sendable {
         self.directMessages = directMessages
         self.currentUserName = currentUserName
         self.currentUserInitials = currentUserInitials
+        self.organizationIconURL = organizationIconURL
+        self.currentUserAvatarURL = currentUserAvatarURL
     }
+}
+
+public enum InlineStyle: Equatable, Sendable {
+    case strong
+    case emphasis
+    case strikethrough
+    case code
 }
 
 public enum InlineContent: Equatable, Sendable {
@@ -165,6 +181,7 @@ public enum InlineContent: Equatable, Sendable {
     case link(label: String, url: String)
     case mention(displayName: String, userID: Int64)
     case emoji(name: String, value: String)
+    case styled(InlineStyle, [InlineContent])
 
     public var plainText: String {
         switch self {
@@ -176,12 +193,15 @@ public enum InlineContent: Equatable, Sendable {
             "@\(displayName)"
         case let .emoji(_, value):
             value
+        case let .styled(_, content):
+            content.map(\.plainText).joined()
         }
     }
 }
 
 public indirect enum ContentBlock: Equatable, Sendable {
     case paragraph([InlineContent])
+    case heading(level: Int, content: [InlineContent])
     case quote([ContentBlock])
     case list(items: [[ContentBlock]], ordered: Bool)
     case code(language: String?, value: String)
@@ -190,7 +210,7 @@ public indirect enum ContentBlock: Equatable, Sendable {
 
     public var plainText: String {
         switch self {
-        case let .paragraph(content):
+        case let .paragraph(content), let .heading(_, content):
             content.map(\.plainText).joined()
         case let .quote(blocks):
             blocks.map(\.plainText).joined(separator: "\n")
@@ -246,6 +266,7 @@ public struct MessageViewData: Identifiable, Equatable, Sendable {
     public var isRead: Bool
     public var deliveryState: MessageDeliveryState
     public var actionState: MessageActionState
+    public var senderAvatarURL: String?
 
     public init(
         id: Int64,
@@ -264,7 +285,8 @@ public struct MessageViewData: Identifiable, Equatable, Sendable {
         hasOwnThumbsUp: Bool = false,
         isRead: Bool = true,
         deliveryState: MessageDeliveryState = .sent,
-        actionState: MessageActionState = .idle
+        actionState: MessageActionState = .idle,
+        senderAvatarURL: String? = nil
     ) {
         self.id = id
         self.accountID = accountID
@@ -283,6 +305,7 @@ public struct MessageViewData: Identifiable, Equatable, Sendable {
         self.isRead = isRead
         self.deliveryState = deliveryState
         self.actionState = actionState
+        self.senderAvatarURL = senderAvatarURL
     }
 
     public var plainText: String {

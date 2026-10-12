@@ -18,7 +18,8 @@ use tokio::{
 use zulip_core::{
     auth::{AuthenticatedAccount, AuthenticationClient, SecretString},
     content::{
-        ContentBlock as NativeContentBlock, InlineContent as NativeInlineContent, parse_zulip_html,
+        ContentBlock as NativeContentBlock, InlineContent as NativeInlineContent,
+        InlineStyle as NativeInlineStyle, parse_zulip_html,
     },
     database::{CacheDatabase, CachedAccount, CachedConversation, CachedSnapshot, DraftRecord},
     media::MediaClient,
@@ -538,6 +539,8 @@ pub struct CoreUser {
     pub is_active: bool,
     /// Bot account state.
     pub is_bot: bool,
+    /// Avatar image location, absolute or relative to the server.
+    pub avatar_url: Option<String>,
 }
 
 /// Channel projection in a bridge snapshot.
@@ -618,6 +621,26 @@ pub enum CoreInlineContent {
         /// Readable fallback value.
         value: String,
     },
+    /// Nested content with bold, italic, strikethrough or code styling.
+    Styled {
+        /// The applied emphasis.
+        style: CoreInlineStyle,
+        /// Styled inline content.
+        content: Vec<CoreInlineContent>,
+    },
+}
+
+/// Emphasis applied to a run of inline content.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum CoreInlineStyle {
+    /// Bold text.
+    Strong,
+    /// Italic text.
+    Emphasis,
+    /// Struck-through text.
+    Strikethrough,
+    /// Inline code.
+    Code,
 }
 
 /// One list item containing recursively nested native blocks.
@@ -630,8 +653,15 @@ pub struct CoreContentListItem {
 /// Sanitized native block content crossing the application bridge.
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Enum)]
 pub enum CoreContentBlock {
-    /// Paragraph or heading content.
+    /// Paragraph content.
     Paragraph {
+        /// Inline values in display order.
+        content: Vec<CoreInlineContent>,
+    },
+    /// Heading content.
+    Heading {
+        /// Heading level from 1 (largest) to 6.
+        level: u8,
         /// Inline values in display order.
         content: Vec<CoreInlineContent>,
     },
@@ -696,6 +726,8 @@ pub struct CoreSnapshot {
     pub topics: Vec<CoreTopic>,
     /// Messages sorted by identifier.
     pub messages: Vec<CoreMessage>,
+    /// Organization icon location, absolute or relative to the server.
+    pub realm_icon_url: Option<String>,
 }
 
 /// Newest message page for one stable conversation.
@@ -2223,6 +2255,7 @@ fn cached_snapshot(snapshot: &SyncSnapshot, topics: &[TopicSummary]) -> CachedSn
         channels: snapshot.channels.clone(),
         topics: topics.to_vec(),
         messages: snapshot.messages.clone(),
+        realm_icon_url: snapshot.realm_icon_url.clone(),
     }
 }
 
@@ -2319,6 +2352,7 @@ fn load_cached_session(
         users: cached.users,
         channels: cached.channels,
         messages: cached.messages,
+        realm_icon_url: cached.realm_icon_url,
     };
     event_sink.handle_event(CoreEvent::CachedSessionLoaded {
         request_id,
@@ -2361,6 +2395,7 @@ impl From<UserSummary> for CoreUser {
             email: user.email,
             is_active: user.is_active,
             is_bot: user.is_bot,
+            avatar_url: user.avatar_url,
         }
     }
 }
@@ -2406,6 +2441,15 @@ impl From<NativeInlineContent> for CoreInlineContent {
                 user_id,
             },
             NativeInlineContent::Emoji { name, value } => Self::Emoji { name, value },
+            NativeInlineContent::Styled { style, content } => Self::Styled {
+                style: match style {
+                    NativeInlineStyle::Strong => CoreInlineStyle::Strong,
+                    NativeInlineStyle::Emphasis => CoreInlineStyle::Emphasis,
+                    NativeInlineStyle::Strikethrough => CoreInlineStyle::Strikethrough,
+                    NativeInlineStyle::Code => CoreInlineStyle::Code,
+                },
+                content: content.into_iter().map(Self::from).collect(),
+            },
         }
     }
 }
@@ -2414,6 +2458,10 @@ impl From<NativeContentBlock> for CoreContentBlock {
     fn from(block: NativeContentBlock) -> Self {
         match block {
             NativeContentBlock::Paragraph(content) => Self::Paragraph {
+                content: content.into_iter().map(CoreInlineContent::from).collect(),
+            },
+            NativeContentBlock::Heading { level, content } => Self::Heading {
+                level,
                 content: content.into_iter().map(CoreInlineContent::from).collect(),
             },
             NativeContentBlock::Quote(blocks) => Self::Quote {
@@ -2463,6 +2511,7 @@ impl CoreSnapshot {
                 .collect(),
             topics: topics.iter().cloned().map(Into::into).collect(),
             messages: snapshot.messages.into_iter().map(Into::into).collect(),
+            realm_icon_url: snapshot.realm_icon_url,
         }
     }
 }
@@ -2578,6 +2627,7 @@ mod tests {
                 users: Vec::new(),
                 channels: Vec::new(),
                 messages: Vec::new(),
+                realm_icon_url: Some("https://cdn.example.com/icon.png".to_owned()),
             },
             &[TopicSummary {
                 stream_id: 5,
@@ -2587,6 +2637,10 @@ mod tests {
         );
         assert_eq!(snapshot.topics.len(), 1);
         assert_eq!(snapshot.topics[0].stream_id, 5);
+        assert_eq!(
+            snapshot.realm_icon_url.as_deref(),
+            Some("https://cdn.example.com/icon.png")
+        );
         assert_eq!(snapshot.topics[0].name, "macOS");
         assert_eq!(snapshot.topics[0].max_message_id, 44);
     }

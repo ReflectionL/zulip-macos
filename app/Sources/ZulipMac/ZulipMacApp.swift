@@ -26,6 +26,7 @@ struct ZulipMacApp: App {
                     LabeledContent("Previous / next conversation", value: "⌥⌘↑ / ⌥⌘↓")
                     LabeledContent("Focus message composer", value: "⇧⌘L")
                     LabeledContent("Send message", value: "Return")
+                    LabeledContent("New line in message", value: "⇧Return or ⌥Return")
                     LabeledContent("Leave composer, close search", value: "Esc")
                     LabeledContent("Toggle sidebar", value: "⌃⌘S")
                 }

@@ -25,6 +25,12 @@ const EVENT_TYPES_JSON: &str = concat!(
     r#"["message","subscription","realm_user","update_message","#,
     r#""delete_message","reaction","update_message_flags","heartbeat","restart"]"#
 );
+/// Initial state additionally includes organization settings (for the icon);
+/// realm change events are not consumed, so they are not subscribed to.
+const FETCH_EVENT_TYPES_JSON: &str = concat!(
+    r#"["message","subscription","realm_user","realm","update_message","#,
+    r#""delete_message","reaction","update_message_flags","heartbeat","restart"]"#
+);
 
 /// A server-allocated queue and its current acknowledgement cursor.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -52,6 +58,9 @@ pub struct UserSummary {
     pub is_active: bool,
     /// Whether this user represents a bot.
     pub is_bot: bool,
+    /// Avatar image location, absolute or relative to the server, when known.
+    #[serde(default)]
+    pub avatar_url: Option<String>,
 }
 
 /// A normalized subscribed channel.
@@ -110,6 +119,8 @@ pub struct BootstrapState {
     pub channels: Vec<ChannelSummary>,
     /// Messages included by a compatible server's register response.
     pub messages: Vec<MessageSummary>,
+    /// Organization icon location, absolute or relative to the server.
+    pub realm_icon_url: Option<String>,
 }
 
 /// Result of registering a live event queue.
@@ -162,6 +173,8 @@ pub struct UserUpdate {
     pub is_active: Option<bool>,
     /// Replacement bot state, when present.
     pub is_bot: Option<bool>,
+    /// Replacement avatar location, when present.
+    pub avatar_url: Option<String>,
 }
 
 /// Normalized live events accepted by [`SyncReducer`].
@@ -307,6 +320,8 @@ pub struct SyncSnapshot {
     pub channels: Vec<ChannelSummary>,
     /// Messages sorted by identifier.
     pub messages: Vec<MessageSummary>,
+    /// Organization icon location, absolute or relative to the server.
+    pub realm_icon_url: Option<String>,
 }
 
 /// Reduction statistics and at most one snapshot for a complete poll batch.
@@ -426,7 +441,7 @@ impl EventQueueClient {
                 ("slim_presence", "true"),
                 ("include_subscribers", "false"),
                 ("event_types", EVENT_TYPES_JSON),
-                ("fetch_event_types", EVENT_TYPES_JSON),
+                ("fetch_event_types", FETCH_EVENT_TYPES_JSON),
                 ("client_capabilities", client_capabilities.as_str()),
             ])
             .send()
@@ -803,6 +818,7 @@ pub struct SyncReducer {
     users: BTreeMap<i64, UserSummary>,
     channels: BTreeMap<i64, ChannelSummary>,
     messages: BTreeMap<i64, MessageSummary>,
+    realm_icon_url: Option<String>,
 }
 
 impl SyncReducer {
@@ -831,6 +847,7 @@ impl SyncReducer {
                 .into_iter()
                 .map(|message| (message.id, message))
                 .collect(),
+            realm_icon_url: bootstrap.realm_icon_url,
         }
     }
 
@@ -843,6 +860,7 @@ impl SyncReducer {
             users: self.users.values().cloned().collect(),
             channels: self.channels.values().cloned().collect(),
             messages: self.messages.values().cloned().collect(),
+            realm_icon_url: self.realm_icon_url.clone(),
         }
     }
 
@@ -1027,6 +1045,9 @@ impl SyncReducer {
                 if let Some(is_bot) = update.is_bot {
                     user.is_bot = is_bot;
                 }
+                if let Some(avatar_url) = update.avatar_url {
+                    user.avatar_url = Some(avatar_url);
+                }
                 *user != previous
             }
             SyncEvent::UserRemoved { user_id, .. } => self.users.remove(&user_id).is_some(),
@@ -1053,6 +1074,8 @@ struct RegisterDocument {
     subscriptions: Vec<ChannelDocument>,
     #[serde(default)]
     messages: Vec<MessageDocument>,
+    #[serde(default)]
+    realm_icon_url: Option<String>,
 }
 
 impl RegisterDocument {
@@ -1111,6 +1134,7 @@ impl RegisterDocument {
                 users,
                 channels,
                 messages,
+                realm_icon_url: self.realm_icon_url.filter(|value| !value.trim().is_empty()),
             },
             zulip_feature_level: self.zulip_feature_level,
         })
@@ -1336,6 +1360,10 @@ impl EventDocument {
                         .map(str::to_owned),
                     is_active: person.get("is_active").and_then(Value::as_bool),
                     is_bot: person.get("is_bot").and_then(Value::as_bool),
+                    avatar_url: person
+                        .get("avatar_url")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
                 },
             })
         } else {
@@ -1359,6 +1387,8 @@ struct UserDocument {
     is_active: bool,
     #[serde(default)]
     is_bot: bool,
+    #[serde(default)]
+    avatar_url: Option<String>,
 }
 
 impl UserDocument {
@@ -1372,6 +1402,7 @@ impl UserDocument {
             email: self.email,
             is_active: self.is_active,
             is_bot: self.is_bot,
+            avatar_url: self.avatar_url.filter(|value| !value.trim().is_empty()),
         })
     }
 }
@@ -1596,6 +1627,7 @@ mod tests {
     const API_KEY: &str = "fixture-sync-key-do-not-log";
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn register_and_poll_follow_the_zulip_protocol() {
         let responses = vec![
             (
@@ -1612,8 +1644,10 @@ mod tests {
                         "full_name":"Maya Chen",
                         "email":"maya@example.com",
                         "is_active":true,
-                        "is_bot":false
+                        "is_bot":false,
+                        "avatar_url":"/user_avatars/2/maya.png?x=1"
                     }],
+                    "realm_icon_url":"https://cdn.example.com/icon.png",
                     "subscriptions":[{
                         "stream_id":5,
                         "name":"engineering",
@@ -1675,6 +1709,14 @@ mod tests {
         assert_eq!(registered.queue.idle_timeout_seconds, Some(600));
         assert_eq!(registered.zulip_feature_level, 481);
         assert_eq!(registered.bootstrap.users[0].full_name, "Maya Chen");
+        assert_eq!(
+            registered.bootstrap.users[0].avatar_url.as_deref(),
+            Some("/user_avatars/2/maya.png?x=1")
+        );
+        assert_eq!(
+            registered.bootstrap.realm_icon_url.as_deref(),
+            Some("https://cdn.example.com/icon.png")
+        );
         assert_eq!(registered.bootstrap.channels[0].name, "engineering");
 
         let register_request = requests.recv().expect("register request");
@@ -1710,6 +1752,7 @@ mod tests {
                 users: vec![fixture_user(7, "Maya")],
                 channels: vec![fixture_channel(5, "engineering")],
                 messages: vec![],
+                realm_icon_url: None,
             },
         );
         let message = fixture_message(100, "<p>first</p>");
@@ -1767,6 +1810,7 @@ mod tests {
                 users: vec![fixture_user(7, "Old name")],
                 channels: vec![fixture_channel(5, "old-channel")],
                 messages: vec![fixture_message(100, "<p>old</p>")],
+                realm_icon_url: None,
             },
         );
 
@@ -2125,6 +2169,7 @@ mod tests {
             email: Some(format!("{id}@example.com")),
             is_active: true,
             is_bot: false,
+            avatar_url: None,
         }
     }
 

@@ -209,6 +209,9 @@ pub struct CachedSnapshot {
     pub topics: Vec<TopicSummary>,
     /// Recent messages, ascending by identifier.
     pub messages: Vec<MessageSummary>,
+    /// Organization icon location, absolute or relative to the server.
+    #[serde(default)]
+    pub realm_icon_url: Option<String>,
 }
 
 /// One conversation as last fetched from the server.
@@ -767,6 +770,7 @@ mod tests {
             channels: Vec::new(),
             topics: Vec::new(),
             messages: messages.clone(),
+            realm_icon_url: Some("/user_avatars/2/realm/icon.png".to_owned()),
         };
         assert!(database.account_cache("acme|maya").expect("read").is_none());
         database

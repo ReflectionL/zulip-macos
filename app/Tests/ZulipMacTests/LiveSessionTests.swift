@@ -305,6 +305,12 @@ struct LiveSessionTests {
         )
         await eventually { model.identity != nil }
         #expect(model.sidebarSnapshot?.channels.map(\.name) == ["engineering"])
+        #expect(model.sidebarSnapshot?.organizationIconURL == "/user_avatars/2/realm/icon.png")
+        #expect(model.sidebarSnapshot?.currentUserAvatarURL == "/user_avatars/2/maya.png")
+        #expect(
+            model.sidebarSnapshot?.directMessages.first { $0.userID == 22 }?.avatarURL
+                == "https://cdn.example.com/theo.png"
+        )
 
         core.emit(
             .conversationOpened(
@@ -331,6 +337,7 @@ struct LiveSessionTests {
         await eventually {
             if case let .offline(page) = model.conversationState {
                 return page.messages.first?.plainText == "Cached hello"
+                    && page.messages.first?.senderAvatarURL == "https://cdn.example.com/theo.png"
             }
             return false
         }
@@ -550,6 +557,48 @@ struct LiveSessionTests {
             return page.messages.allSatisfy { $0.deliveryState == .sent }
                 && refreshCount > refreshCountBeforeSendCompletion
         }
+        // The echo stays on screen until the server's rendered copy arrives, so
+        // the sent message never disappears and reappears.
+        if case let .loaded(page) = model.conversationState {
+            #expect(page.messages.map(\.id).filter { $0 > 0 } == [44])
+            #expect(page.messages.contains { $0.id < 0 })
+        }
+        core.emit(
+            .conversationOpened(
+                requestID: 90,
+                page: LiveConversationPage(
+                    key: key,
+                    messages: [
+                        LiveMessageSnapshot(
+                            messageID: 44,
+                            senderID: 22,
+                            senderFullName: "Theo Martin",
+                            timestamp: Date(timeIntervalSince1970: 1_700_000_000),
+                            content: [.paragraph([.text("Hello world")])],
+                            streamID: 5,
+                            topic: "macOS",
+                            recipientIDs: []
+                        ),
+                        LiveMessageSnapshot(
+                            messageID: 45,
+                            senderID: 21,
+                            senderFullName: "Maya Chen",
+                            timestamp: Date(timeIntervalSince1970: 1_700_000_100),
+                            content: [.paragraph([.text("A reply")])],
+                            streamID: 5,
+                            topic: "macOS",
+                            recipientIDs: []
+                        ),
+                    ],
+                    foundOldest: false,
+                    foundNewest: true
+                )
+            )
+        )
+        await eventually {
+            guard case let .loaded(page) = model.conversationState else { return false }
+            return page.messages.map(\.id) == [44, 45]
+        }
 
         model.loadOlderMessages(for: key)
         let historyCommand = core.commands.last {
@@ -608,7 +657,7 @@ struct LiveSessionTests {
             guard case let .loaded(page) = model.conversationState else {
                 return false
             }
-            return page.messages.map(\.id) == [42, 44]
+            return page.messages.map(\.id) == [42, 44, 45]
                 && page.beforeCursor == nil
                 && !model.isLoadingOlderMessages
         }
@@ -1231,14 +1280,16 @@ struct LiveSessionTests {
                     fullName: "Maya Chen",
                     email: "maya@example.com",
                     isActive: true,
-                    isBot: false
+                    isBot: false,
+                    avatarURL: "/user_avatars/2/maya.png"
                 ),
                 LiveUserSnapshot(
                     userID: 22,
                     fullName: "Theo Martin",
                     email: "theo@example.com",
                     isActive: true,
-                    isBot: false
+                    isBot: false,
+                    avatarURL: "https://cdn.example.com/theo.png"
                 ),
             ],
             channels: [
@@ -1267,7 +1318,8 @@ struct LiveSessionTests {
                     topic: "macOS",
                     recipientIDs: []
                 ),
-            ]
+            ],
+            realmIconURL: "/user_avatars/2/realm/icon.png"
         )
     }
 

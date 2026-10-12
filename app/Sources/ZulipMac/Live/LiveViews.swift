@@ -221,7 +221,9 @@ private struct LiveWindowView: View {
                     sessionControl: SidebarSessionControl(
                         action: .disconnect,
                         perform: session.disconnect
-                    )
+                    ),
+                    mediaLocalURLs: session.mediaLocalURLs,
+                    requestMedia: session.loadMedia
                 )
             } content: {
                 liveConversation

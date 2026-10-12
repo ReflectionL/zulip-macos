@@ -193,6 +193,7 @@ final class LiveSessionViewModel {
     private var cachedSessionRequestID: UInt64?
     private var hasLiveSession = false
     @ObservationIgnored private var snapshotMessages: [Int64: LiveMessageSnapshot] = [:]
+    @ObservationIgnored private var avatarURLs: [Int64: String] = [:]
     private(set) var drafts: [ConversationKey: String] = [:]
     @ObservationIgnored private var draftSaveTasks: [ConversationKey: Task<Void, Never>] = [:]
     private var requestID: UInt64 = 1
@@ -208,6 +209,9 @@ final class LiveSessionViewModel {
     private var failedMessageActions: [Int64: MessageAction] = [:]
     private var sendsByRequestID: [UInt64: PendingSend] = [:]
     private var failedSends: [Int64: PendingSend] = [:]
+    /// Server message ID -> local echo ID for sends the server accepted but whose
+    /// rendered copy has not been fetched yet; the echo stays visible until then.
+    private var confirmedEchoes: [Int64: Int64] = [:]
     private var attachmentUploadsByRequestID: [UInt64: PendingAttachmentUpload] = [:]
     private var failedAttachmentUpload: PendingAttachmentUpload?
     private var mediaRequestsByRequestID: [UInt64: String] = [:]
@@ -1021,9 +1025,9 @@ final class LiveSessionViewModel {
                 )
             }
 
-        case let .messageSent(requestID, _, _):
+        case let .messageSent(requestID, _, messageID):
             if let send = sendsByRequestID.removeValue(forKey: requestID) {
-                removeLoadedMessage(send.localMessageID)
+                keepEchoUntilServerCopyArrives(send, serverMessageID: messageID)
             }
             if let activeSelection {
                 refreshConversation(activeSelection)
@@ -1221,6 +1225,7 @@ final class LiveSessionViewModel {
     private func resetSessionState() {
         hasLiveSession = false
         snapshotMessages = [:]
+        avatarURLs = [:]
         notificationPlanner.reset()
         unseenNotificationCount = 0
         notifier?.setBadge(0)
@@ -1243,6 +1248,7 @@ final class LiveSessionViewModel {
         failedMessageActions = [:]
         sendsByRequestID = [:]
         failedSends = [:]
+        confirmedEchoes = [:]
         attachmentUploadsByRequestID = [:]
         failedAttachmentUpload = nil
         attachmentUploadState = .idle
@@ -1311,6 +1317,12 @@ final class LiveSessionViewModel {
             snapshot.messages.map { ($0.messageID, $0) },
             uniquingKeysWith: { _, latest in latest }
         )
+        avatarURLs = Dictionary(
+            snapshot.users.compactMap { user in
+                user.avatarURL.map { (user.userID, $0) }
+            },
+            uniquingKeysWith: { _, latest in latest }
+        )
         rememberTopics(from: snapshot.topics)
         rememberTopics(from: snapshot.messages)
         sidebarSnapshot = Self.makeSidebar(
@@ -1328,7 +1340,9 @@ final class LiveSessionViewModel {
     ) -> ConversationPage {
         let destination = navigationDirectory.destination(for: livePage.key)
         let incoming = makeMessages(livePage)
-        let messages = mergeMessages(existing?.messages ?? [], incoming)
+        let messages = removeConfirmedEchoes(
+            from: mergeMessages(existing?.messages ?? [], incoming)
+        )
         let hadReachedOldest = existing?.beforeCursor == nil && existing != nil
         return ConversationPage(
             key: livePage.key,
@@ -1381,7 +1395,8 @@ final class LiveSessionViewModel {
                 isStarred: message.flags.contains("starred"),
                 reactionCount: thumbsUp.count,
                 hasOwnThumbsUp: thumbsUp.contains { $0.userID == identity?.userID },
-                isRead: message.flags.contains("read")
+                isRead: message.flags.contains("read"),
+                senderAvatarURL: avatarURLs[message.senderID]
             )
         }
     }
@@ -1492,6 +1507,39 @@ final class LiveSessionViewModel {
         replaceLoadedMessage(restored)
     }
 
+    private func keepEchoUntilServerCopyArrives(_ send: PendingSend, serverMessageID: Int64) {
+        if loadedPage(for: send.key)?.messages.contains(where: { $0.id == serverMessageID }) == true {
+            removeLoadedMessage(send.localMessageID)
+            return
+        }
+        confirmedEchoes[serverMessageID] = send.localMessageID
+        modifyLoadedMessage(send.localMessageID) { message in
+            message.deliveryState = .sent
+        }
+        // Never leave a duplicate behind if the refresh does not include the message.
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(8))
+            guard let self, self.confirmedEchoes.removeValue(forKey: serverMessageID) != nil else {
+                return
+            }
+            self.removeLoadedMessage(send.localMessageID)
+        }
+    }
+
+    private func removeConfirmedEchoes(from messages: [MessageViewData]) -> [MessageViewData] {
+        guard !confirmedEchoes.isEmpty else {
+            return messages
+        }
+        let present = Set(messages.map(\.id))
+        let resolved = confirmedEchoes.filter { present.contains($0.key) }
+        guard !resolved.isEmpty else {
+            return messages
+        }
+        resolved.keys.forEach { confirmedEchoes.removeValue(forKey: $0) }
+        let localIDs = Set(resolved.values)
+        return messages.filter { !localIDs.contains($0.id) }
+    }
+
     private func appendLocalEcho(_ send: PendingSend, id: Int64) {
         guard let identity,
               case let .loaded(page) = conversationState,
@@ -1517,7 +1565,8 @@ final class LiveSessionViewModel {
             isOwnMessage: true,
             sourceStreamID: source.0,
             sourceTopic: source.1,
-            deliveryState: .pending
+            deliveryState: .pending,
+            senderAvatarURL: avatarURLs[identity.userID]
         )
         replaceConversationMessages(page.messages + [echo], in: page)
     }
@@ -1819,7 +1868,9 @@ final class LiveSessionViewModel {
             channels: channels,
             directMessages: sidebar.directMessages,
             currentUserName: sidebar.currentUserName,
-            currentUserInitials: sidebar.currentUserInitials
+            currentUserInitials: sidebar.currentUserInitials,
+            organizationIconURL: sidebar.organizationIconURL,
+            currentUserAvatarURL: sidebar.currentUserAvatarURL
         )
         sidebarSnapshot = updated
         navigationDirectory = Self.makeDirectory(sidebar: updated, topics: topics)
@@ -1872,7 +1923,8 @@ final class LiveSessionViewModel {
                         ? "\(currentName) (you)"
                         : $0.fullName,
                     initials: initials(for: $0.fullName),
-                    presence: .offline
+                    presence: .offline,
+                    avatarURL: $0.avatarURL
                 )
             }
             .sorted {
@@ -1927,7 +1979,10 @@ final class LiveSessionViewModel {
             },
             directMessages: directMessages,
             currentUserName: currentName,
-            currentUserInitials: initials(for: currentName)
+            currentUserInitials: initials(for: currentName),
+            organizationIconURL: snapshot.realmIconURL,
+            currentUserAvatarURL: snapshot.users
+                .first { $0.userID == identity.userID }?.avatarURL
         )
     }
 

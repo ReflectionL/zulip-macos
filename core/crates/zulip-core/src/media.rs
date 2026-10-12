@@ -33,6 +33,8 @@ const UPLOAD_ROUTE_PREFIX: &str = "/user_uploads/";
 const TEMPORARY_ROUTE_PREFIX: &str = "/user_uploads/temporary/";
 const MAX_UPLOAD_BYTES: usize = 25 * 1_048_576;
 const MAX_DOWNLOAD_BYTES: usize = 32 * 1_048_576;
+const MAX_PUBLIC_IMAGE_BYTES: usize = 2 * 1_048_576;
+const AVATAR_ROUTE_PREFIX: &str = "/user_avatars/";
 const MAX_JSON_BYTES: usize = 1_048_576;
 const MAX_FILENAME_BYTES: usize = 1_024;
 static TEMPORARY_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -216,14 +218,20 @@ impl MediaClient {
 
     /// Resolves a protected Zulip upload and stores it in the account cache.
     ///
-    /// Only same-origin `/user_uploads/` message URLs are accepted. The
-    /// short-lived download URL is consumed immediately and never persisted.
+    /// Only same-origin `/user_uploads/` message URLs are accepted for
+    /// authenticated downloads. Public avatar and organization-icon images
+    /// (same-origin `/user_avatars/` or any HTTPS host such as Gravatar) are
+    /// fetched without credentials and capped at 2 MiB. The short-lived
+    /// download URL is consumed immediately and never persisted.
     ///
     /// # Errors
     ///
     /// Returns [`MediaError`] for unsafe URLs, authentication/transport
     /// failures, oversized downloads, or atomic cache failures.
     pub async fn load_media(&self, remote_url: &str) -> Result<CachedMedia, MediaError> {
+        if let Some(public_url) = self.validated_public_image(remote_url) {
+            return self.load_public_image(public_url).await;
+        }
         let remote_url = self.validated_uploaded_route(remote_url)?;
         let digest = sha256_hex(remote_url.as_bytes());
         let final_path = self.account_cache_directory.join(format!("{digest}.media"));
@@ -268,9 +276,78 @@ impl MediaClient {
             .and_then(|value| value.to_str().ok())
             .and_then(sanitized_content_type);
         let byte_count = self
-            .write_download_atomically(response, &final_path, &digest)
+            .write_download_atomically(response, &final_path, &digest, MAX_DOWNLOAD_BYTES)
             .await?;
         cached_media(remote_url, final_path, content_type, byte_count, false)
+    }
+
+    /// Downloads one public image (avatar or organization icon) without credentials.
+    async fn load_public_image(&self, url: Url) -> Result<CachedMedia, MediaError> {
+        let key = url.as_str().to_owned();
+        let digest = sha256_hex(key.as_bytes());
+        let final_path = self.account_cache_directory.join(format!("{digest}.media"));
+        self.prepare_cache_directory().await?;
+
+        if let Some(byte_count) = valid_cached_file(&final_path).await? {
+            return cached_media(key, final_path, None, byte_count, true);
+        }
+
+        let response = self.http.get(url).send().await.map_err(transport_error)?;
+        if !response.status().is_success() {
+            return Err(MediaError::HttpStatus(response.status().as_u16()));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_PUBLIC_IMAGE_BYTES as u64)
+        {
+            return Err(MediaError::DownloadTooLarge);
+        }
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(sanitized_content_type);
+        if !content_type
+            .as_deref()
+            .is_some_and(|value| value.to_ascii_lowercase().starts_with("image/"))
+        {
+            return Err(MediaError::InvalidResponse);
+        }
+        let byte_count = self
+            .write_download_atomically(response, &final_path, &digest, MAX_PUBLIC_IMAGE_BYTES)
+            .await?;
+        cached_media(key, final_path, content_type, byte_count, false)
+    }
+
+    fn validated_public_image(&self, input: &str) -> Option<Url> {
+        let input = input.trim();
+        if input.is_empty() || input.chars().any(char::is_control) || input.contains('\\') {
+            return None;
+        }
+        let url = if input.starts_with('/') {
+            self.base_url
+                .as_str()
+                .parse::<Url>()
+                .ok()?
+                .join(input)
+                .ok()?
+        } else {
+            Url::parse(input).ok()?
+        };
+        if !url.username().is_empty()
+            || url.password().is_some()
+            || url.fragment().is_some()
+            || url.path().starts_with(UPLOAD_ROUTE_PREFIX)
+            || unsafe_path(url.path())
+        {
+            return None;
+        }
+        let allowed = if same_origin(&url, self.base_url.as_str()) {
+            url.path().starts_with(AVATAR_ROUTE_PREFIX)
+        } else {
+            url.scheme() == "https"
+        };
+        allowed.then_some(url)
     }
 
     async fn prepare_cache_directory(&self) -> Result<(), MediaError> {
@@ -295,13 +372,14 @@ impl MediaClient {
         response: Response,
         final_path: &Path,
         digest: &str,
+        limit: usize,
     ) -> Result<u64, MediaError> {
         let sequence = TEMPORARY_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let temporary_path = self
             .account_cache_directory
             .join(format!(".{digest}.{sequence}.part"));
         let result = self
-            .stream_download(response, &temporary_path, final_path)
+            .stream_download(response, &temporary_path, final_path, limit)
             .await;
         if result.is_err() {
             let _ = fs::remove_file(&temporary_path).await;
@@ -314,6 +392,7 @@ impl MediaClient {
         response: Response,
         temporary_path: &Path,
         final_path: &Path,
+        limit: usize,
     ) -> Result<u64, MediaError> {
         let mut file = OpenOptions::new()
             .write(true)
@@ -334,7 +413,7 @@ impl MediaClient {
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(transport_error)?;
             byte_count = byte_count.saturating_add(chunk.len());
-            if byte_count > MAX_DOWNLOAD_BYTES {
+            if byte_count > limit {
                 return Err(MediaError::DownloadTooLarge);
             }
             file.write_all(&chunk)
@@ -717,6 +796,48 @@ mod tests {
             tokio::fs::read(local_path).await.expect("cached bytes"),
             b"fixture-png"
         );
+    }
+
+    #[tokio::test]
+    async fn public_avatars_are_fetched_without_credentials_and_cached() {
+        let responses = vec![
+            MockResponse::bytes(StatusCode::OK, "image/png", b"avatar".to_vec()),
+            MockResponse::bytes(StatusCode::OK, "text/html", b"<html>".to_vec()),
+        ];
+        let (server, requests) = spawn_mock(responses);
+        let fixture = TempDir::new().expect("fixture directory");
+        let client = media_client(&server, &fixture, "account-a");
+
+        let first = client
+            .load_media("/user_avatars/1/face.png")
+            .await
+            .expect("avatar download");
+        let second = client
+            .load_media("/user_avatars/1/face.png")
+            .await
+            .expect("cached avatar");
+        assert!(!first.cache_hit);
+        assert!(second.cache_hit);
+        assert_eq!(second.local_url, first.local_url);
+
+        let request = requests.recv().expect("avatar request");
+        assert!(request.starts_with("GET /user_avatars/1/face.png HTTP/1.1"));
+        assert!(!request.to_ascii_lowercase().contains("authorization:"));
+
+        assert!(matches!(
+            client.load_media("/user_avatars/1/page.png").await,
+            Err(MediaError::InvalidResponse)
+        ));
+        for unsafe_url in [
+            "http://cdn.example/avatar.png",
+            "/user_avatars/../secrets.png",
+            "/avatar/12",
+        ] {
+            assert!(matches!(
+                client.load_media(unsafe_url).await,
+                Err(MediaError::InvalidInput)
+            ));
+        }
     }
 
     #[tokio::test]
