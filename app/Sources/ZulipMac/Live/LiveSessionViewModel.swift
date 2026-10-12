@@ -2313,7 +2313,8 @@ final class LiveSessionViewModel {
             newest[partner] = max(newest[partner] ?? 0, conversation.maxMessageID)
         }
         for message in messages where message.streamID == nil {
-            let others = Set(message.recipientIDs.filter { $0 > 0 && $0 != currentUserID })
+            let participants = message.recipientIDs + [message.senderID]
+            let others = Set(participants.filter { $0 > 0 && $0 != currentUserID })
             let partner: Int64
             if others.isEmpty {
                 partner = currentUserID
