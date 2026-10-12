@@ -350,6 +350,16 @@ struct LiveSessionTests {
             return false
         }
         #expect(model.identity != nil)
+
+        func sessionStarts() -> Int {
+            core.commands.filter {
+                if case .startAPIKeySession = $0 { return true }
+                return false
+            }.count
+        }
+        let before = sessionStarts()
+        model.handleSystemWake()
+        await eventually { sessionStarts() == before + 1 }
     }
 
     @Test("A missing cache on first launch does not interrupt the live connection")

@@ -182,6 +182,7 @@ final class LiveSessionViewModel {
     @ObservationIgnored var isApplicationActive: () -> Bool = { NSApplication.shared.isActive }
     private var unseenNotificationCount = 0
     @ObservationIgnored private var eventTask: Task<Void, Never>?
+    @ObservationIgnored private var wakeObserver: NSObjectProtocol?
     @ObservationIgnored private var reconnectTask: Task<Void, Never>?
     private var reconnectAttempt = 0
     private var cachedSessionRequestID: UInt64?
@@ -258,6 +259,15 @@ final class LiveSessionViewModel {
     func startObserving() {
         guard eventTask == nil else {
             return
+        }
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.handleSystemWake()
+            }
         }
         eventTask = Task { [weak self, client] in
             for await event in client.events {
@@ -358,6 +368,15 @@ final class LiveSessionViewModel {
             return true
         }
         return false
+    }
+
+    /// After sleep the server has usually dropped the event queue and a pending
+    /// backoff timer may be minutes away, so retry immediately.
+    func handleSystemWake() {
+        guard identity != nil, case .retrying = connectionState else {
+            return
+        }
+        reconnectNow()
     }
 
     /// Manual "Reconnect" from the offline banner.
