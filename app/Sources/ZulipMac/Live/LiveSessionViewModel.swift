@@ -144,6 +144,8 @@ private struct PendingAttachmentUpload: Sendable {
 @MainActor
 @Observable
 final class LiveSessionViewModel {
+    private static let lastServerURLKey = "lastAccount.serverURL"
+    private static let lastEmailKey = "lastAccount.email"
     static let defaultServerURL = "https://shitcreator.zulipchat.com"
     private static let conversationPageSize: UInt16 = 10
     private static let searchResultLimit: UInt16 = 20
@@ -173,6 +175,7 @@ final class LiveSessionViewModel {
 
     @ObservationIgnored private let client: any CoreClientProtocol
     @ObservationIgnored private let credentialStore: any CredentialStore
+    @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private var eventTask: Task<Void, Never>?
     private var requestID: UInt64 = 1
     private var activeSelection: ConversationKey?
@@ -195,10 +198,12 @@ final class LiveSessionViewModel {
 
     init(
         client: any CoreClientProtocol = LiveCoreClient(),
-        credentialStore: any CredentialStore = KeychainCredentialStore()
+        credentialStore: any CredentialStore = KeychainCredentialStore(),
+        defaults: UserDefaults = .standard
     ) {
         self.client = client
         self.credentialStore = credentialStore
+        self.defaults = defaults
     }
 
     func startObserving() {
@@ -255,6 +260,26 @@ final class LiveSessionViewModel {
     }
 
     func connectUsingSavedAPIKey() async {
+        await connectUsingSavedAPIKey(reportMissingKey: true)
+    }
+
+    /// Reconnects the account that was active when the app last ran, so a
+    /// relaunch does not require signing in again. Does nothing when the user
+    /// disconnected on purpose or no API key is stored.
+    func restoreSavedSession() async {
+        guard identity == nil,
+              !connectionState.isConnecting,
+              let savedServer = defaults.string(forKey: Self.lastServerURLKey),
+              let savedEmail = defaults.string(forKey: Self.lastEmailKey)
+        else {
+            return
+        }
+        serverURL = savedServer
+        email = savedEmail
+        await connectUsingSavedAPIKey(reportMissingKey: false)
+    }
+
+    private func connectUsingSavedAPIKey(reportMissingKey: Bool) async {
         startObserving()
         let trimmedServer = serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -279,8 +304,20 @@ final class LiveSessionViewModel {
                 )
             )
         } catch {
-            connectionState = .failed(message: "No saved API key was found for this account.")
+            if reportMissingKey {
+                connectionState = .failed(message: "No saved API key was found for this account.")
+            }
         }
+    }
+
+    private func rememberLastAccount(_ identity: LiveSessionIdentity) {
+        defaults.set(identity.serverURL, forKey: Self.lastServerURLKey)
+        defaults.set(identity.email, forKey: Self.lastEmailKey)
+    }
+
+    private func forgetLastAccount() {
+        defaults.removeObject(forKey: Self.lastServerURLKey)
+        defaults.removeObject(forKey: Self.lastEmailKey)
     }
 
     func openConversation(_ key: ConversationKey) {
@@ -685,6 +722,7 @@ final class LiveSessionViewModel {
             self.identity = identity
             serverURL = identity.serverURL
             email = identity.email
+            rememberLastAccount(identity)
             apply(snapshot)
             do {
                 try await credentialStore.save(credential)
@@ -861,35 +899,8 @@ final class LiveSessionViewModel {
             connectionState = .retrying(delayMilliseconds: delayMilliseconds)
 
         case .disconnected:
-            attachmentUploadsByRequestID.values.forEach(stopSecurityScope)
-            identity = nil
-            sidebarSnapshot = nil
-            navigationDirectory = NavigationDirectory(destinations: [])
-            activeSelection = nil
-            pendingOlderRequestID = nil
-            pendingSearchRequestID = nil
-            pendingSearchQuery = nil
-            issuedSearchRequestIDs = []
-            pendingFocusedMessageRequestID = nil
-            issuedFocusedMessageRequestIDs = []
-            topicActionsByRequestID = [:]
-            messageActionsByRequestID = [:]
-            failedMessageActions = [:]
-            sendsByRequestID = [:]
-            failedSends = [:]
-            attachmentUploadsByRequestID = [:]
-            failedAttachmentUpload = nil
-            attachmentUploadState = .idle
-            attachmentInsertion = nil
-            mediaRequestsByRequestID = [:]
-            pendingMediaURLs = []
-            mediaLocalURLs = [:]
-            mediaFailures = [:]
-            isLoadingOlderMessages = false
-            messageSearchState = .idle
-            topicActionState = .idle
-            requestedTopicNavigation = nil
-            knownTopics = [:]
+            forgetLastAccount()
+            resetSessionState()
             connectionState = .signedOut
 
         case let .failed(requestID, message):
@@ -925,7 +936,7 @@ final class LiveSessionViewModel {
                     subtitle: organizationName,
                     message: message
                 )
-            } else if pendingOlderRequestID == requestID {
+            } else if let requestID, pendingOlderRequestID == requestID {
                 pendingOlderRequestID = nil
                 isLoadingOlderMessages = false
                 notice = "Earlier messages could not be loaded: \(message)"
@@ -948,10 +959,48 @@ final class LiveSessionViewModel {
                     value.deliveryState = .failed
                 }
                 notice = "Message could not be sent. You can retry it."
+            } else if requestID == nil, identity != nil {
+                // The Rust core ended the live session (for example after the
+                // server rejected the stored key). Return to the login surface
+                // with the reason instead of leaving a window that never updates.
+                resetSessionState()
+                connectionState = .failed(message: message)
             } else {
                 connectionState = .failed(message: message)
             }
         }
+    }
+
+    private func resetSessionState() {
+        attachmentUploadsByRequestID.values.forEach(stopSecurityScope)
+        identity = nil
+        sidebarSnapshot = nil
+        navigationDirectory = NavigationDirectory(destinations: [])
+        activeSelection = nil
+        pendingOlderRequestID = nil
+        pendingSearchRequestID = nil
+        pendingSearchQuery = nil
+        issuedSearchRequestIDs = []
+        pendingFocusedMessageRequestID = nil
+        issuedFocusedMessageRequestIDs = []
+        topicActionsByRequestID = [:]
+        messageActionsByRequestID = [:]
+        failedMessageActions = [:]
+        sendsByRequestID = [:]
+        failedSends = [:]
+        attachmentUploadsByRequestID = [:]
+        failedAttachmentUpload = nil
+        attachmentUploadState = .idle
+        attachmentInsertion = nil
+        mediaRequestsByRequestID = [:]
+        pendingMediaURLs = []
+        mediaLocalURLs = [:]
+        mediaFailures = [:]
+        isLoadingOlderMessages = false
+        messageSearchState = .idle
+        topicActionState = .idle
+        requestedTopicNavigation = nil
+        knownTopics = [:]
     }
 
     private func stopSecurityScope(for pending: PendingAttachmentUpload) {

@@ -20,10 +20,17 @@ struct AppRootView: View {
         }
         .task {
             session.startObserving()
+            await session.restoreSavedSession()
         }
         .onChange(of: session.connectionState) {
-            if session.connectionState == .connected {
+            switch session.connectionState {
+            case .connected:
                 isLoginPresented = false
+            case .failed:
+                // Surface why the session ended or could not resume.
+                isLoginPresented = true
+            default:
+                break
             }
         }
     }
