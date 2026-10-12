@@ -98,4 +98,44 @@ struct NavigationTests {
         #expect(store.selection == key)
         #expect(store.directory.destination(for: key) == destination)
     }
+
+    @Test("Relative selection wraps around the sidebar and skips topics")
+    func relativeSelectionWraps() {
+        let store = NavigationStore(
+            directory: FixtureNavigation.directory,
+            initialSelection: FixtureSidebar.defaultSelection
+        )
+        let navigable = FixtureNavigation.directory.destinations.filter {
+            if case .topic = $0.key { return false }
+            return true
+        }
+        let start = navigable.firstIndex { $0.key == store.selection } ?? 0
+
+        store.selectRelative(1)
+        #expect(store.selection == navigable[(start + 1) % navigable.count].key)
+
+        store.selectRelative(-1)
+        #expect(store.selection == navigable[start].key)
+
+        store.selectRelative(-navigable.count - 1)
+        #expect(
+            store.selection
+                == navigable[((start - 1) % navigable.count + navigable.count) % navigable.count].key
+        )
+    }
+
+    @Test("Quick link shortcuts select Inbox first and ignore missing slots")
+    func quickLinkSelection() {
+        let store = NavigationStore(
+            directory: FixtureNavigation.directory,
+            initialSelection: FixtureSidebar.defaultSelection
+        )
+
+        store.selectQuickLink(0)
+        #expect(store.selection == .inbox(accountID: FixtureSidebar.accountID))
+
+        let before = store.selection
+        store.selectQuickLink(99)
+        #expect(store.selection == before)
+    }
 }

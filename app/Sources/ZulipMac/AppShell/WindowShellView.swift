@@ -24,7 +24,6 @@ struct WindowShellView<Sidebar: View, Content: View>: View {
                     ideal: AppTheme.Metrics.sidebarIdeal,
                     max: AppTheme.Metrics.sidebarMaximum
                 )
-                .background(AppTheme.Colors.sidebar)
         } detail: {
             content
                 .background(AppTheme.Colors.canvas)

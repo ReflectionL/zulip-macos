@@ -1,6 +1,12 @@
 import Foundation
+import AppKit
 import Observation
+import OSLog
 import ZulipCoreBindings
+
+/// Session lifecycle breadcrumbs for Console.app. Only event names are public;
+/// dynamic values (server messages) stay private, and credentials are never logged.
+private let sessionLog = Logger(subsystem: "io.github.huahai.ZulipMac", category: "session")
 
 enum LiveAuthenticationMethod: String, CaseIterable, Identifiable, Sendable {
     case password = "Password"
@@ -176,11 +182,17 @@ final class LiveSessionViewModel {
     @ObservationIgnored private let client: any CoreClientProtocol
     @ObservationIgnored private let credentialStore: any CredentialStore
     @ObservationIgnored private let defaults: UserDefaults
+    @ObservationIgnored private let notifier: (any MessageNotifier)?
+    @ObservationIgnored private var notificationPlanner = NotificationPlanner()
+    @ObservationIgnored var isApplicationActive: () -> Bool = { NSApplication.shared.isActive }
+    private var unseenNotificationCount = 0
     @ObservationIgnored private var eventTask: Task<Void, Never>?
+    @ObservationIgnored private var wakeObserver: NSObjectProtocol?
     @ObservationIgnored private var reconnectTask: Task<Void, Never>?
     private var reconnectAttempt = 0
     private var cachedSessionRequestID: UInt64?
     private var hasLiveSession = false
+    @ObservationIgnored private var snapshotMessages: [Int64: LiveMessageSnapshot] = [:]
     private(set) var drafts: [ConversationKey: String] = [:]
     @ObservationIgnored private var draftSaveTasks: [ConversationKey: Task<Void, Never>] = [:]
     private var requestID: UInt64 = 1
@@ -205,16 +217,62 @@ final class LiveSessionViewModel {
     init(
         client: any CoreClientProtocol = LiveCoreClient(),
         credentialStore: any CredentialStore = KeychainCredentialStore(),
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        notifier: (any MessageNotifier)? = nil
     ) {
         self.client = client
         self.credentialStore = credentialStore
         self.defaults = defaults
+        self.notifier = notifier
+        notifier?.onActivate = { [weak self] route in
+            self?.openFromNotification(route)
+        }
+        notifier?.onApplicationActivated = { [weak self] in
+            self?.unseenNotificationCount = 0
+        }
+    }
+
+    /// Takes the user to the conversation a notification was about.
+    func openFromNotification(_ route: NotificationRoute) {
+        guard identity?.accountID == route.key.accountID else {
+            return
+        }
+        requestedTopicNavigation = route.key
+    }
+
+    private func notifyAboutNewMessages(in snapshot: LiveSnapshot) {
+        guard let identity else {
+            return
+        }
+        let notifications = notificationPlanner.plan(snapshot: snapshot, identity: identity)
+        guard let notifier else {
+            return
+        }
+        for notification in notifications {
+            // Do not interrupt the conversation the user is already reading.
+            if isApplicationActive(), activeSelection == notification.route.key {
+                continue
+            }
+            notifier.post(notification)
+            unseenNotificationCount += 1
+        }
+        if unseenNotificationCount > 0 {
+            notifier.setBadge(unseenNotificationCount)
+        }
     }
 
     func startObserving() {
         guard eventTask == nil else {
             return
+        }
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.handleSystemWake()
+            }
         }
         eventTask = Task { [weak self, client] in
             for await event in client.events {
@@ -317,6 +375,16 @@ final class LiveSessionViewModel {
         return false
     }
 
+    /// After sleep the server has usually dropped the event queue and a pending
+    /// backoff timer may be minutes away, so retry immediately.
+    func handleSystemWake() {
+        guard identity != nil, case .retrying = connectionState else {
+            return
+        }
+        sessionLog.info("system woke while offline; reconnecting now")
+        reconnectNow()
+    }
+
     /// Manual "Reconnect" from the offline banner.
     func reconnectNow() {
         if hasLiveSession {
@@ -363,6 +431,7 @@ final class LiveSessionViewModel {
         reconnectTask?.cancel()
         let seconds = min(5 << min(reconnectAttempt, 4), 60)
         reconnectAttempt += 1
+        sessionLog.info("offline; reconnect attempt \(self.reconnectAttempt, privacy: .public) in \(seconds, privacy: .public) s")
         connectionState = .retrying(delayMilliseconds: UInt64(seconds) * 1_000)
         reconnectTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(seconds))
@@ -826,6 +895,7 @@ final class LiveSessionViewModel {
             serverURL = identity.serverURL
             email = identity.email
             apply(snapshot)
+            notificationPlanner.prime(with: snapshot)
             loadDrafts(for: identity.accountID)
             let inbox = ConversationKey.inbox(accountID: identity.accountID)
             openConversation(inbox)
@@ -838,6 +908,8 @@ final class LiveSessionViewModel {
             email = identity.email
             rememberLastAccount(identity)
             apply(snapshot)
+            notificationPlanner.prime(with: snapshot)
+            notifier?.requestAuthorization()
             loadDrafts(for: identity.accountID)
             do {
                 try await credentialStore.save(credential)
@@ -856,9 +928,13 @@ final class LiveSessionViewModel {
             guard identity?.accountID == accountID else {
                 return
             }
+            let shouldRefresh = activeSelection.map {
+                conversationAffected(by: snapshot, key: $0)
+            } ?? false
             apply(snapshot)
+            notifyAboutNewMessages(in: snapshot)
             connectionState = .connected
-            if let activeSelection {
+            if shouldRefresh, let activeSelection {
                 refreshConversation(activeSelection)
             }
 
@@ -1019,6 +1095,7 @@ final class LiveSessionViewModel {
             break
 
         case let .retryScheduled(_, delayMilliseconds):
+            sessionLog.info("sync retry scheduled in \(delayMilliseconds, privacy: .public) ms")
             connectionState = .retrying(delayMilliseconds: delayMilliseconds)
 
         case let .draftsLoaded(_, accountID, loaded):
@@ -1032,6 +1109,7 @@ final class LiveSessionViewModel {
 
         case let .syncResumed(accountID):
             if identity?.accountID == accountID, case .retrying = connectionState {
+                sessionLog.info("sync resumed")
                 connectionState = .connected
             }
 
@@ -1126,6 +1204,7 @@ final class LiveSessionViewModel {
                 // Only a credential rejection ends a session, so the saved key is
                 // known to be unusable and must not be offered again.
                 let rejectedAccountID = identity?.accountID
+                sessionLog.error("session ended by the core; discarding saved key: \(message)")
                 cancelReconnect()
                 resetSessionState()
                 if let rejectedAccountID {
@@ -1141,6 +1220,10 @@ final class LiveSessionViewModel {
 
     private func resetSessionState() {
         hasLiveSession = false
+        snapshotMessages = [:]
+        notificationPlanner.reset()
+        unseenNotificationCount = 0
+        notifier?.setBadge(0)
         draftSaveTasks.values.forEach { $0.cancel() }
         draftSaveTasks = [:]
         drafts = [:]
@@ -1181,10 +1264,53 @@ final class LiveSessionViewModel {
         }
     }
 
+    /// Whether a snapshot removed, added, or changed a message that the open
+    /// conversation shows. Unrelated snapshots (other channels, user or
+    /// subscription changes) no longer trigger a network refetch.
+    private func conversationAffected(by snapshot: LiveSnapshot, key: ConversationKey) -> Bool {
+        guard let identity else {
+            return false
+        }
+        let incoming = Dictionary(
+            snapshot.messages.map { ($0.messageID, $0) },
+            uniquingKeysWith: { _, latest in latest }
+        )
+        if snapshotMessages.keys.contains(where: { incoming[$0] == nil }) {
+            return true
+        }
+        return incoming.values.contains { message in
+            snapshotMessages[message.messageID] != message
+                && Self.message(message, belongsTo: key, identity: identity)
+        }
+    }
+
+    private static func message(
+        _ message: LiveMessageSnapshot,
+        belongsTo key: ConversationKey,
+        identity: LiveSessionIdentity
+    ) -> Bool {
+        switch key {
+        case .inbox, .unread, .drafts:
+            true
+        case .mentions:
+            NotificationPlanner.isMention(message)
+        case .starred:
+            message.flags.contains("starred")
+        case let .channel(_, streamID):
+            message.streamID == streamID
+        case .topic, .directMessage:
+            NotificationPlanner.conversationKey(for: message, identity: identity) == key
+        }
+    }
+
     private func apply(_ snapshot: LiveSnapshot) {
         guard let identity else {
             return
         }
+        snapshotMessages = Dictionary(
+            snapshot.messages.map { ($0.messageID, $0) },
+            uniquingKeysWith: { _, latest in latest }
+        )
         rememberTopics(from: snapshot.topics)
         rememberTopics(from: snapshot.messages)
         sidebarSnapshot = Self.makeSidebar(

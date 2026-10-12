@@ -198,6 +198,28 @@ pub enum SyncEvent {
         /// Deleted message identifiers.
         message_ids: Vec<i64>,
     },
+    /// A personal flag such as `read` or `starred` was added or removed.
+    MessageFlagsUpdated {
+        /// Monotonic queue-local event identifier.
+        event_id: i64,
+        /// `true` for `add`, `false` for `remove`.
+        added: bool,
+        /// Zulip flag name.
+        flag: String,
+        /// Affected message identifiers.
+        message_ids: Vec<i64>,
+    },
+    /// An emoji reaction was added to or removed from a message.
+    ReactionChanged {
+        /// Monotonic queue-local event identifier.
+        event_id: i64,
+        /// `true` for `add`, `false` for `remove`.
+        added: bool,
+        /// Reacted message.
+        message_id: i64,
+        /// The reaction itself.
+        reaction: ReactionSummary,
+    },
     /// Channels were added to or refreshed in the subscription set.
     ChannelsUpserted {
         /// Monotonic queue-local event identifier.
@@ -259,6 +281,8 @@ impl SyncEvent {
             | Self::MessageAdded { event_id, .. }
             | Self::MessageUpdated { event_id, .. }
             | Self::MessagesDeleted { event_id, .. }
+            | Self::MessageFlagsUpdated { event_id, .. }
+            | Self::ReactionChanged { event_id, .. }
             | Self::ChannelsUpserted { event_id, .. }
             | Self::ChannelUpdated { event_id, .. }
             | Self::ChannelsRemoved { event_id, .. }
@@ -874,6 +898,45 @@ impl SyncReducer {
         }
     }
 
+    fn apply_flag_change(&mut self, added: bool, flag: &str, message_ids: &[i64]) -> bool {
+        let mut changed = false;
+        for message_id in message_ids {
+            let Some(message) = self.messages.get_mut(message_id) else {
+                continue;
+            };
+            let present = message.flags.iter().any(|existing| existing == flag);
+            if added && !present {
+                message.flags.push(flag.to_owned());
+                changed = true;
+            } else if !added && present {
+                message.flags.retain(|existing| existing != flag);
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn apply_reaction_change(
+        &mut self,
+        added: bool,
+        message_id: i64,
+        reaction: ReactionSummary,
+    ) -> bool {
+        let Some(message) = self.messages.get_mut(&message_id) else {
+            return false;
+        };
+        let present = message.reactions.contains(&reaction);
+        if added && !present {
+            message.reactions.push(reaction);
+            true
+        } else if !added && present {
+            message.reactions.retain(|existing| *existing != reaction);
+            true
+        } else {
+            false
+        }
+    }
+
     fn apply_event(&mut self, event: SyncEvent, heartbeats: &mut usize) -> bool {
         match event {
             SyncEvent::Heartbeat { .. } => {
@@ -904,6 +967,18 @@ impl SyncReducer {
             SyncEvent::MessagesDeleted { message_ids, .. } => message_ids
                 .into_iter()
                 .any(|message_id| self.messages.remove(&message_id).is_some()),
+            SyncEvent::MessageFlagsUpdated {
+                added,
+                flag,
+                message_ids,
+                ..
+            } => self.apply_flag_change(added, &flag, &message_ids),
+            SyncEvent::ReactionChanged {
+                added,
+                message_id,
+                reaction,
+                ..
+            } => self.apply_reaction_change(added, message_id, reaction),
             SyncEvent::ChannelsUpserted { channels, .. } => {
                 let mut changed = false;
                 for channel in channels {
@@ -1102,6 +1177,30 @@ impl EventDocument {
                 Ok(SyncEvent::MessagesDeleted {
                     event_id: self.id,
                     message_ids,
+                })
+            }
+            "update_message_flags" => {
+                let flag = string_field(&self.payload, "flag")
+                    .ok_or(SyncError::InvalidResponse("flag update missing flag name"))?;
+                Ok(SyncEvent::MessageFlagsUpdated {
+                    event_id: self.id,
+                    added: string_field(&self.payload, "op").as_deref() != Some("remove"),
+                    flag,
+                    message_ids: integer_array_field(&self.payload, "messages"),
+                })
+            }
+            "reaction" => {
+                let reaction = ReactionDocument {
+                    emoji_name: string_field(&self.payload, "emoji_name").unwrap_or_default(),
+                    user_id: optional_integer_field(&self.payload, "user_id").unwrap_or(0),
+                }
+                .normalize()
+                .ok_or(SyncError::InvalidResponse("invalid reaction event"))?;
+                Ok(SyncEvent::ReactionChanged {
+                    event_id: self.id,
+                    added: string_field(&self.payload, "op").as_deref() != Some("remove"),
+                    message_id: integer_field(&self.payload, "message_id")?,
+                    reaction,
                 })
             }
             "subscription" => self.normalize_subscription(),
@@ -1842,6 +1941,69 @@ mod tests {
             } if delay == Duration::from_millis(200)
         ));
         assert_eq!(session.snapshot(), initial);
+    }
+
+    #[tokio::test]
+    async fn flag_and_reaction_events_update_snapshot_messages() {
+        let register = r#"{
+            "result":"success",
+            "queue_id":"queue-fixture",
+            "last_event_id":40,
+            "realm_users":[],
+            "subscriptions":[{"stream_id":5,"name":"general"}],
+            "messages":[{
+                "id":7,"sender_id":2,"sender_full_name":"Theo","timestamp":1,
+                "content":"<p>hi</p>","type":"stream","stream_id":5,"subject":"t",
+                "display_recipient":"general","flags":[]
+            }]
+        }"#
+        .to_owned();
+        let events = r#"{
+            "result":"success",
+            "queue_id":"queue-fixture",
+            "events":[
+                {"id":41,"type":"update_message_flags","op":"add","flag":"read","messages":[7,99]},
+                {"id":42,"type":"reaction","op":"add","message_id":7,
+                 "emoji_name":"thumbs_up","user_id":2},
+                {"id":43,"type":"reaction","op":"add","message_id":7,
+                 "emoji_name":"thumbs_up","user_id":2}
+            ]
+        }"#
+        .to_owned();
+        let removal = r#"{
+            "result":"success",
+            "queue_id":"queue-fixture",
+            "events":[
+                {"id":44,"type":"update_message_flags","op":"remove","flag":"read","messages":[7]},
+                {"id":45,"type":"reaction","op":"remove","message_id":7,
+                 "emoji_name":"thumbs_up","user_id":2}
+            ]
+        }"#
+        .to_owned();
+        let (server, _) = spawn_mock(vec![
+            (StatusCode::OK, register),
+            (StatusCode::OK, events),
+            (StatusCode::OK, removal),
+        ]);
+        let client = EventQueueClient::new(&server, "maya@example.com", SecretString::new(API_KEY))
+            .expect("sync client");
+        let (mut session, _) = SyncSession::start(client, RecoveryPolicy::default(), 3)
+            .await
+            .expect("initial registration");
+
+        let SyncCycle::Events(outcome) = session.advance().await else {
+            panic!("events expected");
+        };
+        let message = &outcome.snapshot.expect("changed").messages[0];
+        assert_eq!(message.flags, ["read"]);
+        assert_eq!(message.reactions.len(), 1, "duplicate reactions collapse");
+
+        let SyncCycle::Events(outcome) = session.advance().await else {
+            panic!("events expected");
+        };
+        let message = &outcome.snapshot.expect("changed").messages[0];
+        assert!(message.flags.is_empty());
+        assert!(message.reactions.is_empty());
     }
 
     #[tokio::test]

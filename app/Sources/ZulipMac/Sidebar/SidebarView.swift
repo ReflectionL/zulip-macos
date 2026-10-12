@@ -39,6 +39,7 @@ struct SidebarView: View {
     let openCommandPalette: () -> Void
     var startNewTopic: (ChannelSnapshot) -> Void = { _ in }
     var sessionControl: SidebarSessionControl?
+    @Environment(UpdateController.self) private var updates: UpdateController?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -197,12 +198,9 @@ struct SidebarView: View {
                 .padding(.bottom, AppTheme.Spacing.large)
             }
 
-            Divider()
-
             profileRow
                 .padding(AppTheme.Spacing.small)
         }
-        .background(AppTheme.Colors.sidebar)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Workspace navigation")
     }
@@ -215,7 +213,7 @@ struct SidebarView: View {
                 .overlay {
                     Text(String(model.snapshot.organizationName.prefix(1)))
                         .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(AppTheme.Colors.canvas)
+                        .foregroundStyle(.white)
                 }
 
             VStack(alignment: .leading, spacing: 1) {
@@ -230,17 +228,6 @@ struct SidebarView: View {
             }
 
             Spacer(minLength: 0)
-
-            Button {
-                // Account switching arrives with multi-account support.
-            } label: {
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(AppTheme.Colors.tertiaryText)
-            }
-            .buttonStyle(.plain)
-            .help("Workspace menu")
-            .accessibilityLabel("Workspace menu")
         }
         .frame(height: 36)
     }
@@ -275,6 +262,12 @@ struct SidebarView: View {
                     }
 
                     Divider()
+                }
+
+                if let release = updates?.availableRelease {
+                    SettingsLink {
+                        Label("Update to \(release.version)…", systemImage: "arrow.down.circle")
+                    }
                 }
 
                 SettingsLink {
@@ -463,7 +456,7 @@ private struct AvatarView: View {
                     .frame(width: 6, height: 6)
                     .overlay {
                         Circle()
-                            .stroke(AppTheme.Colors.sidebar, lineWidth: 1)
+                            .stroke(Color(nsColor: .windowBackgroundColor), lineWidth: 1)
                     }
             }
     }
