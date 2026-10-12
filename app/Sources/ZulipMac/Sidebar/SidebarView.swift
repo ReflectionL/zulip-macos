@@ -39,6 +39,7 @@ struct SidebarView: View {
     let openCommandPalette: () -> Void
     var startNewTopic: (ChannelSnapshot) -> Void = { _ in }
     var sessionControl: SidebarSessionControl?
+    @Environment(UpdateController.self) private var updates: UpdateController?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -275,6 +276,12 @@ struct SidebarView: View {
                     }
 
                     Divider()
+                }
+
+                if let release = updates?.availableRelease {
+                    SettingsLink {
+                        Label("Update to \(release.version)…", systemImage: "arrow.down.circle")
+                    }
                 }
 
                 SettingsLink {

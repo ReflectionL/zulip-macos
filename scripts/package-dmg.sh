@@ -34,7 +34,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-"$repository_root/scripts/package-app.sh" "$configuration"
+"$repository_root/scripts/package-app.sh" "$configuration" "$release_tag"
 
 actual_version="$(
   plutil -extract CFBundleShortVersionString raw \
@@ -42,6 +42,15 @@ actual_version="$(
 )"
 if [[ "$actual_version" != "$bundle_version" ]]; then
   echo "bundle version $actual_version does not match release $bundle_version" >&2
+  exit 1
+fi
+
+actual_tag="$(
+  plutil -extract ZulipReleaseTag raw \
+    -o - "$bundle_path/Contents/Info.plist"
+)"
+if [[ "$actual_tag" != "$artifact_version" ]]; then
+  echo "bundle release tag $actual_tag does not match $artifact_version" >&2
   exit 1
 fi
 

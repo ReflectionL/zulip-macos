@@ -2,17 +2,23 @@ import SwiftUI
 
 @main
 struct ZulipMacApp: App {
+    @State private var updates = UpdateController()
+
     var body: some Scene {
         WindowGroup(AppIdentity.displayName) {
             AppRootView()
+                .environment(updates)
+                .task { await updates.checkAutomatically() }
         }
         .defaultSize(width: 1_080, height: 720)
         .windowStyle(.hiddenTitleBar)
+        .commands { UpdateCommands(updates: updates) }
 
         Settings {
             Form {
                 LabeledContent("Application", value: AppIdentity.displayName)
                 LabeledContent("Minimum system", value: AppIdentity.minimumSystem)
+                UpdateSettingsSection(updates: updates)
                 Section("Keyboard") {
                     LabeledContent("Quick switcher", value: "⌘K")
                     LabeledContent("Search messages", value: "⌘F")
