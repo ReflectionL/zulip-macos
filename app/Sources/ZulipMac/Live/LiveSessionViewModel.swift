@@ -186,6 +186,7 @@ final class LiveSessionViewModel {
     private var reconnectAttempt = 0
     private var cachedSessionRequestID: UInt64?
     private var hasLiveSession = false
+    @ObservationIgnored private var snapshotMessages: [Int64: LiveMessageSnapshot] = [:]
     private(set) var drafts: [ConversationKey: String] = [:]
     @ObservationIgnored private var draftSaveTasks: [ConversationKey: Task<Void, Never>] = [:]
     private var requestID: UInt64 = 1
@@ -901,10 +902,13 @@ final class LiveSessionViewModel {
             guard identity?.accountID == accountID else {
                 return
             }
+            let shouldRefresh = activeSelection.map {
+                conversationAffected(by: snapshot, key: $0)
+            } ?? false
             apply(snapshot)
             notifyAboutNewMessages(in: snapshot)
             connectionState = .connected
-            if let activeSelection {
+            if shouldRefresh, let activeSelection {
                 refreshConversation(activeSelection)
             }
 
@@ -1187,6 +1191,7 @@ final class LiveSessionViewModel {
 
     private func resetSessionState() {
         hasLiveSession = false
+        snapshotMessages = [:]
         notificationPlanner.reset()
         unseenNotificationCount = 0
         notifier?.setBadge(0)
@@ -1230,10 +1235,53 @@ final class LiveSessionViewModel {
         }
     }
 
+    /// Whether a snapshot removed, added, or changed a message that the open
+    /// conversation shows. Unrelated snapshots (other channels, user or
+    /// subscription changes) no longer trigger a network refetch.
+    private func conversationAffected(by snapshot: LiveSnapshot, key: ConversationKey) -> Bool {
+        guard let identity else {
+            return false
+        }
+        let incoming = Dictionary(
+            snapshot.messages.map { ($0.messageID, $0) },
+            uniquingKeysWith: { _, latest in latest }
+        )
+        if snapshotMessages.keys.contains(where: { incoming[$0] == nil }) {
+            return true
+        }
+        return incoming.values.contains { message in
+            snapshotMessages[message.messageID] != message
+                && Self.message(message, belongsTo: key, identity: identity)
+        }
+    }
+
+    private static func message(
+        _ message: LiveMessageSnapshot,
+        belongsTo key: ConversationKey,
+        identity: LiveSessionIdentity
+    ) -> Bool {
+        switch key {
+        case .inbox, .unread, .drafts:
+            true
+        case .mentions:
+            NotificationPlanner.isMention(message)
+        case .starred:
+            message.flags.contains("starred")
+        case let .channel(_, streamID):
+            message.streamID == streamID
+        case .topic, .directMessage:
+            NotificationPlanner.conversationKey(for: message, identity: identity) == key
+        }
+    }
+
     private func apply(_ snapshot: LiveSnapshot) {
         guard let identity else {
             return
         }
+        snapshotMessages = Dictionary(
+            snapshot.messages.map { ($0.messageID, $0) },
+            uniquingKeysWith: { _, latest in latest }
+        )
         rememberTopics(from: snapshot.topics)
         rememberTopics(from: snapshot.messages)
         sidebarSnapshot = Self.makeSidebar(

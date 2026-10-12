@@ -1139,7 +1139,40 @@ struct LiveSessionTests {
                 && page.messages.map(\.id) == [50]
         }
 
+        // An unrelated snapshot must not refetch the open conversation.
+        let commandsBefore = core.commands.count
         core.emit(.snapshotUpdated(accountID: accountID, snapshot: snapshot))
+        for _ in 0..<30 { await Task.yield() }
+        #expect(!core.commands.dropFirst(commandsBefore).contains {
+            if case .openConversation = $0 { return true }
+            return false
+        })
+
+        // A new message in the open topic does.
+        core.emit(
+            .snapshotUpdated(
+                accountID: accountID,
+                snapshot: LiveSnapshot(
+                    revision: snapshot.revision + 1,
+                    lastEventID: snapshot.lastEventID + 1,
+                    users: snapshot.users,
+                    channels: snapshot.channels,
+                    topics: snapshot.topics,
+                    messages: snapshot.messages + [
+                        LiveMessageSnapshot(
+                            messageID: 51,
+                            senderID: 9,
+                            senderFullName: "Maya Chen",
+                            timestamp: Date(timeIntervalSince1970: 1_700_000_051),
+                            content: [.paragraph([.text("Newer message")])],
+                            streamID: 5,
+                            topic: "Search topic",
+                            recipientIDs: []
+                        ),
+                    ]
+                )
+            )
+        )
         await eventually {
             core.commands.contains {
                 if case let .openConversation(_, commandKey, _) = $0 {

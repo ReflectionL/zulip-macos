@@ -34,6 +34,9 @@ use zulip_core::{
 
 uniffi::setup_scaffolding!();
 
+/// Channels whose topic lists are fetched in parallel while a session starts.
+const TOPIC_FETCH_CONCURRENCY: usize = 12;
+
 /// Minimum spacing between full-snapshot cache writes during busy event streams.
 const SNAPSHOT_CACHE_INTERVAL_SECONDS: u64 = 5;
 
@@ -2097,7 +2100,7 @@ async fn start_session(
     match SyncSession::start(sync_client, RecoveryPolicy::default(), request_id).await {
         Ok((sync, snapshot)) => {
             let mut topics = Vec::new();
-            for channels in snapshot.channels.chunks(6) {
+            for channels in snapshot.channels.chunks(TOPIC_FETCH_CONCURRENCY) {
                 let mut topic_tasks = JoinSet::new();
                 for channel in channels {
                     let messages = Arc::clone(&messages);
