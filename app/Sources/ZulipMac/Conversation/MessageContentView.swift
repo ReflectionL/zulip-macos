@@ -359,6 +359,8 @@ enum ContentSnapshot {
         switch block {
         case let .paragraph(content):
             "paragraph(\(content.map(describe).joined(separator: "|")))"
+        case let .heading(level, content):
+            "heading\(level)(\(content.map(describe).joined(separator: "|")))"
         case let .quote(blocks):
             "quote{\(describe(blocks))}"
         case let .list(items, ordered):
@@ -384,6 +386,8 @@ enum ContentSnapshot {
             "mention:\(displayName)#\(userID)"
         case let .emoji(name, value):
             "emoji:\(name)=\(value)"
+        case let .styled(style, content):
+            "\(style)[\(content.map(describe).joined(separator: "|"))]"
         }
     }
 }
