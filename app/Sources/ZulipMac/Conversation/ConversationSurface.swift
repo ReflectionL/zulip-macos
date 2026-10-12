@@ -696,10 +696,7 @@ private struct MessageActions: View {
                 action: toggleStar
             )
             Menu {
-                Button("Reply") {}
-                Button("Copy link") {}
                 if let edit {
-                    Divider()
                     Button("Edit message…", action: edit)
                 }
                 if let moveToTopic {
@@ -869,17 +866,7 @@ private struct ComposerView: View {
                 .help("Add attachment")
                 .accessibilityLabel("Add attachment")
 
-                Button {} label: {
-                    Image(systemName: "face.smiling")
-                }
-                .help("Add emoji")
-                .accessibilityLabel("Add emoji")
-
                 Spacer()
-
-                Text("Return to send")
-                    .font(AppTheme.Typography.metadata)
-                    .foregroundStyle(AppTheme.Colors.tertiaryText)
 
                 Button(action: send) {
                     Image(systemName: "arrow.up")
@@ -887,7 +874,7 @@ private struct ComposerView: View {
                         .frame(width: 28, height: 28)
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(AppTheme.Colors.canvas)
+                .foregroundStyle(.white)
                 .background(
                     draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         ? AppTheme.Colors.tertiaryText

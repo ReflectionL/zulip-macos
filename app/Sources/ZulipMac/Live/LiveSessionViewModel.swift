@@ -1,7 +1,12 @@
 import Foundation
 import AppKit
 import Observation
+import OSLog
 import ZulipCoreBindings
+
+/// Session lifecycle breadcrumbs for Console.app. Only event names are public;
+/// dynamic values (server messages) stay private, and credentials are never logged.
+private let sessionLog = Logger(subsystem: "io.github.huahai.ZulipMac", category: "session")
 
 enum LiveAuthenticationMethod: String, CaseIterable, Identifiable, Sendable {
     case password = "Password"
@@ -376,6 +381,7 @@ final class LiveSessionViewModel {
         guard identity != nil, case .retrying = connectionState else {
             return
         }
+        sessionLog.info("system woke while offline; reconnecting now")
         reconnectNow()
     }
 
@@ -425,6 +431,7 @@ final class LiveSessionViewModel {
         reconnectTask?.cancel()
         let seconds = min(5 << min(reconnectAttempt, 4), 60)
         reconnectAttempt += 1
+        sessionLog.info("offline; reconnect attempt \(self.reconnectAttempt, privacy: .public) in \(seconds, privacy: .public) s")
         connectionState = .retrying(delayMilliseconds: UInt64(seconds) * 1_000)
         reconnectTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(seconds))
@@ -1088,6 +1095,7 @@ final class LiveSessionViewModel {
             break
 
         case let .retryScheduled(_, delayMilliseconds):
+            sessionLog.info("sync retry scheduled in \(delayMilliseconds, privacy: .public) ms")
             connectionState = .retrying(delayMilliseconds: delayMilliseconds)
 
         case let .draftsLoaded(_, accountID, loaded):
@@ -1101,6 +1109,7 @@ final class LiveSessionViewModel {
 
         case let .syncResumed(accountID):
             if identity?.accountID == accountID, case .retrying = connectionState {
+                sessionLog.info("sync resumed")
                 connectionState = .connected
             }
 
@@ -1195,6 +1204,7 @@ final class LiveSessionViewModel {
                 // Only a credential rejection ends a session, so the saved key is
                 // known to be unusable and must not be offered again.
                 let rejectedAccountID = identity?.accountID
+                sessionLog.error("session ended by the core; discarding saved key: \(message)")
                 cancelReconnect()
                 resetSessionState()
                 if let rejectedAccountID {
