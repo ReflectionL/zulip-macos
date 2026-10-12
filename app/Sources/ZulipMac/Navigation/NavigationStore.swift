@@ -89,6 +89,40 @@ final class NavigationStore {
         dismissCommandPalette()
     }
 
+    /// Moves through the sidebar's destinations, wrapping at either end. Topics
+    /// are skipped unless one is already selected.
+    func selectRelative(_ offset: Int) {
+        let navigable = directory.destinations.filter { destination in
+            if case .topic = destination.key {
+                return destination.key == selection
+            }
+            return true
+        }
+        guard !navigable.isEmpty else {
+            return
+        }
+        let current = navigable.firstIndex { $0.key == selection } ?? 0
+        let count = navigable.count
+        let next = ((current + offset) % count + count) % count
+        select(navigable[next].key)
+    }
+
+    /// Selects the nth sidebar quick link (Inbox, Mentions, Starred, Unread, …).
+    func selectQuickLink(_ index: Int) {
+        let quickLinks = directory.destinations.filter { destination in
+            switch destination.key {
+            case .inbox, .mentions, .starred, .unread, .drafts:
+                true
+            default:
+                false
+            }
+        }
+        guard quickLinks.indices.contains(index) else {
+            return
+        }
+        select(quickLinks[index].key)
+    }
+
     func select(_ destination: NavigationDestination) {
         if directory.destination(for: destination.key) == nil {
             directory = NavigationDirectory(
