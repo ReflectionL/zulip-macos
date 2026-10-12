@@ -672,6 +672,8 @@ struct LiveSessionTests {
         let insertion = model.attachmentInsertion
         #expect(insertion?.key == key)
         #expect(insertion?.markdown.contains("@_**Theo Martin|22**") == true)
+        #expect(insertion?.quote?.senderName == "Theo Martin")
+        #expect(insertion?.quote?.snippet == "Rendered")
         #expect(insertion?.markdown.contains("```quote\n**raw**\n```") == true)
 
         let other = ConversationKey.topic(accountID: accountID, streamID: 5, topic: "other")

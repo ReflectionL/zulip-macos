@@ -40,6 +40,7 @@ struct ConversationSurface: View {
     @State private var editingMessage: MessageViewData?
     @State private var deletingMessage: MessageViewData?
     @State private var forwardingMessage: MessageViewData?
+    @State private var pendingQuote: ComposerQuote?
     @State private var isChoosingAttachment = false
     @FocusState private var isComposerFocused: Bool
 
@@ -273,6 +274,8 @@ struct ConversationSurface: View {
                 draft: $draft,
                 isFocused: $isComposerFocused,
                 isDisabled: isOffline,
+                quote: pendingQuote,
+                clearQuote: { pendingQuote = nil },
                 attachmentUploadState: attachmentUploadState,
                 chooseAttachment: uploadAttachment == nil
                     ? nil
@@ -303,6 +306,9 @@ struct ConversationSurface: View {
         }
         .onChange(of: draft) {
             draftChanged?(draft)
+        }
+        .onChange(of: page.key) {
+            pendingQuote = nil
         }
         .onChange(of: initialDraft) {
             // Persisted drafts can arrive after the surface appears.
@@ -378,7 +384,10 @@ struct ConversationSurface: View {
     }
 
     private func sendDraft() {
-        let content = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let typed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let content = [pendingQuote?.markdown, typed.isEmpty ? nil : typed]
+            .compactMap { $0 }
+            .joined(separator: "\n\n")
         guard !content.isEmpty else {
             return
         }
@@ -386,6 +395,7 @@ struct ConversationSurface: View {
         guard submitMessage?(content) ?? true else {
             return
         }
+        pendingQuote = nil
         let nextID = submitMessage == nil
             ? (messages.last?.id ?? 0) + 1
             : min(messages.last?.id ?? 0, 0) - 1
@@ -413,6 +423,12 @@ struct ConversationSurface: View {
         guard let attachmentInsertion,
               attachmentInsertion.key == page.key
         else { return }
+        if let quote = attachmentInsertion.quote {
+            pendingQuote = quote
+            consumeAttachmentInsertion?(attachmentInsertion.id)
+            isComposerFocused = true
+            return
+        }
         if !draft.isEmpty, draft.last?.isWhitespace == false {
             draft.append("\n")
         }
@@ -939,12 +955,18 @@ private struct ComposerView: View {
     @Binding var draft: String
     var isFocused: FocusState<Bool>.Binding
     let isDisabled: Bool
+    let quote: ComposerQuote?
+    let clearQuote: () -> Void
     let attachmentUploadState: AttachmentUploadState
     let chooseAttachment: (() -> Void)?
     let retryAttachmentUpload: (() -> Void)?
     let send: () -> Void
 
     @State private var selection: TextSelection?
+
+    private var canSend: Bool {
+        quote != nil || !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     /// Return sends; Shift+Return or Option+Return inserts a line break at the
     /// caret (or replaces the selection).
@@ -984,6 +1006,38 @@ private struct ComposerView: View {
                 }
                 .font(AppTheme.Typography.metadata)
                 .foregroundStyle(AppTheme.Colors.destructive)
+            }
+
+            if let quote {
+                HStack(alignment: .top, spacing: AppTheme.Spacing.small) {
+                    Image(systemName: "arrowshape.turn.up.left")
+                        .foregroundStyle(AppTheme.Colors.tertiaryText)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Replying to \(quote.senderName)")
+                            .fontWeight(.medium)
+                        Text(quote.snippet)
+                            .foregroundStyle(AppTheme.Colors.secondaryText)
+                            .lineLimit(2)
+                    }
+                    Spacer(minLength: 0)
+                    Button(action: clearQuote) {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(AppTheme.Colors.tertiaryText)
+                    .help("Remove quote")
+                    .accessibilityLabel("Remove quote")
+                }
+                .font(AppTheme.Typography.metadata)
+                .padding(.vertical, AppTheme.Spacing.small)
+                .padding(.horizontal, AppTheme.Spacing.medium)
+                .background(AppTheme.Colors.sidebar)
+                .clipShape(
+                    RoundedRectangle(
+                        cornerRadius: AppTheme.Metrics.controlRadius,
+                        style: .continuous
+                    )
+                )
             }
 
             TextField(
@@ -1038,13 +1092,9 @@ private struct ComposerView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.white)
-                .background(
-                    draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        ? AppTheme.Colors.tertiaryText
-                        : AppTheme.Colors.accent
-                )
+                .background(canSend ? AppTheme.Colors.accent : AppTheme.Colors.tertiaryText)
                 .clipShape(Circle())
-                .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(!canSend)
                 .help("Send message")
                 .accessibilityLabel("Send message")
             }

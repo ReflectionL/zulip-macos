@@ -1,4 +1,55 @@
 import Foundation
+import ZulipCoreBindings
+
+/// A quote waiting above the composer; its Markdown is prepended on send, so the
+/// text field itself stays free of quote syntax.
+struct ComposerQuote: Equatable, Sendable {
+    let senderName: String
+    let snippet: String
+    let markdown: String
+
+    /// One-line preview of the quoted text.
+    static func snippet(from text: String, limit: Int = 140) -> String {
+        let collapsed = text.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        guard collapsed.count > limit else {
+            return collapsed
+        }
+        return String(collapsed.prefix(limit)) + "…"
+    }
+}
+
+/// Recognizes the "Name said:" line that precedes a quote block.
+enum QuoteAttribution {
+    struct Match: Equatable {
+        let name: String
+        let link: URL?
+    }
+
+    static func match(_ block: ContentBlock) -> Match? {
+        guard case let .paragraph(inline) = block,
+              case let .mention(name, _)? = inline.first
+        else {
+            return nil
+        }
+        var link: URL?
+        var text = ""
+        for item in inline.dropFirst() {
+            switch item {
+            case let .text(value):
+                text += value
+            case let .link(label, url):
+                link = URL(string: url)
+                text += label
+            default:
+                return nil
+            }
+        }
+        guard text.trimmingCharacters(in: .whitespaces).lowercased() == "said:" else {
+            return nil
+        }
+        return Match(name: name, link: link)
+    }
+}
 
 /// Builds the Markdown Zulip clients use to quote or forward a message.
 enum MessageQuote {

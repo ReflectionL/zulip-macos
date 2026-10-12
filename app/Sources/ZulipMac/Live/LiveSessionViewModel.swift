@@ -91,6 +91,8 @@ struct ComposerAttachmentInsertion: Equatable, Sendable {
     let key: ConversationKey
     let filename: String
     let markdown: String
+    /// Set for a quote, which waits above the composer instead of entering the text.
+    var quote: ComposerQuote?
 }
 
 private enum MessageAction: Equatable, Sendable {
@@ -1244,7 +1246,12 @@ final class LiveSessionViewModel {
                     id: requestID,
                     key: key,
                     filename: "quote",
-                    markdown: markdown + "\n\n"
+                    markdown: markdown + "\n\n",
+                    quote: ComposerQuote(
+                        senderName: pending.message.senderName,
+                        snippet: ComposerQuote.snippet(from: pending.message.plainText),
+                        markdown: markdown
+                    )
                 )
             case let .forward(key):
                 if sendText(markdown, to: key) {

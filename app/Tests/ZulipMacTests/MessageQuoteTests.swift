@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import ZulipCoreBindings
 @testable import ZulipMac
 
 @Suite("Message quoting")
@@ -67,5 +68,40 @@ struct MessageQuoteTests {
                 messageID: 40
             ) == nil
         )
+    }
+
+    @Test("The line before a quote block is recognized as its attribution")
+    func attribution() {
+        let linked = ContentBlock.paragraph([
+            .mention(displayName: "Theo Martin", userID: 22),
+            .text(" "),
+            .link(label: "said", url: "https://zulip.example.com/#narrow/near/40"),
+            .text(":"),
+        ])
+        #expect(
+            QuoteAttribution.match(linked)
+                == QuoteAttribution.Match(
+                    name: "Theo Martin",
+                    link: URL(string: "https://zulip.example.com/#narrow/near/40")
+                )
+        )
+        let plain = ContentBlock.paragraph([
+            .mention(displayName: "Theo", userID: 22),
+            .text(" said:"),
+        ])
+        #expect(QuoteAttribution.match(plain) == QuoteAttribution.Match(name: "Theo", link: nil))
+        let ordinary = ContentBlock.paragraph([
+            .mention(displayName: "Theo", userID: 22),
+            .text(" please look at this"),
+        ])
+        #expect(QuoteAttribution.match(ordinary) == nil)
+        #expect(QuoteAttribution.match(.paragraph([.text("said:")])) == nil)
+    }
+
+    @Test("A composer quote preview is one short line")
+    func snippet() {
+        #expect(ComposerQuote.snippet(from: "a\n  b\tc") == "a b c")
+        let long = String(repeating: "x", count: 300)
+        #expect(ComposerQuote.snippet(from: long, limit: 10) == String(repeating: "x", count: 10) + "…")
     }
 }
