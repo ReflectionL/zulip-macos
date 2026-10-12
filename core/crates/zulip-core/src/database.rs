@@ -561,6 +561,45 @@ impl CacheDatabase {
         Ok(())
     }
 
+    /// Deletes one draft; absent drafts are ignored.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DatabaseError`] if the delete fails.
+    pub fn delete_draft(&self, account_id: &str, draft_id: &str) -> Result<(), DatabaseError> {
+        self.connection.execute(
+            "DELETE FROM drafts WHERE account_id = ?1 AND draft_id = ?2",
+            params![account_id, draft_id],
+        )?;
+        Ok(())
+    }
+
+    /// Lists every draft of one account, newest first.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DatabaseError`] when the query fails.
+    pub fn drafts(&self, account_id: &str) -> Result<Vec<DraftRecord>, DatabaseError> {
+        let mut statement = self.connection.prepare(
+            r"
+            SELECT account_id, draft_id, conversation_key, content, updated_at
+            FROM drafts
+            WHERE account_id = ?1
+            ORDER BY updated_at DESC, draft_id
+            ",
+        )?;
+        let rows = statement.query_map([account_id], |row| {
+            Ok(DraftRecord {
+                account_id: row.get(0)?,
+                draft_id: row.get(1)?,
+                conversation_key: row.get(2)?,
+                content: row.get(3)?,
+                updated_at: row.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     /// Loads one draft from one account partition.
     ///
     /// # Errors
@@ -655,6 +694,50 @@ mod tests {
         DatabaseError, DraftRecord, MessageRecord, SCHEMA_VERSION, apply_migrations,
     };
     use crate::sync::MessageSummary;
+
+    #[test]
+    fn drafts_list_delete_and_stay_account_scoped() {
+        let database = CacheDatabase::open_in_memory().expect("database");
+        for account in ["a", "b"] {
+            database
+                .upsert_account(&AccountRecord {
+                    account_id: account.to_owned(),
+                    server_url: "https://acme.zulipchat.com".to_owned(),
+                    email: format!("{account}@example.com"),
+                    user_id: 1,
+                    display_name: account.to_owned(),
+                    created_at: 1,
+                })
+                .expect("account");
+        }
+        let draft = |account: &str, id: &str, at: i64| DraftRecord {
+            account_id: account.to_owned(),
+            draft_id: id.to_owned(),
+            conversation_key: id.to_owned(),
+            content: format!("{id} text"),
+            updated_at: at,
+        };
+        database.save_draft(&draft("a", "inbox", 1)).expect("save");
+        database
+            .save_draft(&draft("a", "channel:5", 2))
+            .expect("save");
+        database.save_draft(&draft("b", "inbox", 3)).expect("save");
+
+        let drafts = database.drafts("a").expect("list");
+        assert_eq!(
+            drafts
+                .iter()
+                .map(|d| d.draft_id.as_str())
+                .collect::<Vec<_>>(),
+            ["channel:5", "inbox"]
+        );
+        database.delete_draft("a", "inbox").expect("delete");
+        database
+            .delete_draft("a", "missing")
+            .expect("absent is fine");
+        assert_eq!(database.drafts("a").expect("list").len(), 1);
+        assert_eq!(database.drafts("b").expect("list").len(), 1);
+    }
 
     #[test]
     fn caches_account_snapshot_and_conversations_with_pruning() {

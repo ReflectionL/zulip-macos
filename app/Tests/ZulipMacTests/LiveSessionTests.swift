@@ -385,6 +385,62 @@ struct LiveSessionTests {
         ))
     }
 
+    @Test("Composer drafts are remembered, persisted after a pause, and restored")
+    func draftsPersist() async throws {
+        let accountID = "https://acme.zulipchat.com|maya@example.com"
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(
+            client: core,
+            credentialStore: MemoryCredentialStore(),
+            defaults: try #require(UserDefaults(suiteName: "drafts-\(UUID().uuidString)"))
+        )
+        model.startObserving()
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: accountID),
+                credential: StoredAPICredential(accountID: accountID, apiKey: "key"),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.connectionState == .connected }
+        #expect(core.commands.contains {
+            if case .loadDrafts = $0 { return true }
+            return false
+        })
+
+        let key = ConversationKey.channel(accountID: accountID, streamID: 5)
+        model.updateDraft("half-writ", for: key)
+        model.updateDraft("half-written", for: key)
+        #expect(model.draft(for: key) == "half-written")
+
+        try await Task.sleep(for: .milliseconds(900))
+        let saves = core.commands.compactMap { command -> String? in
+            if case let .saveDraft(_, savedKey, content) = command, savedKey == key {
+                return content
+            }
+            return nil
+        }
+        #expect(saves == ["half-written"], "typing is debounced into one write")
+
+        let other = ConversationKey.inbox(accountID: accountID)
+        core.emit(
+            .draftsLoaded(
+                requestID: 7,
+                accountID: accountID,
+                drafts: [
+                    LiveDraft(key: key, content: "stale stored text"),
+                    LiveDraft(key: other, content: "from last launch"),
+                ]
+            )
+        )
+        await eventually { model.draft(for: other) == "from last launch" }
+        #expect(model.draft(for: key) == "half-written")
+
+        model.updateDraft("", for: key)
+        #expect(model.draft(for: key).isEmpty)
+    }
+
     @Test("A loaded conversation is mapped safely and marked read")
     func openConversation() async {
         let core = RecordingCoreClient()

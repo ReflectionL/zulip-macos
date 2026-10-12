@@ -383,14 +383,18 @@ private struct LiveWindowView: View {
                 mediaLocalURLs: session.mediaLocalURLs,
                 mediaFailures: session.mediaFailures,
                 requestMedia: session.loadMedia,
-                retryMedia: session.retryMedia
+                retryMedia: session.retryMedia,
+                initialDraft: session.draft(for: page.key),
+                draftChanged: { session.updateDraft($0, for: page.key) }
             )
         case let .offline(page):
             ConversationSurface(
                 page: page,
                 isOffline: true,
                 reconnect: session.reconnectNow,
-                openSearch: presentMessageSearch
+                openSearch: presentMessageSearch,
+                initialDraft: session.draft(for: page.key),
+                draftChanged: { session.updateDraft($0, for: page.key) }
             )
         case let .loading(title, subtitle):
             LivePlaceholder(

@@ -181,6 +181,8 @@ final class LiveSessionViewModel {
     private var reconnectAttempt = 0
     private var cachedSessionRequestID: UInt64?
     private var hasLiveSession = false
+    private(set) var drafts: [ConversationKey: String] = [:]
+    @ObservationIgnored private var draftSaveTasks: [ConversationKey: Task<Void, Never>] = [:]
     private var requestID: UInt64 = 1
     private var activeSelection: ConversationKey?
     private var pendingOlderRequestID: UInt64?
@@ -325,6 +327,36 @@ final class LiveSessionViewModel {
         }
         cancelReconnect()
         Task { await connectUsingSavedAPIKey(reportMissingKey: false) }
+    }
+
+    func draft(for key: ConversationKey) -> String {
+        drafts[key] ?? ""
+    }
+
+    /// Remembers composer text immediately and persists it shortly after typing
+    /// pauses, so a relaunch or conversation switch never loses it.
+    func updateDraft(_ content: String, for key: ConversationKey) {
+        guard identity?.accountID == key.accountID else {
+            return
+        }
+        if content.isEmpty {
+            drafts.removeValue(forKey: key)
+        } else {
+            drafts[key] = content
+        }
+        draftSaveTasks[key]?.cancel()
+        draftSaveTasks[key] = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(500))
+            guard !Task.isCancelled, let self else { return }
+            self.draftSaveTasks.removeValue(forKey: key)
+            self.client.submit(
+                .saveDraft(requestID: self.nextRequestID(), key: key, content: content)
+            )
+        }
+    }
+
+    private func loadDrafts(for accountID: String) {
+        client.submit(.loadDrafts(requestID: nextRequestID(), accountID: accountID))
     }
 
     private func scheduleReconnect() {
@@ -794,6 +826,7 @@ final class LiveSessionViewModel {
             serverURL = identity.serverURL
             email = identity.email
             apply(snapshot)
+            loadDrafts(for: identity.accountID)
             let inbox = ConversationKey.inbox(accountID: identity.accountID)
             openConversation(inbox)
 
@@ -805,6 +838,7 @@ final class LiveSessionViewModel {
             email = identity.email
             rememberLastAccount(identity)
             apply(snapshot)
+            loadDrafts(for: identity.accountID)
             do {
                 try await credentialStore.save(credential)
             } catch {
@@ -987,6 +1021,15 @@ final class LiveSessionViewModel {
         case let .retryScheduled(_, delayMilliseconds):
             connectionState = .retrying(delayMilliseconds: delayMilliseconds)
 
+        case let .draftsLoaded(_, accountID, loaded):
+            guard identity?.accountID == accountID else {
+                return
+            }
+            // Text typed since launch wins over what was stored.
+            for draft in loaded where drafts[draft.key] == nil {
+                drafts[draft.key] = draft.content
+            }
+
         case let .syncResumed(accountID):
             if identity?.accountID == accountID, case .retrying = connectionState {
                 connectionState = .connected
@@ -1098,6 +1141,9 @@ final class LiveSessionViewModel {
 
     private func resetSessionState() {
         hasLiveSession = false
+        draftSaveTasks.values.forEach { $0.cancel() }
+        draftSaveTasks = [:]
+        drafts = [:]
         attachmentUploadsByRequestID.values.forEach(stopSecurityScope)
         identity = nil
         sidebarSnapshot = nil

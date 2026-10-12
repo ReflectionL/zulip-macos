@@ -20,7 +20,7 @@ use zulip_core::{
     content::{
         ContentBlock as NativeContentBlock, InlineContent as NativeInlineContent, parse_zulip_html,
     },
-    database::{CacheDatabase, CachedAccount, CachedConversation, CachedSnapshot},
+    database::{CacheDatabase, CachedAccount, CachedConversation, CachedSnapshot, DraftRecord},
     media::MediaClient,
     messages::{
         ConversationTarget, MessageClient, MessageFlag, MessageWriteOperation, OutgoingMessage,
@@ -161,6 +161,41 @@ impl CoreConversationKey {
         }
     }
 
+    /// Inverse of [`Self::cache_key`], for restoring persisted drafts.
+    fn from_cache_key(account_id: &str, key: &str) -> Option<Self> {
+        let account_id = account_id.to_owned();
+        match key {
+            "inbox" => return Some(Self::Inbox { account_id }),
+            "mentions" => return Some(Self::Mentions { account_id }),
+            "starred" => return Some(Self::Starred { account_id }),
+            "unread" => return Some(Self::Unread { account_id }),
+            _ => {}
+        }
+        if let Some(stream_id) = key.strip_prefix("channel:") {
+            return Some(Self::Channel {
+                account_id,
+                stream_id: stream_id.parse().ok()?,
+            });
+        }
+        if let Some(rest) = key.strip_prefix("topic:") {
+            let (stream_id, topic) = rest.split_once(':')?;
+            return Some(Self::Topic {
+                account_id,
+                stream_id: stream_id.parse().ok()?,
+                topic: topic.to_owned(),
+            });
+        }
+        let recipients = key.strip_prefix("dm:")?;
+        let recipient_ids = recipients
+            .split(',')
+            .map(|id| id.parse().ok())
+            .collect::<Option<Vec<i64>>>()?;
+        Some(Self::DirectMessage {
+            account_id,
+            recipient_ids,
+        })
+    }
+
     fn target(&self) -> ConversationTarget {
         match self {
             Self::Inbox { .. } => ConversationTarget::Combined,
@@ -181,6 +216,15 @@ impl CoreConversationKey {
             },
         }
     }
+}
+
+/// One persisted composer draft.
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct CoreDraft {
+    /// Conversation the draft belongs to.
+    pub key: CoreConversationKey,
+    /// Draft Markdown/plain text.
+    pub content: String,
 }
 
 /// Commands submitted synchronously by Swift and executed off the main actor.
@@ -393,6 +437,22 @@ pub enum CoreCommand {
         /// Correlates the response.
         request_id: u64,
     },
+    /// Persists the composer text for one conversation; empty text deletes it.
+    SaveDraft {
+        /// Correlates failures.
+        request_id: u64,
+        /// Stable account-scoped conversation.
+        key: CoreConversationKey,
+        /// Draft Markdown/plain text.
+        content: String,
+    },
+    /// Loads every persisted draft of one account.
+    LoadDrafts {
+        /// Correlates the response.
+        request_id: u64,
+        /// Client-owned account partition.
+        account_id: String,
+    },
     /// Loads the last cached navigation state without using the network.
     LoadCachedSession {
         /// Correlates the response.
@@ -409,6 +469,8 @@ impl CoreCommand {
             | Self::StartApiKeySession { request_id, .. }
             | Self::StartPasswordSession { request_id, .. }
             | Self::LoadCachedSession { request_id, .. }
+            | Self::SaveDraft { request_id, .. }
+            | Self::LoadDrafts { request_id, .. }
             | Self::OpenConversation { request_id, .. }
             | Self::LoadOlderMessages { request_id, .. }
             | Self::SearchMessages { request_id, .. }
@@ -841,6 +903,15 @@ pub enum CoreEvent {
         /// Delay before another poll or resync.
         delay_milliseconds: u64,
     },
+    /// Persisted drafts for an account.
+    DraftsLoaded {
+        /// Originating request.
+        request_id: u64,
+        /// Active account partition.
+        account_id: String,
+        /// Non-empty drafts, newest first.
+        drafts: Vec<CoreDraft>,
+    },
     /// Cached navigation state for an account that is not (yet) live.
     CachedSessionLoaded {
         /// Originating request.
@@ -1079,6 +1150,11 @@ async fn handle_command(
             request_id,
             account_id,
         } => load_cached_session(request_id, &account_id, cache, event_sink),
+        CoreCommand::SaveDraft { key, content, .. } => save_draft(&key, &content, cache),
+        CoreCommand::LoadDrafts {
+            request_id,
+            account_id,
+        } => load_drafts(request_id, &account_id, cache, event_sink),
         CoreCommand::OpenConversation {
             request_id,
             key,
@@ -2176,6 +2252,48 @@ fn cache_snapshot_throttled(account: &AccountSession, snapshot: &SyncSnapshot) {
         .with(|database| database.save_snapshot(&account.account_id, &cached, now_timestamp()));
 }
 
+fn save_draft(key: &CoreConversationKey, content: &str, cache: &CacheHandle) {
+    let account_id = key.account_id();
+    let draft_id = key.cache_key();
+    if content.trim().is_empty() {
+        cache.with(|database| database.delete_draft(account_id, &draft_id));
+        return;
+    }
+    cache.with(|database| {
+        database.save_draft(&DraftRecord {
+            account_id: account_id.to_owned(),
+            draft_id: draft_id.clone(),
+            conversation_key: draft_id,
+            content: content.to_owned(),
+            updated_at: now_timestamp(),
+        })
+    });
+}
+
+fn load_drafts(
+    request_id: u64,
+    account_id: &str,
+    cache: &CacheHandle,
+    event_sink: &Arc<dyn CoreEventSink>,
+) {
+    let drafts = cache
+        .with(|database| database.drafts(account_id))
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|draft| {
+            Some(CoreDraft {
+                key: CoreConversationKey::from_cache_key(account_id, &draft.conversation_key)?,
+                content: draft.content,
+            })
+        })
+        .collect();
+    event_sink.handle_event(CoreEvent::DraftsLoaded {
+        request_id,
+        account_id: account_id.to_owned(),
+        drafts,
+    });
+}
+
 fn load_cached_session(
     request_id: u64,
     account_id: &str,
@@ -3000,6 +3118,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn cached_session_and_conversation_are_readable_without_a_live_session() {
         let (server, _requests) = spawn_search_actor_mock();
         let directory = TempDir::new().expect("temporary directory");
@@ -3089,6 +3208,47 @@ mod tests {
         assert_eq!(page.messages[0].message_id, 50);
         assert!(page.found_oldest);
 
+        let draft_key = CoreConversationKey::Topic {
+            account_id: "account-search".to_owned(),
+            stream_id: 5,
+            topic: "ship: v1".to_owned(),
+        };
+        offline.submit(CoreCommand::SaveDraft {
+            request_id: 43,
+            key: draft_key.clone(),
+            content: "half-written reply".to_owned(),
+        });
+        offline.submit(CoreCommand::LoadDrafts {
+            request_id: 44,
+            account_id: "account-search".to_owned(),
+        });
+        let drafts = wait_for_event(&offline_receiver, &offline_sink, |event| {
+            matches!(event, CoreEvent::DraftsLoaded { request_id: 44, .. })
+        });
+        let CoreEvent::DraftsLoaded { drafts, .. } = drafts else {
+            unreachable!("matched above");
+        };
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].key, draft_key);
+        assert_eq!(drafts[0].content, "half-written reply");
+
+        offline.submit(CoreCommand::SaveDraft {
+            request_id: 45,
+            key: draft_key,
+            content: "  \n".to_owned(),
+        });
+        offline.submit(CoreCommand::LoadDrafts {
+            request_id: 46,
+            account_id: "account-search".to_owned(),
+        });
+        let cleared = wait_for_event(&offline_receiver, &offline_sink, |event| {
+            matches!(event, CoreEvent::DraftsLoaded { request_id: 46, .. })
+        });
+        assert!(matches!(
+            cleared,
+            CoreEvent::DraftsLoaded { drafts, .. } if drafts.is_empty()
+        ));
+
         offline.submit(CoreCommand::LoadCachedSession {
             request_id: 42,
             account_id: "someone-else".to_owned(),
@@ -3103,6 +3263,34 @@ mod tests {
             )
         });
         assert!(matches!(missing, CoreEvent::Failed { .. }));
+    }
+
+    #[test]
+    fn conversation_cache_keys_round_trip() {
+        for key in [
+            CoreConversationKey::Inbox {
+                account_id: "a".to_owned(),
+            },
+            CoreConversationKey::Channel {
+                account_id: "a".to_owned(),
+                stream_id: 7,
+            },
+            CoreConversationKey::Topic {
+                account_id: "a".to_owned(),
+                stream_id: 7,
+                topic: "a:b:c".to_owned(),
+            },
+            CoreConversationKey::DirectMessage {
+                account_id: "a".to_owned(),
+                recipient_ids: vec![3, 9],
+            },
+        ] {
+            assert_eq!(
+                CoreConversationKey::from_cache_key("a", &key.cache_key()),
+                Some(key)
+            );
+        }
+        assert_eq!(CoreConversationKey::from_cache_key("a", "bogus"), None);
     }
 
     #[test]
