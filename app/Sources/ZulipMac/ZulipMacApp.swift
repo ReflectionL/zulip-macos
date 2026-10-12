@@ -33,8 +33,8 @@ struct ZulipMacApp: App {
                     LabeledContent("New line in message", value: "⇧Return or ⌥Return")
                     LabeledContent("Leave composer, close search", value: "Esc")
                     LabeledContent("Toggle sidebar", value: "⌃⌘S")
-                    LabeledContent("Larger / smaller text", value: "⌃+ / ⌃− (or ⌘+ / ⌘−)")
-                    LabeledContent("Actual text size", value: "⌃0 (or ⌘0)")
+                    LabeledContent("Larger / smaller text", value: "⌘+ / ⌘−")
+                    LabeledContent("Actual text size", value: "⌘0")
                 }
             }
             .formStyle(.grouped)

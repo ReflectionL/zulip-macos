@@ -3068,7 +3068,7 @@ mod tests {
         assert!(content.iter().any(|item| matches!(
             item,
             CoreInlineContent::Emoji { name, value }
-                if name == "wave" && value == ":wave:"
+                if name == "wave" && value == "\u{1f44b}"
         )));
         assert!(content.iter().any(|item| matches!(
             item,

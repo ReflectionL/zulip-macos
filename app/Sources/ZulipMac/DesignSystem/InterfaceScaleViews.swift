@@ -22,25 +22,14 @@ struct InterfaceScaleCommands: Commands {
     }
 }
 
-/// Invisible buttons that add the Control-key shortcuts (and the unshifted ⌘=) next
-/// to the menu's own.
+/// An invisible button that adds the unshifted ⌘= next to the menu's own ⌘+.
 struct InterfaceScaleShortcuts: View {
     var body: some View {
-        ZStack {
-            Button("Increase text size") { InterfaceScale.shared.increase() }
-                .keyboardShortcut("=", modifiers: .command)
-            Button("Increase text size") { InterfaceScale.shared.increase() }
-                .keyboardShortcut("=", modifiers: .control)
-            Button("Increase text size") { InterfaceScale.shared.increase() }
-                .keyboardShortcut("+", modifiers: .control)
-            Button("Decrease text size") { InterfaceScale.shared.decrease() }
-                .keyboardShortcut("-", modifiers: .control)
-            Button("Actual text size") { InterfaceScale.shared.reset() }
-                .keyboardShortcut("0", modifiers: .control)
-        }
-        .frame(width: 0, height: 0)
-        .opacity(0)
-        .accessibilityHidden(true)
+        Button("Increase text size") { InterfaceScale.shared.increase() }
+            .keyboardShortcut("=", modifiers: .command)
+            .frame(width: 0, height: 0)
+            .opacity(0)
+            .accessibilityHidden(true)
     }
 }
 
