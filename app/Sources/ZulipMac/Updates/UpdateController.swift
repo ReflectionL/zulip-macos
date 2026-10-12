@@ -139,17 +139,19 @@ final class UpdateController {
     }
 
     private static func message(for error: Error) -> String {
-        switch error {
-        case ReleaseFeedError.rateLimited:
-            "GitHub is limiting requests right now. Try again in a little while."
-        case let ReleaseFeedError.http(status):
-            "GitHub answered with HTTP \(status)."
-        case ReleaseFeedError.invalidResponse:
-            "GitHub returned a release list this version does not understand."
-        case let error as UpdateError:
-            error.localizedDescription
-        default:
-            (error as NSError).localizedDescription
+        if let feedError = error as? ReleaseFeedError {
+            switch feedError {
+            case .rateLimited:
+                return "GitHub is limiting requests right now. Try again in a little while."
+            case let .http(status):
+                return "GitHub answered with HTTP \(status)."
+            case .invalidResponse:
+                return "GitHub returned a release list this version does not understand."
+            }
         }
+        if let updateError = error as? UpdateError {
+            return updateError.localizedDescription
+        }
+        return (error as NSError).localizedDescription
     }
 }
