@@ -31,7 +31,8 @@ enum MessageGrouping {
         current.senderID == previous.senderID
             && current.conversationKey == previous.conversationKey
             && current.sourceStreamID == previous.sourceStreamID
-            && current.sourceTopic == previous.sourceTopic
+            // Zulip treats topic names case-insensitively.
+            && current.sourceTopic?.lowercased() == previous.sourceTopic?.lowercased()
             && abs(current.timestamp.timeIntervalSince(previous.timestamp)) < window
             && calendar.isDate(current.timestamp, inSameDayAs: previous.timestamp)
     }

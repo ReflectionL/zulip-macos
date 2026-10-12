@@ -12,12 +12,16 @@ struct ZulipMacApp: App {
         }
         .defaultSize(width: 1_080, height: 720)
         .windowStyle(.hiddenTitleBar)
-        .commands { UpdateCommands(updates: updates) }
+        .commands {
+            UpdateCommands(updates: updates)
+            InterfaceScaleCommands()
+        }
 
         Settings {
             Form {
                 LabeledContent("Application", value: AppIdentity.displayName)
                 LabeledContent("Minimum system", value: AppIdentity.minimumSystem)
+                TextSizeSettingsSection()
                 UpdateSettingsSection(updates: updates)
                 Section("Keyboard") {
                     LabeledContent("Quick switcher", value: "⌘K")
@@ -29,6 +33,8 @@ struct ZulipMacApp: App {
                     LabeledContent("New line in message", value: "⇧Return or ⌥Return")
                     LabeledContent("Leave composer, close search", value: "Esc")
                     LabeledContent("Toggle sidebar", value: "⌃⌘S")
+                    LabeledContent("Larger / smaller text", value: "⌃+ / ⌃− (or ⌘+ / ⌘−)")
+                    LabeledContent("Actual text size", value: "⌃0 (or ⌘0)")
                 }
             }
             .formStyle(.grouped)

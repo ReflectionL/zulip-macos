@@ -16,6 +16,7 @@ use crate::{
 const MESSAGES_PATH: &str = "api/v1/messages";
 const MESSAGE_FLAGS_PATH: &str = "api/v1/messages/flags";
 const PRESENCE_PATH: &str = "api/v1/users/me/presence";
+const STREAMS_PATH_PREFIX: &str = "api/v1/streams";
 const SUBSCRIPTIONS_PATH: &str = "api/v1/users/me/subscriptions";
 const MAX_CHANNEL_NAME_CHARS: usize = 60;
 const MAX_CHANNEL_DESCRIPTION_CHARS: usize = 1_024;
@@ -696,6 +697,40 @@ impl MessageClient {
         Ok(())
     }
 
+    /// Renames a channel. The server decides whether the acting user may.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageApiError`] for invalid identifiers or names, transport,
+    /// rejection (including permission and duplicate names), size, or response
+    /// failures.
+    pub async fn rename_channel(
+        &self,
+        stream_id: i64,
+        new_name: &str,
+    ) -> Result<(), MessageApiError> {
+        let name = new_name.trim();
+        if stream_id <= 0
+            || name.is_empty()
+            || name.chars().count() > MAX_CHANNEL_NAME_CHARS
+            || name.chars().any(char::is_control)
+        {
+            return Err(MessageApiError::InvalidInput);
+        }
+        let path = format!("{STREAMS_PATH_PREFIX}/{stream_id}");
+        let response = self
+            .http
+            .patch(self.base_url.endpoint(&path))
+            .basic_auth(&self.email, Some(self.api_key.expose_secret()))
+            .form(&[("new_name", name)])
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let document: ApiResultDocument =
+            decode_response(response, MAX_WRITE_RESPONSE_BYTES).await?;
+        document.validate_result()
+    }
+
     /// Fetches the original Markdown source of one visible message, as needed
     /// to quote or forward it.
     ///
@@ -855,6 +890,10 @@ impl MessageClient {
                 Some(UserPresence {
                     user_id: key.parse().ok()?,
                     status: presence_status(now, record.active_timestamp, record.idle_timestamp),
+                    last_active_at: record
+                        .active_timestamp
+                        .or(record.idle_timestamp)
+                        .and_then(whole_seconds),
                 })
             })
             .collect::<Vec<_>>();
@@ -881,6 +920,15 @@ pub struct UserPresence {
     pub user_id: i64,
     /// Derived state.
     pub status: PresenceStatus,
+    /// When the user was last active (Unix seconds); the last idle report when
+    /// they never were, and `None` when the server has no record.
+    pub last_active_at: Option<i64>,
+}
+
+/// Whole Unix seconds of a server timestamp, if it is a usable one.
+#[allow(clippy::cast_possible_truncation)]
+fn whole_seconds(timestamp: f64) -> Option<i64> {
+    (timestamp.is_finite() && timestamp > 0.0).then(|| timestamp.floor() as i64)
 }
 
 /// Applies Zulip's offline threshold to a presence record.
@@ -1281,6 +1329,13 @@ mod tests {
                 (9, PresenceStatus::Active),
             ]
         );
+        assert_eq!(
+            presences
+                .iter()
+                .map(|presence| presence.last_active_at)
+                .collect::<Vec<_>>(),
+            vec![Some(100), Some(500), Some(990)]
+        );
         let request = requests.recv().expect("presence request");
         assert!(request.starts_with("POST /api/v1/users/me/presence HTTP/1.1"));
         assert!(request.contains("status=active"));
@@ -1327,6 +1382,40 @@ mod tests {
         ));
         assert!(matches!(
             client.create_channel("design", "", false, &[]).await,
+            Err(MessageApiError::InvalidInput)
+        ));
+    }
+
+    #[tokio::test]
+    async fn rename_channel_patches_the_stream_name() {
+        let responses = vec![
+            (StatusCode::OK, r#"{"result":"success"}"#.to_owned()),
+            (
+                StatusCode::BAD_REQUEST,
+                r#"{"result":"error","code":"UNAUTHORIZED_PRINCIPAL","msg":"Insufficient permission"}"#
+                    .to_owned(),
+            ),
+        ];
+        let (server, requests) = spawn_mock(responses);
+        let client = MessageClient::new(&server, "maya@example.com", SecretString::new(API_KEY))
+            .expect("message client");
+
+        client
+            .rename_channel(5, " design team ")
+            .await
+            .expect("renamed");
+        let request = requests.recv().expect("rename request");
+        assert!(request.starts_with("PATCH /api/v1/streams/5 HTTP/1.1"));
+        assert!(request.contains("new_name=design+team"));
+        assert!(!request.contains(API_KEY));
+
+        assert!(client.rename_channel(5, "design").await.is_err());
+        assert!(matches!(
+            client.rename_channel(0, "design").await,
+            Err(MessageApiError::InvalidInput)
+        ));
+        assert!(matches!(
+            client.rename_channel(5, "  ").await,
             Err(MessageApiError::InvalidInput)
         ));
     }

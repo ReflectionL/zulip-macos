@@ -236,10 +236,10 @@ private struct ContentBlockView: View {
 extension ContentBlockView {
     static func headingFont(level: Int) -> Font {
         switch level {
-        case 1: .system(size: 22, weight: .semibold)
-        case 2: .system(size: 19, weight: .semibold)
-        case 3: .system(size: 16.5, weight: .semibold)
-        default: .system(size: 14, weight: .semibold)
+        case 1: AppTheme.Typography.scaled(22, weight: .semibold)
+        case 2: AppTheme.Typography.scaled(19, weight: .semibold)
+        case 3: AppTheme.Typography.scaled(16.5, weight: .semibold)
+        default: AppTheme.Typography.scaled(14, weight: .semibold)
         }
     }
 }
@@ -284,7 +284,7 @@ private struct InlineContentText: View {
             case .mention:
                 fragment = AttributedString(item.plainText)
                 fragment.foregroundColor = AppTheme.Colors.accent
-                fragment.font = .system(size: 14, weight: .semibold)
+                fragment.font = AppTheme.Typography.scaled(14, weight: .semibold)
             }
 
             if !inherited.isEmpty, !isStyled(item) {
@@ -342,9 +342,9 @@ private struct NativeImageBlock: View {
                     if url.hasPrefix("fixture://") {
                         VStack(spacing: AppTheme.Spacing.medium) {
                             Image(systemName: "macwindow")
-                                .font(.system(size: 34, weight: .light))
+                                .font(AppTheme.Typography.scaled(34, weight: .light))
                             Text("Zulip Mac")
-                                .font(.system(size: 20, weight: .semibold))
+                                .font(AppTheme.Typography.scaled(20, weight: .semibold))
                             Text("Native conversation surface")
                                 .font(AppTheme.Typography.metadata)
                         }

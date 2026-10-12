@@ -15,6 +15,11 @@ enum AppTheme {
         static let controlRadius: CGFloat = 10
         static let panelRadius: CGFloat = 16
         static let hairline: CGFloat = 1
+        /// Vertical padding around a message row: a message that continues a block,
+        /// and the first message of a block (more space above it than below).
+        static let continuationInset: CGFloat = 4
+        static let blockTopInset: CGFloat = 14
+        static let blockBottomInset: CGFloat = 4
     }
 
     enum Spacing {
@@ -26,15 +31,26 @@ enum AppTheme {
         static let section: CGFloat = 32
     }
 
+    /// Fonts follow the user's text-size preference (`InterfaceScale`).
+    @MainActor
     enum Typography {
-        static let eyebrow = Font.system(size: 11, weight: .semibold)
-        static let sidebar = Font.system(size: 13, weight: .regular)
-        static let sidebarEmphasized = Font.system(size: 13, weight: .medium)
-        static let body = Font.system(size: 14, weight: .regular)
-        static let bodyEmphasized = Font.system(size: 14, weight: .semibold)
-        static let title = Font.system(size: 15, weight: .semibold)
-        static let code = Font.system(size: 13, design: .monospaced)
-        static let metadata = Font.system(size: 11, weight: .regular)
+        static var eyebrow: Font { scaled(11, weight: .semibold) }
+        static var sidebar: Font { scaled(13) }
+        static var sidebarEmphasized: Font { scaled(13, weight: .medium) }
+        static var body: Font { scaled(14) }
+        static var bodyEmphasized: Font { scaled(14, weight: .semibold) }
+        static var title: Font { scaled(15, weight: .semibold) }
+        static var code: Font { scaled(13, design: .monospaced) }
+        static var metadata: Font { scaled(11) }
+
+        /// A system font of `size` points at the user's current text size.
+        static func scaled(
+            _ size: CGFloat,
+            weight: Font.Weight = .regular,
+            design: Font.Design = .default
+        ) -> Font {
+            .system(size: size * InterfaceScale.shared.factor, weight: weight, design: design)
+        }
     }
 
     /// Neutral, system-derived colors: surfaces follow the macOS appearance and

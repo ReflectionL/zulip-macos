@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 import ZulipCoreBindings
@@ -11,6 +12,10 @@ struct ConversationSurface: View {
     var submitMessage: ((String) -> Bool)?
     var openSearch: (() -> Void)?
     var renameTopic: (() -> Void)?
+    var renameChannel: (() -> Void)?
+    var openParent: (() -> Void)?
+    var headerStatus: String?
+    var composerHint: String?
     var moveMessage: ((MessageViewData) -> Void)?
     var editMessage: ((MessageViewData, String) -> Bool)?
     var deleteMessage: ((MessageViewData) -> Bool)?
@@ -54,6 +59,10 @@ struct ConversationSurface: View {
         submitMessage: ((String) -> Bool)? = nil,
         openSearch: (() -> Void)? = nil,
         renameTopic: (() -> Void)? = nil,
+        renameChannel: (() -> Void)? = nil,
+        openParent: (() -> Void)? = nil,
+        headerStatus: String? = nil,
+        composerHint: String? = nil,
         moveMessage: ((MessageViewData) -> Void)? = nil,
         editMessage: ((MessageViewData, String) -> Bool)? = nil,
         deleteMessage: ((MessageViewData) -> Bool)? = nil,
@@ -86,6 +95,10 @@ struct ConversationSurface: View {
         self.submitMessage = submitMessage
         self.openSearch = openSearch
         self.renameTopic = renameTopic
+        self.renameChannel = renameChannel
+        self.openParent = openParent
+        self.headerStatus = headerStatus
+        self.composerHint = composerHint
         self.moveMessage = moveMessage
         self.editMessage = editMessage
         self.deleteMessage = deleteMessage
@@ -159,7 +172,7 @@ struct ConversationSurface: View {
                             }
 
                             let continuations = MessageGrouping.continuationIDs(in: messages)
-                            ForEach(messages) { message in
+                            ForEach(messages, id: \.rowID) { message in
                                 MessageRow(
                                     message: message,
                                     isContinuation: continuations.contains(message.id),
@@ -207,7 +220,7 @@ struct ConversationSurface: View {
                                     requestMedia: requestMedia,
                                     retryMedia: retryMedia
                                 )
-                                .id(message.id)
+                                .id(message.rowID)
                             }
 
                             Color.clear
@@ -218,6 +231,8 @@ struct ConversationSurface: View {
                         .frame(maxWidth: .infinity)
                         .padding(.horizontal, AppTheme.Spacing.extraLarge)
                     }
+                    .defaultScrollAnchor(.bottom, for: .initialOffset)
+                    .defaultScrollAnchor(.bottom, for: .sizeChanges)
                     .onScrollGeometryChange(for: Bool.self) { geometry in
                         let remaining = geometry.contentSize.height
                             - geometry.contentOffset.y
@@ -237,7 +252,7 @@ struct ConversationSurface: View {
                            messages.contains(where: { $0.id == messageID })
                         {
                             followsNewest = false
-                            proxy.scrollTo(messageID, anchor: .center)
+                            proxy.scrollTo(rowID(for: messageID), anchor: .center)
                         } else {
                             followsNewest = true
                             proxy.scrollTo(TimelineAnchor.bottom, anchor: .bottom)
@@ -247,9 +262,7 @@ struct ConversationSurface: View {
                         guard followsNewest else {
                             return
                         }
-                        withAnimation(.snappy) {
-                            proxy.scrollTo(TimelineAnchor.bottom, anchor: .bottom)
-                        }
+                        proxy.scrollTo(TimelineAnchor.bottom, anchor: .bottom)
                     }
 
                     if !followsNewest {
@@ -274,6 +287,7 @@ struct ConversationSurface: View {
 
             ComposerView(
                 conversationTitle: page.title,
+                hint: composerHint,
                 draft: $draft,
                 isFocused: $isComposerFocused,
                 isDisabled: isOffline,
@@ -293,8 +307,11 @@ struct ConversationSurface: View {
             title: page.title,
             subtitle: page.subtitle,
             isOffline: isOffline,
+            status: headerStatus,
+            openParent: openParent,
             openSearch: openSearch,
-            renameTopic: renameTopic
+            renameTopic: renameTopic,
+            renameChannel: renameChannel
         )
         .overlay {
             Button("Focus message composer") {
@@ -371,6 +388,11 @@ struct ConversationSurface: View {
         } message: {
             Text("This cannot be undone.")
         }
+    }
+
+    /// The timeline row that shows a message; a sent message can keep its echo's row.
+    private func rowID(for messageID: Int64) -> Int64 {
+        messages.first(where: { $0.id == messageID })?.rowID ?? messageID
     }
 
     private func toggleReaction(for messageID: Int64) {
@@ -456,16 +478,22 @@ extension View {
         title: String,
         subtitle: String,
         isOffline: Bool,
+        status: String? = nil,
+        openParent: (() -> Void)? = nil,
         openSearch: (() -> Void)? = nil,
-        renameTopic: (() -> Void)? = nil
+        renameTopic: (() -> Void)? = nil,
+        renameChannel: (() -> Void)? = nil
     ) -> some View {
         modifier(
             ConversationToolbarModifier(
                 title: title,
                 subtitle: subtitle,
                 isOffline: isOffline,
+                status: status,
+                openParent: openParent,
                 openSearch: openSearch,
-                renameTopic: renameTopic
+                renameTopic: renameTopic,
+                renameChannel: renameChannel
             )
         )
     }
@@ -475,30 +503,58 @@ private struct ConversationToolbarModifier: ViewModifier {
     let title: String
     let subtitle: String
     let isOffline: Bool
+    let status: String?
+    let openParent: (() -> Void)?
     let openSearch: (() -> Void)?
     let renameTopic: (() -> Void)?
+    let renameChannel: (() -> Void)?
+
+    private var accessibilitySummary: String {
+        var parts = [subtitle, title]
+        if let status {
+            parts.append(status)
+        }
+        if isOffline {
+            parts.append("offline")
+        }
+        return parts.joined(separator: ", ")
+    }
 
     func body(content: Content) -> some View {
         content
             .toolbar {
                 ToolbarItem(placement: .navigation) {
                     HStack(spacing: AppTheme.Spacing.small) {
-                        Text(subtitle)
-                            .foregroundStyle(AppTheme.Colors.secondaryText)
+                        if let openParent {
+                            Button(action: openParent) {
+                                Text(subtitle)
+                                    .foregroundStyle(AppTheme.Colors.secondaryText)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Open \(subtitle)")
+                            .accessibilityLabel("Open \(subtitle)")
+                        } else {
+                            Text(subtitle)
+                                .foregroundStyle(AppTheme.Colors.secondaryText)
+                        }
 
                         Image(systemName: "chevron.right")
-                            .font(.system(size: 9, weight: .semibold))
+                            .font(AppTheme.Typography.scaled(9, weight: .semibold))
                             .foregroundStyle(AppTheme.Colors.tertiaryText)
 
                         Text(title)
                             .fontWeight(.semibold)
                             .foregroundStyle(AppTheme.Colors.primaryText)
+
+                        if let status {
+                            Text(status)
+                                .font(AppTheme.Typography.metadata)
+                                .foregroundStyle(AppTheme.Colors.tertiaryText)
+                        }
                     }
                     .font(AppTheme.Typography.body)
-                    .accessibilityElement(children: .combine)
-                    .accessibilityLabel(
-                        "\(subtitle), \(title)\(isOffline ? ", offline" : "")"
-                    )
+                    .accessibilityElement(children: .contain)
+                    .accessibilityLabel(accessibilitySummary)
                 }
                 .sharedBackgroundVisibility(.hidden)
 
@@ -523,15 +579,20 @@ private struct ConversationToolbarModifier: ViewModifier {
                         .accessibilityLabel("Search messages")
                     }
 
-                    if let renameTopic {
+                    if renameTopic != nil || renameChannel != nil {
                         Menu {
-                            Button("Rename topic…", action: renameTopic)
+                            if let renameTopic {
+                                Button("Rename topic…", action: renameTopic)
+                            }
+                            if let renameChannel {
+                                Button("Rename channel…", action: renameChannel)
+                            }
                         } label: {
                             Image(systemName: "ellipsis.circle")
                         }
                         .menuIndicator(.hidden)
-                        .help("Topic actions")
-                        .accessibilityLabel("Topic actions")
+                        .help("Conversation actions")
+                        .accessibilityLabel("Conversation actions")
                     }
 
                     Button {
@@ -571,8 +632,10 @@ private struct MessageRow: View {
         HStack(alignment: .top, spacing: AppTheme.Spacing.medium) {
             if isContinuation {
                 Text(message.timestamp, format: .dateTime.hour(.twoDigits(amPM: .omitted)).minute())
-                    .font(.system(size: 9).monospacedDigit())
+                    .font(AppTheme.Typography.scaled(9).monospacedDigit())
                     .foregroundStyle(AppTheme.Colors.tertiaryText)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.5)
                     .frame(width: Self.avatarSize, alignment: .center)
                     .padding(.top, 3)
                     .opacity(isHovered ? 1 : 0)
@@ -599,21 +662,24 @@ private struct MessageRow: View {
                         Text(message.senderName)
                             .font(AppTheme.Typography.bodyEmphasized)
 
-                        Text(message.timestamp, style: .time)
+                        Text(MessageTimestamp.format(message.timestamp))
                             .font(AppTheme.Typography.metadata)
                             .foregroundStyle(AppTheme.Colors.tertiaryText)
+                            .help(message.timestamp.formatted(date: .complete, time: .standard))
 
                         statusLabels
                     }
                 }
 
-                MessageContentView(
-                    blocks: message.content,
-                    mediaLocalURLs: mediaLocalURLs,
-                    mediaFailures: mediaFailures,
-                    requestMedia: requestMedia,
-                    retryMedia: retryMedia
-                )
+                if !showsPlaceholder {
+                    MessageContentView(
+                        blocks: message.content,
+                        mediaLocalURLs: mediaLocalURLs,
+                        mediaFailures: mediaFailures,
+                        requestMedia: requestMedia,
+                        retryMedia: retryMedia
+                    )
+                }
 
                 if message.reactionCount > 0 {
                     Button(action: toggleReaction) {
@@ -647,8 +713,18 @@ private struct MessageRow: View {
             Spacer(minLength: 0)
         }
         .padding(.horizontal, AppTheme.Spacing.medium)
-        .padding(.top, isContinuation ? 1 : AppTheme.Spacing.small)
-        .padding(.bottom, isContinuation ? 1 : AppTheme.Spacing.small)
+        .padding(
+            .top,
+            isContinuation
+                ? AppTheme.Metrics.continuationInset
+                : AppTheme.Metrics.blockTopInset
+        )
+        .padding(
+            .bottom,
+            isContinuation
+                ? AppTheme.Metrics.continuationInset
+                : AppTheme.Metrics.blockBottomInset
+        )
         .contentShape(Rectangle())
         .background {
             RoundedRectangle(
@@ -722,13 +798,19 @@ private struct MessageRow: View {
 
     private static let avatarSize: CGFloat = 32
 
+    /// A just-sent Markdown message waits for its server rendering instead of showing
+    /// its raw source, which would flash when the rendered copy replaces it.
+    private var showsPlaceholder: Bool {
+        message.isProvisional && message.deliveryState != .failed
+    }
+
     private var hasStatus: Bool {
-        message.deliveryState != .sent || message.actionState != .idle
+        message.deliveryState != .sent || message.actionState != .idle || showsPlaceholder
     }
 
     @ViewBuilder
     private var statusLabels: some View {
-        if message.deliveryState == .pending {
+        if message.deliveryState == .pending || showsPlaceholder {
             Text("Sending…")
                 .font(AppTheme.Typography.metadata)
                 .foregroundStyle(AppTheme.Colors.secondaryText)
@@ -956,6 +1038,7 @@ private struct EditMessageSheet: View {
 
 private struct ComposerView: View {
     let conversationTitle: String
+    let hint: String?
     @Binding var draft: String
     var isFocused: FocusState<Bool>.Binding
     let isDisabled: Bool
@@ -970,6 +1053,7 @@ private struct ComposerView: View {
     @State private var selection: TextSelection?
     @State private var mentionIndex = 0
     @State private var dismissedMentionDraft: String?
+    @State private var pendingCaretOffset: Int?
 
     private var caret: String.Index {
         if let selection, case let .selection(range) = selection.indices {
@@ -993,18 +1077,41 @@ private struct ComposerView: View {
 
     private func acceptMention(
         _ candidate: MentionCandidate,
-        trigger: MentionAutocomplete.Trigger
+        trigger shownTrigger: MentionAutocomplete.Trigger
     ) {
+        // Finish any input-method composition first: replacing text while the field
+        // still holds marked text is what made clicking a suggestion crash.
+        (NSApp.keyWindow?.firstResponder as? NSTextInputClient)?.unmarkText()
+
+        // The suggestion list was built from an earlier draft, so find the `@`
+        // again in the current text instead of reusing its stored indices.
+        guard let trigger = MentionAutocomplete.trigger(in: draft, caret: caret) else {
+            return
+        }
         let text = MentionAutocomplete.replacement(
             for: candidate,
-            isSilent: trigger.isSilent,
+            isSilent: shownTrigger.isSilent,
             among: mentionCandidates
         )
         let offset = draft.distance(from: draft.startIndex, to: trigger.range.lowerBound)
         draft.replaceSubrange(trigger.range, with: text)
-        let insertionPoint = draft.index(draft.startIndex, offsetBy: offset + text.count)
-        selection = TextSelection(insertionPoint: insertionPoint)
         mentionIndex = 0
+        // The caret moves once the field has taken the new text.
+        pendingCaretOffset = offset + text.count
+        isFocused.wrappedValue = true
+    }
+
+    /// Puts the caret at `pendingCaretOffset` (clamped to the text) after a
+    /// programmatic edit has been applied to the field.
+    private func placePendingCaret() {
+        guard let offset = pendingCaretOffset else {
+            return
+        }
+        pendingCaretOffset = nil
+        let clamped = min(max(offset, 0), draft.count)
+        selection = TextSelection(
+            insertionPoint: draft.index(draft.startIndex, offsetBy: clamped)
+        )
     }
 
     private func moveMentionSelection(by delta: Int) -> KeyPress.Result {
@@ -1059,6 +1166,10 @@ private struct ComposerView: View {
             )
         )
         .accessibilityLabel("Mention suggestions")
+    }
+
+    private var placeholder: String {
+        hint.map { "Message \(conversationTitle) · \($0)" } ?? "Message \(conversationTitle)"
     }
 
     private var canSend: Bool {
@@ -1142,7 +1253,7 @@ private struct ComposerView: View {
             }
 
             TextField(
-                "Message \(conversationTitle)",
+                LocalizedStringKey(placeholder),
                 text: $draft,
                 selection: $selection,
                 axis: .vertical
@@ -1168,6 +1279,7 @@ private struct ComposerView: View {
             .onSubmit(send)
             .onChange(of: draft) {
                 mentionIndex = 0
+                placePendingCaret()
             }
             .onExitCommand {
                 if mentionMatch != nil {
@@ -1201,7 +1313,7 @@ private struct ComposerView: View {
 
                 Button(action: send) {
                     Image(systemName: "arrow.up")
-                        .font(.system(size: 12, weight: .bold))
+                        .font(AppTheme.Typography.scaled(12, weight: .bold))
                         .frame(width: 28, height: 28)
                 }
                 .buttonStyle(.plain)

@@ -327,6 +327,17 @@ struct LiveSessionTests {
         )
         await eventually { presence(of: 22) == .active }
         #expect(presence(of: 9) == .idle)
+        #expect(model.presenceDescription(forUserID: 22) == "Active now")
+        #expect(
+            model.presenceDescription(for: .directMessage(accountID: accountID, recipientIDs: [22]))
+                == "Active now"
+        )
+        // Your own row and group conversations have no status.
+        #expect(model.presenceDescription(forUserID: 9) == nil)
+        #expect(
+            model.presenceDescription(for: .directMessage(accountID: accountID, recipientIDs: [22, 23]))
+                == nil
+        )
 
         core.emit(
             .conversationOpened(
@@ -732,6 +743,119 @@ struct LiveSessionTests {
         await eventually { model.channelCreationState == .created(name: "design") }
     }
 
+    @Test("Writing in a channel sends to its general chat and holds Markdown back as a placeholder")
+    func channelSendGoesToGeneralChat() async {
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(client: core, credentialStore: MemoryCredentialStore())
+        model.startObserving()
+        let accountID = "account-1"
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: accountID),
+                credential: StoredAPICredential(accountID: accountID, apiKey: "key"),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.connectionState == .connected }
+
+        let key = ConversationKey.channel(accountID: accountID, streamID: 5)
+        model.openConversation(key)
+        core.emit(
+            .conversationOpened(
+                requestID: 3,
+                page: LiveConversationPage(
+                    key: key,
+                    messages: [
+                        LiveMessageSnapshot(
+                            messageID: 44,
+                            senderID: 22,
+                            senderFullName: "Theo Martin",
+                            timestamp: Date(timeIntervalSince1970: 1_700_000_000),
+                            content: [.paragraph([.text("Hello")])],
+                            streamID: 5,
+                            topic: "macOS",
+                            recipientIDs: []
+                        ),
+                    ],
+                    foundOldest: true,
+                    foundNewest: true
+                )
+            )
+        )
+        await eventually {
+            if case let .loaded(page) = model.conversationState {
+                return page.messages.count == 1
+            }
+            return false
+        }
+
+        #expect(model.sendText("Plain words", to: key))
+        guard case let .sendChannelMessage(_, _, streamID, topic, content, _) = core.commands.last
+        else {
+            Issue.record("Expected a channel message command")
+            return
+        }
+        #expect(streamID == 5)
+        #expect(topic.isEmpty)
+        #expect(content == "Plain words")
+
+        #expect(model.sendText("# Title\n\nSome **body**", to: key))
+        guard case let .loaded(page) = model.conversationState else {
+            Issue.record("Expected a loaded conversation")
+            return
+        }
+        #expect(page.messages.map(\.isProvisional) == [false, false, true])
+        #expect(page.messages.last?.sourceTopic == "")
+    }
+
+    @Test("A channel rename is validated, sent once, and reported back")
+    func renameChannel() async {
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(client: core, credentialStore: MemoryCredentialStore())
+        model.startObserving()
+        let accountID = "account-1"
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: accountID),
+                credential: StoredAPICredential(accountID: accountID, apiKey: "key"),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.connectionState == .connected }
+
+        model.renameChannel(streamID: 5, to: "engineering")
+        if case .failed = model.channelRenameState {} else {
+            Issue.record("The current name must be refused before any request")
+        }
+        model.renameChannel(streamID: 5, to: "   ")
+        if case .failed = model.channelRenameState {} else {
+            Issue.record("A blank name must be refused before any request")
+        }
+
+        model.renameChannel(streamID: 5, to: " platform ")
+        guard case let .renameChannel(requestID, commandAccountID, 5, "platform") = core.commands.last
+        else {
+            Issue.record("Expected a rename-channel command")
+            return
+        }
+        #expect(commandAccountID == accountID)
+        #expect(model.channelRenameState == .renaming)
+        core.emit(.failed(requestID: requestID, message: "Insufficient permission"))
+        await eventually {
+            model.channelRenameState == .failed(message: "Insufficient permission")
+        }
+
+        model.renameChannel(streamID: 5, to: "platform")
+        guard case let .renameChannel(secondRequestID, _, _, _) = core.commands.last else {
+            Issue.record("Expected a second rename-channel command")
+            return
+        }
+        core.emit(.channelRenamed(requestID: secondRequestID, streamID: 5, name: "platform"))
+        await eventually { model.channelRenameState == .renamed(name: "platform") }
+    }
+
     @Test("Reopening a conversation seen this session paints at once without a loading state")
     func reopenedConversationSkipsLoading() async {
         let core = RecordingCoreClient()
@@ -931,6 +1055,10 @@ struct LiveSessionTests {
             guard case let .loaded(page) = model.conversationState else { return false }
             return page.messages.map(\.id) == [44, 45]
         }
+        // The server copy takes over the echo's row, so the row updates in place.
+        if case let .loaded(page) = model.conversationState {
+            #expect(page.messages.map(\.rowID) == [44, -Int64(sendRequestID)])
+        }
 
         model.loadOlderMessages(for: key)
         let historyCommand = core.commands.last {
@@ -950,7 +1078,7 @@ struct LiveSessionTests {
         }
         #expect(historyKey == key)
         #expect(beforeMessageID == 44)
-        #expect(limit == 10)
+        #expect(limit == 50)
         #expect(model.isLoadingOlderMessages)
 
         core.emit(

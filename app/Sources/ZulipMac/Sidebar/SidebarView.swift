@@ -39,6 +39,8 @@ struct SidebarView: View {
     let openCommandPalette: () -> Void
     var startNewTopic: (ChannelSnapshot) -> Void = { _ in }
     var createChannel: (() -> Void)?
+    var renameChannel: ((ChannelSnapshot) -> Void)?
+    var presenceDescription: ((Int64) -> String?)?
     var sessionControl: SidebarSessionControl?
     var mediaLocalURLs: [String: String] = [:]
     var requestMedia: ((String) -> Void)?
@@ -63,7 +65,7 @@ struct SidebarView: View {
                 .font(AppTheme.Typography.sidebar)
                 .foregroundStyle(AppTheme.Colors.secondaryText)
                 .padding(.horizontal, AppTheme.Spacing.small)
-                .frame(height: 32)
+                .frame(minHeight: 32)
                 .background(AppTheme.Colors.hover.opacity(0.65))
                 .clipShape(
                     RoundedRectangle(
@@ -108,7 +110,7 @@ struct SidebarView: View {
                                     model.toggleChannel(channel.streamID)
                                 } label: {
                                     Image(systemName: "chevron.right")
-                                        .font(.system(size: 9, weight: .semibold))
+                                        .font(AppTheme.Typography.scaled(9, weight: .semibold))
                                         .rotationEffect(
                                             .degrees(
                                                 model.isChannelExpanded(channel.streamID)
@@ -142,12 +144,19 @@ struct SidebarView: View {
                                 ) {
                                     selection = key
                                 }
+                                .contextMenu {
+                                    if let renameChannel {
+                                        Button("Rename channel…") {
+                                            renameChannel(channel)
+                                        }
+                                    }
+                                }
 
                                 Button {
                                     startNewTopic(channel)
                                 } label: {
                                     Image(systemName: "plus")
-                                        .font(.system(size: 10, weight: .semibold))
+                                        .font(AppTheme.Typography.scaled(10, weight: .semibold))
                                         .frame(width: 24, height: 32)
                                 }
                                 .buttonStyle(.plain)
@@ -160,7 +169,7 @@ struct SidebarView: View {
                                 ForEach(channel.topics) { topic in
                                     let topicKey = model.key(for: topic)
                                     SidebarRow(
-                                        title: topic.name.isEmpty ? "(no topic)" : topic.name,
+                                        title: TopicName.display(topic.name),
                                         systemImage: "text.bubble",
                                         isSelected: selection == topicKey
                                     ) {
@@ -199,6 +208,7 @@ struct SidebarView: View {
                             ) {
                                 selection = key
                             }
+                            .help(presenceDescription?(directMessage.userID) ?? "")
                         }
                     }
                 }
@@ -239,7 +249,7 @@ struct SidebarView: View {
 
             Spacer(minLength: 0)
         }
-        .frame(height: 36)
+        .frame(minHeight: 36)
     }
 
     private var profileRow: some View {
@@ -287,7 +297,7 @@ struct SidebarView: View {
                 }
             } label: {
                 Image(systemName: "gearshape")
-                    .font(.system(size: 12))
+                    .font(AppTheme.Typography.scaled(12))
                     .foregroundStyle(AppTheme.Colors.secondaryText)
                     .frame(width: 28, height: 28)
                     .contentShape(Rectangle())
@@ -299,7 +309,7 @@ struct SidebarView: View {
             .accessibilityLabel("Profile and settings for \(model.snapshot.currentUserName)")
         }
         .padding(.horizontal, AppTheme.Spacing.small)
-        .frame(height: 36)
+        .frame(minHeight: 36)
         .contentShape(Rectangle())
     }
 }
@@ -318,7 +328,7 @@ private struct SidebarSectionHeader: View {
             if let add, let addTitle {
                 Button(action: add) {
                     Image(systemName: "plus")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(AppTheme.Typography.scaled(11, weight: .semibold))
                         .foregroundStyle(AppTheme.Colors.tertiaryText)
                         .frame(width: 26, height: 28)
                         .contentShape(Rectangle())
@@ -334,7 +344,7 @@ private struct SidebarSectionHeader: View {
         Button(action: action) {
             HStack(spacing: AppTheme.Spacing.extraSmall) {
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(AppTheme.Typography.scaled(9, weight: .semibold))
                     .rotationEffect(.degrees(isExpanded ? 90 : 0))
                     .animation(.snappy(duration: 0.18), value: isExpanded)
                     .frame(width: 10)
@@ -350,7 +360,7 @@ private struct SidebarSectionHeader: View {
             }
             .foregroundStyle(AppTheme.Colors.tertiaryText)
             .padding(.horizontal, AppTheme.Spacing.small)
-            .frame(height: 28)
+            .frame(minHeight: 28)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -392,7 +402,7 @@ private struct SidebarRow<Leading: View>: View {
             HStack(spacing: AppTheme.Spacing.small) {
                 if let systemImage {
                     Image(systemName: systemImage)
-                        .font(.system(size: 12, weight: .medium))
+                        .font(AppTheme.Typography.scaled(12, weight: .medium))
                         .frame(width: 16)
                 } else {
                     leading()
@@ -411,7 +421,7 @@ private struct SidebarRow<Leading: View>: View {
 
                 if unreadCount > 0 {
                     Text("\(unreadCount)")
-                        .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                        .font(AppTheme.Typography.scaled(10, weight: .semibold).monospacedDigit())
                         .foregroundStyle(
                             isSelected
                                 ? AppTheme.Colors.primaryText
@@ -429,7 +439,7 @@ private struct SidebarRow<Leading: View>: View {
                     : AppTheme.Colors.primaryText
             )
             .padding(.horizontal, AppTheme.Spacing.small)
-            .frame(height: 32)
+            .frame(minHeight: 32)
             .contentShape(Rectangle())
             .background {
                 RoundedRectangle(
