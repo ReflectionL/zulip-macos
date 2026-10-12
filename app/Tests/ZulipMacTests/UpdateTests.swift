@@ -254,6 +254,37 @@ struct UpdateTests {
         #expect(automatic.state == .idle)
     }
 
+    private final class CountingFetcher: ReleaseFetching, @unchecked Sendable {
+        private(set) var calls = 0
+
+        func newestRelease() async throws -> AvailableRelease? {
+            calls += 1
+            throw ReleaseFeedError.rateLimited
+        }
+    }
+
+    @Test("A failed automatic check is not retried until the interval passes")
+    func failedAutomaticCheckBacksOff() async {
+        let fetcher = CountingFetcher()
+        var current = Date(timeIntervalSince1970: 1_000_000)
+        let defaults = UserDefaults(suiteName: "updates-\(UUID().uuidString)")!
+        let subject = UpdateController(
+            installedVersion: ReleaseVersion("0.1.0-alpha.3"),
+            appURL: URL(fileURLWithPath: "/Applications/Zulip Mac.app"),
+            fetcher: fetcher,
+            installer: StubInstaller(),
+            defaults: defaults,
+            now: { current }
+        )
+        await subject.checkAutomatically()
+        await subject.checkAutomatically()
+        #expect(fetcher.calls == 1)
+
+        current.addTimeInterval(UpdateController.automaticCheckInterval + 1)
+        await subject.checkAutomatically()
+        #expect(fetcher.calls == 2)
+    }
+
     @Test("Automatic checks are rate limited and skipped for unpackaged builds")
     func automaticChecks() async {
         var current = Date(timeIntervalSince1970: 1_000_000)

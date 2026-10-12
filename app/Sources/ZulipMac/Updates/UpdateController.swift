@@ -36,7 +36,11 @@ struct GitHubReleaseFetcher: ReleaseFetching {
         request.setValue("ZulipMac-Updater", forHTTPHeaderField: "User-Agent")
         let (data, response) = try await URLSession.shared.data(for: request)
         if let http = response as? HTTPURLResponse {
-            if http.statusCode == 403 || http.statusCode == 429 {
+            // A bare 403 can be a block rather than a quota, so only report a rate
+            // limit when GitHub says the quota is spent or asks us to back off.
+            let quotaSpent = http.value(forHTTPHeaderField: "x-ratelimit-remaining") == "0"
+                || http.value(forHTTPHeaderField: "retry-after") != nil
+            if http.statusCode == 429 || (http.statusCode == 403 && quotaSpent) {
                 throw ReleaseFeedError.rateLimited
             }
             guard (200 ..< 300).contains(http.statusCode) else {
@@ -129,9 +133,11 @@ final class UpdateController {
 
     private func check(silently: Bool) async {
         state = .checking
+        // Count the attempt, not just successes, so a failing network is not retried
+        // on every launch and every new window.
+        defaults.set(now(), forKey: Self.lastCheckKey)
         do {
             let newest = try await fetcher.newestRelease()
-            defaults.set(now(), forKey: Self.lastCheckKey)
             if let newest, newest.version > (installedVersion ?? ReleaseVersion("0.0.0")!) {
                 state = .available(newest)
             } else {
