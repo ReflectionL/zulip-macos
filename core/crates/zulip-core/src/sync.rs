@@ -4,8 +4,8 @@ use std::{collections::BTreeMap, time::Duration};
 
 use futures_util::StreamExt;
 use reqwest::{Client, Response};
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use thiserror::Error;
 
@@ -40,7 +40,7 @@ pub struct EventQueue {
 }
 
 /// A normalized organization user needed by navigation and message rendering.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UserSummary {
     /// Zulip user identifier.
     pub id: i64,
@@ -55,7 +55,7 @@ pub struct UserSummary {
 }
 
 /// A normalized subscribed channel.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ChannelSummary {
     /// Zulip stream identifier.
     pub id: i64,
@@ -68,7 +68,7 @@ pub struct ChannelSummary {
 }
 
 /// A normalized message payload owned by the Rust domain layer.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MessageSummary {
     /// Zulip message identifier.
     pub id: i64,
@@ -93,7 +93,7 @@ pub struct MessageSummary {
 }
 
 /// One normalized reaction attached to a message.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ReactionSummary {
     /// Stable emoji name used by Zulip's reaction write API.
     pub emoji_name: String,

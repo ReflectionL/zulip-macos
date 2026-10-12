@@ -259,8 +259,8 @@ private struct LiveWindowView: View {
                 .transition(.move(edge: .top).combined(with: .opacity))
             }
 
-            if case .retrying = session.connectionState {
-                ConnectionStatusPill(text: "Reconnecting…")
+            if let statusText = connectionStatusText {
+                ConnectionStatusPill(text: statusText)
                     .padding(.top, AppTheme.Spacing.small)
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
@@ -324,6 +324,19 @@ private struct LiveWindowView: View {
                     topicSheet = nil
                 }
             )
+        }
+    }
+
+    private var connectionStatusText: String? {
+        switch session.connectionState {
+        case .retrying:
+            "Reconnecting…"
+        case .connecting:
+            // The live window only exists with a session, so this is the
+            // cached-data-while-connecting state.
+            "Connecting…"
+        default:
+            nil
         }
     }
 

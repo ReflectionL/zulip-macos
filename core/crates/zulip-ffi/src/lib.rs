@@ -2,8 +2,11 @@
 
 use std::{
     path::{Path, PathBuf},
-    sync::Arc,
-    time::Duration,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use tokio::{
@@ -17,6 +20,7 @@ use zulip_core::{
     content::{
         ContentBlock as NativeContentBlock, InlineContent as NativeInlineContent, parse_zulip_html,
     },
+    database::{CacheDatabase, CachedAccount, CachedConversation, CachedSnapshot},
     media::MediaClient,
     messages::{
         ConversationTarget, MessageClient, MessageFlag, MessageWriteOperation, OutgoingMessage,
@@ -29,6 +33,50 @@ use zulip_core::{
 };
 
 uniffi::setup_scaffolding!();
+
+/// Minimum spacing between full-snapshot cache writes during busy event streams.
+const SNAPSHOT_CACHE_INTERVAL_SECONDS: u64 = 5;
+
+/// Best-effort handle to the on-disk cache.
+///
+/// Persistence problems never fail a user-visible operation: a missing or
+/// damaged cache only means the app behaves as it did before offline reading.
+#[derive(Clone, Default)]
+struct CacheHandle(Option<Arc<Mutex<CacheDatabase>>>);
+
+impl CacheHandle {
+    fn open(path: Option<&Path>) -> Self {
+        let Some(path) = path else {
+            return Self(None);
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        Self(
+            CacheDatabase::open(path)
+                .ok()
+                .map(|database| Arc::new(Mutex::new(database))),
+        )
+    }
+
+    fn with<T>(
+        &self,
+        operation: impl FnOnce(&CacheDatabase) -> Result<T, zulip_core::database::DatabaseError>,
+    ) -> Option<T> {
+        let database = self.0.as_ref()?.lock().ok()?;
+        operation(&database).ok()
+    }
+}
+
+fn now_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+fn now_timestamp() -> i64 {
+    i64::try_from(now_seconds()).unwrap_or(i64::MAX)
+}
 
 /// Stable conversation identity crossing the Swift/Rust boundary.
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -88,6 +136,28 @@ impl CoreConversationKey {
             | Self::Channel { account_id, .. }
             | Self::Topic { account_id, .. }
             | Self::DirectMessage { account_id, .. } => account_id,
+        }
+    }
+
+    fn cache_key(&self) -> String {
+        match self {
+            Self::Inbox { .. } => "inbox".to_owned(),
+            Self::Mentions { .. } => "mentions".to_owned(),
+            Self::Starred { .. } => "starred".to_owned(),
+            Self::Unread { .. } => "unread".to_owned(),
+            Self::Channel { stream_id, .. } => format!("channel:{stream_id}"),
+            Self::Topic {
+                stream_id, topic, ..
+            } => format!("topic:{stream_id}:{topic}"),
+            Self::DirectMessage { recipient_ids, .. } => {
+                let mut ids = recipient_ids.clone();
+                ids.sort_unstable();
+                ids.dedup();
+                format!(
+                    "dm:{}",
+                    ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",")
+                )
+            }
         }
     }
 
@@ -318,10 +388,17 @@ pub enum CoreCommand {
         /// Server message identifiers.
         message_ids: Vec<i64>,
     },
-    /// Ends the current live account session.
+    /// Ends the current live account session and forgets its cached data.
     Disconnect {
         /// Correlates the response.
         request_id: u64,
+    },
+    /// Loads the last cached navigation state without using the network.
+    LoadCachedSession {
+        /// Correlates the response.
+        request_id: u64,
+        /// Client-owned account partition.
+        account_id: String,
     },
 }
 
@@ -331,6 +408,7 @@ impl CoreCommand {
             Self::Ping { request_id, .. }
             | Self::StartApiKeySession { request_id, .. }
             | Self::StartPasswordSession { request_id, .. }
+            | Self::LoadCachedSession { request_id, .. }
             | Self::OpenConversation { request_id, .. }
             | Self::LoadOlderMessages { request_id, .. }
             | Self::SearchMessages { request_id, .. }
@@ -763,6 +841,23 @@ pub enum CoreEvent {
         /// Delay before another poll or resync.
         delay_milliseconds: u64,
     },
+    /// Cached navigation state for an account that is not (yet) live.
+    CachedSessionLoaded {
+        /// Originating request.
+        request_id: u64,
+        /// Active account partition.
+        account_id: String,
+        /// Normalized Zulip server root.
+        server_url: String,
+        /// Canonical API email.
+        email: String,
+        /// Authenticated Zulip user identifier.
+        user_id: i64,
+        /// Authenticated display name.
+        full_name: String,
+        /// Last known immutable navigation state.
+        snapshot: CoreSnapshot,
+    },
     /// Polling succeeded again after one or more scheduled retries.
     SyncResumed {
         /// Active account partition.
@@ -806,13 +901,19 @@ impl RustCoreClient {
     /// Panics only if the process cannot initialize Tokio's built-in worker
     /// runtime, in which case no core operation can be performed.
     #[uniffi::constructor]
-    pub fn new(event_sink: Arc<dyn CoreEventSink>, media_cache_root_path: String) -> Arc<Self> {
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn new(
+        event_sink: Arc<dyn CoreEventSink>,
+        media_cache_root_path: String,
+        database_path: Option<String>,
+    ) -> Arc<Self> {
         let runtime = Runtime::new().expect("the built-in Tokio runtime initializes");
         let (sender, receiver) = unbounded_channel();
         runtime.spawn(run_actor(
             receiver,
             Arc::clone(&event_sink),
             PathBuf::from(media_cache_root_path),
+            CacheHandle::open(database_path.as_deref().map(Path::new)),
         ));
         Arc::new(Self {
             sender,
@@ -841,6 +942,8 @@ struct AccountSession {
     media: Arc<MediaClient>,
     sync: SyncSession,
     topics: Vec<TopicSummary>,
+    cache: CacheHandle,
+    last_snapshot_cache_seconds: AtomicU64,
 }
 
 enum ActorInput {
@@ -852,6 +955,7 @@ async fn run_actor(
     mut receiver: UnboundedReceiver<CoreCommand>,
     event_sink: Arc<dyn CoreEventSink>,
     media_cache_root: PathBuf,
+    cache: CacheHandle,
 ) {
     let mut account: Option<AccountSession> = None;
     let mut poll_not_before = Instant::now();
@@ -881,7 +985,14 @@ async fn run_actor(
                         | CoreCommand::Disconnect { .. }
                 );
                 let previous_account = account.as_ref().map(|session| session.account_id.clone());
-                handle_command(command, &mut account, &event_sink, &media_cache_root).await;
+                handle_command(
+                    command,
+                    &mut account,
+                    &event_sink,
+                    &media_cache_root,
+                    &cache,
+                )
+                .await;
                 let current_account = account.as_ref().map(|session| session.account_id.as_str());
                 if resets_poll || previous_account.as_deref() != current_account {
                     poll_not_before = Instant::now();
@@ -917,6 +1028,7 @@ async fn handle_command(
     account: &mut Option<AccountSession>,
     event_sink: &Arc<dyn CoreEventSink>,
     media_cache_root: &Path,
+    cache: &CacheHandle,
 ) {
     match command {
         CoreCommand::Ping {
@@ -939,6 +1051,7 @@ async fn handle_command(
                 account,
                 event_sink,
                 media_cache_root,
+                cache,
             )
             .await;
         }
@@ -958,14 +1071,19 @@ async fn handle_command(
                 account,
                 event_sink,
                 media_cache_root,
+                cache,
             )
             .await;
         }
+        CoreCommand::LoadCachedSession {
+            request_id,
+            account_id,
+        } => load_cached_session(request_id, &account_id, cache, event_sink),
         CoreCommand::OpenConversation {
             request_id,
             key,
             limit,
-        } => open_conversation(request_id, key, limit, account.as_ref(), event_sink).await,
+        } => open_conversation(request_id, key, limit, account.as_ref(), cache, event_sink).await,
         CoreCommand::LoadOlderMessages {
             request_id,
             key,
@@ -1196,7 +1314,9 @@ async fn handle_command(
             )
             .await;
         }
-        CoreCommand::Disconnect { request_id } => disconnect(request_id, account, event_sink),
+        CoreCommand::Disconnect { request_id } => {
+            disconnect(request_id, account, cache, event_sink);
+        }
     }
 }
 
@@ -1374,8 +1494,13 @@ async fn update_message_flag(
 fn disconnect(
     request_id: u64,
     account: &mut Option<AccountSession>,
+    cache: &CacheHandle,
     event_sink: &Arc<dyn CoreEventSink>,
 ) {
+    if let Some(session) = account.as_ref() {
+        let account_id = session.account_id.clone();
+        cache.with(|database| database.delete_account_cache(&account_id));
+    }
     *account = None;
     event_sink.handle_event(CoreEvent::Disconnected { request_id });
 }
@@ -1515,10 +1640,14 @@ async fn open_conversation(
     key: CoreConversationKey,
     limit: u16,
     account: Option<&AccountSession>,
+    cache: &CacheHandle,
     event_sink: &Arc<dyn CoreEventSink>,
 ) {
     let Some(session) = account.filter(|item| item.account_id == key.account_id()) else {
-        emit_no_session(request_id, event_sink);
+        // No live session: serve the last cached copy so reading works offline.
+        if !emit_cached_conversation(request_id, &key, cache, event_sink) {
+            emit_no_session(request_id, event_sink);
+        }
         return;
     };
     match session
@@ -1526,17 +1655,62 @@ async fn open_conversation(
         .fetch_conversation(key.target(), limit)
         .await
     {
-        Ok(page) => event_sink.handle_event(CoreEvent::ConversationOpened {
-            request_id,
-            page: CoreConversationPage {
-                key,
-                messages: page.messages.into_iter().map(Into::into).collect(),
+        Ok(page) => {
+            let cached = CachedConversation {
+                messages: page.messages.clone(),
                 found_oldest: page.found_oldest,
                 found_newest: page.found_newest,
-            },
-        }),
-        Err(error) => emit_error(Some(request_id), error, event_sink),
+            };
+            session.cache.with(|database| {
+                database.save_conversation(
+                    key.account_id(),
+                    &key.cache_key(),
+                    &cached,
+                    now_timestamp(),
+                )
+            });
+            event_sink.handle_event(CoreEvent::ConversationOpened {
+                request_id,
+                page: CoreConversationPage {
+                    key,
+                    messages: page.messages.into_iter().map(Into::into).collect(),
+                    found_oldest: page.found_oldest,
+                    found_newest: page.found_newest,
+                },
+            });
+        }
+        Err(error) => {
+            // A network failure should not blank a conversation we already have.
+            if !emit_cached_conversation(request_id, &key, cache, event_sink) {
+                emit_error(Some(request_id), error, event_sink);
+            }
+        }
     }
+}
+
+/// Emits the cached copy of `key`; returns whether one existed.
+fn emit_cached_conversation(
+    request_id: u64,
+    key: &CoreConversationKey,
+    cache: &CacheHandle,
+    event_sink: &Arc<dyn CoreEventSink>,
+) -> bool {
+    let Some(cached) = cache
+        .with(|database| database.conversation(key.account_id(), &key.cache_key()))
+        .flatten()
+    else {
+        return false;
+    };
+    event_sink.handle_event(CoreEvent::ConversationOpened {
+        request_id,
+        page: CoreConversationPage {
+            key: key.clone(),
+            messages: cached.messages.into_iter().map(Into::into).collect(),
+            found_oldest: cached.found_oldest,
+            found_newest: cached.found_newest,
+        },
+    });
+    true
 }
 
 async fn send_message(
@@ -1690,6 +1864,7 @@ async fn start_api_key_session(
     account: &mut Option<AccountSession>,
     event_sink: &Arc<dyn CoreEventSink>,
     media_cache_root: &Path,
+    cache: &CacheHandle,
 ) {
     let authentication = match AuthenticationClient::new() {
         Ok(client) => client,
@@ -1715,6 +1890,7 @@ async fn start_api_key_session(
         account,
         event_sink,
         media_cache_root,
+        cache,
     )
     .await;
 }
@@ -1729,6 +1905,7 @@ async fn start_password_session(
     account: &mut Option<AccountSession>,
     event_sink: &Arc<dyn CoreEventSink>,
     media_cache_root: &Path,
+    cache: &CacheHandle,
 ) {
     let authentication = match AuthenticationClient::new() {
         Ok(client) => client,
@@ -1754,6 +1931,7 @@ async fn start_password_session(
         account,
         event_sink,
         media_cache_root,
+        cache,
     )
     .await;
 }
@@ -1765,6 +1943,7 @@ async fn start_authenticated_session(
     account: &mut Option<AccountSession>,
     event_sink: &Arc<dyn CoreEventSink>,
     media_cache_root: &Path,
+    cache: &CacheHandle,
 ) {
     let api_key = authenticated.api_key.expose_secret().to_owned();
     start_session(
@@ -1778,11 +1957,12 @@ async fn start_authenticated_session(
         account,
         event_sink,
         media_cache_root,
+        cache,
     )
     .await;
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn start_session(
     request_id: u64,
     account_id: String,
@@ -1794,6 +1974,7 @@ async fn start_session(
     account: &mut Option<AccountSession>,
     event_sink: &Arc<dyn CoreEventSink>,
     media_cache_root: &Path,
+    cache: &CacheHandle,
 ) {
     if account_id.trim().is_empty() || user_id <= 0 {
         event_sink.handle_event(CoreEvent::Failed {
@@ -1862,6 +2043,18 @@ async fn start_session(
             topics.dedup_by(|left, right| {
                 left.stream_id == right.stream_id && left.name == right.name
             });
+            cache_snapshot(
+                cache,
+                &account_id,
+                &CachedAccount {
+                    server_url: server_url.clone(),
+                    email: email.clone(),
+                    user_id,
+                    full_name: full_name.clone(),
+                },
+                &snapshot,
+                &topics,
+            );
             let bridge_snapshot = CoreSnapshot::from_sync(snapshot, &topics);
             *account = Some(AccountSession {
                 account_id: account_id.clone(),
@@ -1870,6 +2063,8 @@ async fn start_session(
                 media,
                 sync,
                 topics,
+                cache: cache.clone(),
+                last_snapshot_cache_seconds: AtomicU64::new(now_seconds()),
             });
             event_sink.handle_event(CoreEvent::SessionStarted {
                 request_id,
@@ -1913,6 +2108,7 @@ fn handle_sync_cycle(
     match cycle {
         SyncCycle::Events(outcome) => {
             if let Some(snapshot) = outcome.snapshot {
+                cache_snapshot_throttled(account, &snapshot);
                 event_sink.handle_event(CoreEvent::SnapshotUpdated {
                     account_id: account.account_id.clone(),
                     snapshot: CoreSnapshot::from_sync(snapshot, &account.topics),
@@ -1921,6 +2117,7 @@ fn handle_sync_cycle(
             Instant::now()
         }
         SyncCycle::Resynchronized { snapshot, .. } => {
+            cache_snapshot_throttled(account, &snapshot);
             event_sink.handle_event(CoreEvent::SnapshotUpdated {
                 account_id: account.account_id.clone(),
                 snapshot: CoreSnapshot::from_sync(snapshot, &account.topics),
@@ -1939,6 +2136,78 @@ fn handle_sync_cycle(
             Instant::now() + Duration::from_secs(30)
         }
     }
+}
+
+fn cached_snapshot(snapshot: &SyncSnapshot, topics: &[TopicSummary]) -> CachedSnapshot {
+    CachedSnapshot {
+        users: snapshot.users.clone(),
+        channels: snapshot.channels.clone(),
+        topics: topics.to_vec(),
+        messages: snapshot.messages.clone(),
+    }
+}
+
+fn cache_snapshot(
+    cache: &CacheHandle,
+    account_id: &str,
+    identity: &CachedAccount,
+    snapshot: &SyncSnapshot,
+    topics: &[TopicSummary],
+) {
+    let cached = cached_snapshot(snapshot, topics);
+    cache.with(|database| {
+        database.save_account_cache(account_id, identity, &cached, now_timestamp())
+    });
+}
+
+/// Persists busy-stream snapshots at most once per interval.
+fn cache_snapshot_throttled(account: &AccountSession, snapshot: &SyncSnapshot) {
+    let now = now_seconds();
+    let previous = account.last_snapshot_cache_seconds.load(Ordering::Relaxed);
+    if now.saturating_sub(previous) < SNAPSHOT_CACHE_INTERVAL_SECONDS {
+        return;
+    }
+    account
+        .last_snapshot_cache_seconds
+        .store(now, Ordering::Relaxed);
+    let cached = cached_snapshot(snapshot, &account.topics);
+    account
+        .cache
+        .with(|database| database.save_snapshot(&account.account_id, &cached, now_timestamp()));
+}
+
+fn load_cached_session(
+    request_id: u64,
+    account_id: &str,
+    cache: &CacheHandle,
+    event_sink: &Arc<dyn CoreEventSink>,
+) {
+    let Some((identity, cached)) = cache
+        .with(|database| database.account_cache(account_id))
+        .flatten()
+    else {
+        event_sink.handle_event(CoreEvent::Failed {
+            request_id: Some(request_id),
+            message: "no cached data is available for this account".to_owned(),
+        });
+        return;
+    };
+    let snapshot = SyncSnapshot {
+        revision: 0,
+        last_event_id: -1,
+        users: cached.users,
+        channels: cached.channels,
+        messages: cached.messages,
+    };
+    event_sink.handle_event(CoreEvent::CachedSessionLoaded {
+        request_id,
+        account_id: account_id.to_owned(),
+        server_url: identity.server_url,
+        email: identity.email,
+        user_id: identity.user_id,
+        full_name: identity.full_name,
+        snapshot: CoreSnapshot::from_sync(snapshot, &cached.topics),
+    });
 }
 
 fn duration_milliseconds(duration: Duration) -> u64 {
@@ -2135,7 +2404,7 @@ mod tests {
             events: Mutex::new(Vec::new()),
             notifier: Mutex::new(Some(signal_sender)),
         });
-        let client = RustCoreClient::new(sink.clone(), "/tmp/zulip-ffi-tests".to_owned());
+        let client = RustCoreClient::new(sink.clone(), "/tmp/zulip-ffi-tests".to_owned(), None);
 
         client.submit(CoreCommand::Ping {
             request_id: 42,
@@ -2342,7 +2611,7 @@ mod tests {
             events: Mutex::new(Vec::new()),
             notifier: Mutex::new(Some(signal_sender)),
         });
-        let client = RustCoreClient::new(sink.clone(), "/tmp/zulip-ffi-tests".to_owned());
+        let client = RustCoreClient::new(sink.clone(), "/tmp/zulip-ffi-tests".to_owned(), None);
 
         client.submit(CoreCommand::StartApiKeySession {
             request_id: 20,
@@ -2421,7 +2690,7 @@ mod tests {
             events: Mutex::new(Vec::new()),
             notifier: Mutex::new(Some(signal_sender)),
         });
-        let client = RustCoreClient::new(sink.clone(), "/tmp/zulip-ffi-tests".to_owned());
+        let client = RustCoreClient::new(sink.clone(), "/tmp/zulip-ffi-tests".to_owned(), None);
         client.submit(CoreCommand::StartApiKeySession {
             request_id: 30,
             account_id: "account-topic".to_owned(),
@@ -2503,7 +2772,7 @@ mod tests {
             events: Mutex::new(Vec::new()),
             notifier: Mutex::new(Some(signal_sender)),
         });
-        let client = RustCoreClient::new(sink.clone(), "/tmp/zulip-ffi-tests".to_owned());
+        let client = RustCoreClient::new(sink.clone(), "/tmp/zulip-ffi-tests".to_owned(), None);
         client.submit(CoreCommand::StartApiKeySession {
             request_id: 40,
             account_id: "account-actions".to_owned(),
@@ -2612,7 +2881,11 @@ mod tests {
             events: Mutex::new(Vec::new()),
             notifier: Mutex::new(Some(signal_sender)),
         });
-        let client = RustCoreClient::new(sink.clone(), cache_root.to_string_lossy().into_owned());
+        let client = RustCoreClient::new(
+            sink.clone(),
+            cache_root.to_string_lossy().into_owned(),
+            None,
+        );
         client.submit(CoreCommand::StartApiKeySession {
             request_id: 50,
             account_id: "account-media".to_owned(),
@@ -2691,7 +2964,7 @@ mod tests {
             events: Mutex::new(Vec::new()),
             notifier: Mutex::new(Some(signal_sender)),
         });
-        let client = RustCoreClient::new(sink.clone(), "/tmp/zulip-ffi-tests".to_owned());
+        let client = RustCoreClient::new(sink.clone(), "/tmp/zulip-ffi-tests".to_owned(), None);
 
         client.submit(CoreCommand::StartApiKeySession {
             request_id: 7,
@@ -2727,6 +3000,112 @@ mod tests {
     }
 
     #[test]
+    fn cached_session_and_conversation_are_readable_without_a_live_session() {
+        let (server, _requests) = spawn_search_actor_mock();
+        let directory = TempDir::new().expect("temporary directory");
+        let database_path = directory
+            .path()
+            .join("cache.sqlite")
+            .to_string_lossy()
+            .into_owned();
+        let media_root = directory
+            .path()
+            .join("media")
+            .to_string_lossy()
+            .into_owned();
+        let inbox = CoreConversationKey::Inbox {
+            account_id: "account-search".to_owned(),
+        };
+
+        let (online_sender, online_receiver) = mpsc::channel();
+        let online_sink = Arc::new(RecordingSink {
+            events: Mutex::new(Vec::new()),
+            notifier: Mutex::new(Some(online_sender)),
+        });
+        let online = RustCoreClient::new(
+            online_sink.clone(),
+            media_root.clone(),
+            Some(database_path.clone()),
+        );
+        online.submit(CoreCommand::StartApiKeySession {
+            request_id: 30,
+            account_id: "account-search".to_owned(),
+            server_url: server,
+            email: "maya@example.com".to_owned(),
+            api_key: "fixture-key-do-not-log".to_owned(),
+        });
+        let _ = wait_for_event(&online_receiver, &online_sink, |event| {
+            matches!(event, CoreEvent::SessionStarted { request_id: 30, .. })
+        });
+        online.submit(CoreCommand::OpenConversation {
+            request_id: 31,
+            key: inbox.clone(),
+            limit: 20,
+        });
+        let _ = wait_for_event(&online_receiver, &online_sink, |event| {
+            matches!(event, CoreEvent::ConversationOpened { request_id: 31, .. })
+        });
+
+        // A fresh process-like client with no network session reads the cache.
+        let (offline_sender, offline_receiver) = mpsc::channel();
+        let offline_sink = Arc::new(RecordingSink {
+            events: Mutex::new(Vec::new()),
+            notifier: Mutex::new(Some(offline_sender)),
+        });
+        let offline = RustCoreClient::new(offline_sink.clone(), media_root, Some(database_path));
+        offline.submit(CoreCommand::LoadCachedSession {
+            request_id: 40,
+            account_id: "account-search".to_owned(),
+        });
+        let loaded = wait_for_event(&offline_receiver, &offline_sink, |event| {
+            matches!(event, CoreEvent::CachedSessionLoaded { request_id: 40, .. })
+        });
+        let CoreEvent::CachedSessionLoaded {
+            email,
+            full_name,
+            snapshot,
+            ..
+        } = loaded
+        else {
+            unreachable!("matched above");
+        };
+        assert_eq!(email, "maya@example.com");
+        assert_eq!(full_name, "Maya Chen");
+        assert_eq!(snapshot.channels[0].name, "engineering");
+        assert_eq!(snapshot.topics[0].name, "macOS");
+
+        offline.submit(CoreCommand::OpenConversation {
+            request_id: 41,
+            key: inbox,
+            limit: 20,
+        });
+        let opened = wait_for_event(&offline_receiver, &offline_sink, |event| {
+            matches!(event, CoreEvent::ConversationOpened { request_id: 41, .. })
+        });
+        let CoreEvent::ConversationOpened { page, .. } = opened else {
+            unreachable!("matched above");
+        };
+        assert_eq!(page.messages.len(), 1);
+        assert_eq!(page.messages[0].message_id, 50);
+        assert!(page.found_oldest);
+
+        offline.submit(CoreCommand::LoadCachedSession {
+            request_id: 42,
+            account_id: "someone-else".to_owned(),
+        });
+        let missing = wait_for_event(&offline_receiver, &offline_sink, |event| {
+            matches!(
+                event,
+                CoreEvent::Failed {
+                    request_id: Some(42),
+                    ..
+                }
+            )
+        });
+        assert!(matches!(missing, CoreEvent::Failed { .. }));
+    }
+
+    #[test]
     fn password_session_exchanges_key_and_returns_redacted_credential() {
         let (server, requests) = spawn_password_session_mock();
         let (signal_sender, signal_receiver) = mpsc::channel();
@@ -2734,7 +3113,7 @@ mod tests {
             events: Mutex::new(Vec::new()),
             notifier: Mutex::new(Some(signal_sender)),
         });
-        let client = RustCoreClient::new(sink.clone(), "/tmp/zulip-ffi-tests".to_owned());
+        let client = RustCoreClient::new(sink.clone(), "/tmp/zulip-ffi-tests".to_owned(), None);
 
         client.submit(CoreCommand::StartPasswordSession {
             request_id: 8,

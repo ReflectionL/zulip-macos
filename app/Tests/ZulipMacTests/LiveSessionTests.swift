@@ -150,7 +150,14 @@ struct LiveSessionTests {
         )
         await relaunched.restoreSavedSession()
 
-        let command = try #require(relaunchCore.commands.first)
+        guard case let .loadCachedSession(_, cachedAccountID) = try #require(
+            relaunchCore.commands.first
+        ) else {
+            Issue.record("Expected the cached session to load first")
+            return
+        }
+        #expect(cachedAccountID == accountID)
+        let command = try #require(relaunchCore.commands.dropFirst().first)
         guard case let .startAPIKeySession(_, restoredAccountID, _, restoredEmail, apiKey) = command
         else {
             Issue.record("Expected an API-key session command")
@@ -178,7 +185,7 @@ struct LiveSessionTests {
         defaults.set("https://acme.zulipchat.com", forKey: "lastAccount.serverURL")
         defaults.set("maya@example.com", forKey: "lastAccount.email")
         await model.restoreSavedSession()
-        #expect(core.commands.isEmpty)
+        #expect(!core.commands.contains(where: isAPIKeyStart))
         #expect(model.connectionState == .signedOut)
     }
 
@@ -269,6 +276,80 @@ struct LiveSessionTests {
 
         core.emit(.syncResumed(accountID: "account-1"))
         await eventually { model.connectionState == .connected }
+    }
+
+    @Test("A cached session is shown first and survives an offline start")
+    func cachedSessionSurvivesOfflineStart() async throws {
+        let accountID = "https://acme.zulipchat.com|maya@example.com"
+        let defaults = try #require(UserDefaults(suiteName: "restore-\(UUID().uuidString)"))
+        defaults.set("https://acme.zulipchat.com", forKey: "lastAccount.serverURL")
+        defaults.set("maya@example.com", forKey: "lastAccount.email")
+        let credentials = MemoryCredentialStore()
+        await credentials.save(StoredAPICredential(accountID: accountID, apiKey: "saved-key"))
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(
+            client: core,
+            credentialStore: credentials,
+            defaults: defaults
+        )
+        await model.restoreSavedSession()
+        let cachedRequestID = try #require(core.commands.first?.requestID)
+        let startRequestID = try #require(core.commands.dropFirst().first?.requestID)
+
+        core.emit(
+            .cachedSessionLoaded(
+                requestID: cachedRequestID,
+                identity: identity(accountID: accountID),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.identity != nil }
+        #expect(model.sidebarSnapshot?.channels.map(\.name) == ["engineering"])
+
+        core.emit(
+            .failed(
+                requestID: startRequestID,
+                message: "could not connect securely to the Zulip server: offline"
+            )
+        )
+        await eventually {
+            if case .retrying = model.connectionState { return true }
+            return false
+        }
+        #expect(model.identity != nil)
+    }
+
+    @Test("A missing cache on first launch does not interrupt the live connection")
+    func missingCacheIsQuiet() async throws {
+        let defaults = try #require(UserDefaults(suiteName: "restore-\(UUID().uuidString)"))
+        defaults.set("https://acme.zulipchat.com", forKey: "lastAccount.serverURL")
+        defaults.set("maya@example.com", forKey: "lastAccount.email")
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(
+            client: core,
+            credentialStore: MemoryCredentialStore(),
+            defaults: defaults
+        )
+        await model.restoreSavedSession()
+        let cachedRequestID = try #require(core.commands.first?.requestID)
+
+        core.emit(.failed(requestID: cachedRequestID, message: "no cached data"))
+        for _ in 0..<20 { await Task.yield() }
+        #expect(model.connectionState == .signedOut)
+    }
+
+    @Test("Transient failures are told apart from rejected credentials")
+    func transientFailureClassification() {
+        #expect(LiveSessionViewModel.isTransientFailure(
+            "could not connect securely to the Zulip server: timed out"
+        ))
+        #expect(LiveSessionViewModel.isTransientFailure(
+            "could not synchronize with the Zulip server: reset"
+        ))
+        #expect(LiveSessionViewModel.isTransientFailure("authentication returned HTTP 503"))
+        #expect(!LiveSessionViewModel.isTransientFailure(
+            "the username, password, or API key was not accepted"
+        ))
     }
 
     @Test("A loaded conversation is mapped safely and marked read")
@@ -1056,6 +1137,13 @@ struct LiveSessionTests {
                 ),
             ]
         )
+    }
+
+    private func isAPIKeyStart(_ command: BridgeCommand) -> Bool {
+        if case .startAPIKeySession = command {
+            return true
+        }
+        return false
     }
 
     private func identity(accountID: String) -> LiveSessionIdentity {

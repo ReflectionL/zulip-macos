@@ -3,10 +3,25 @@
 use std::{path::Path, time::Duration};
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-const SCHEMA_VERSION: u32 = 1;
-const MIGRATIONS: &[&str] = &[r"
+use crate::{
+    messages::TopicSummary,
+    sync::{ChannelSummary, MessageSummary, UserSummary},
+};
+
+const ACCOUNT_STATE_KEY: &str = "account";
+const SNAPSHOT_STATE_KEY: &str = "snapshot";
+const CONVERSATION_STATE_PREFIX: &str = "conversation:";
+/// Conversations kept per account; the least recently saved are pruned.
+const MAXIMUM_CACHED_CONVERSATIONS: i64 = 40;
+/// Messages kept per cached conversation or snapshot (newest first).
+const MAXIMUM_CACHED_MESSAGES: usize = 300;
+
+const SCHEMA_VERSION: u32 = 2;
+const MIGRATIONS: &[&str] = &[
+    r"
     CREATE TABLE accounts (
         account_id TEXT PRIMARY KEY NOT NULL,
         server_url TEXT NOT NULL,
@@ -100,7 +115,18 @@ const MIGRATIONS: &[&str] = &[r"
         PRIMARY KEY (account_id, key),
         FOREIGN KEY (account_id) REFERENCES accounts(account_id) ON DELETE CASCADE
     ) STRICT;
-"];
+",
+    r"
+    CREATE TABLE cached_state (
+        account_id TEXT NOT NULL,
+        key TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (account_id, key),
+        FOREIGN KEY (account_id) REFERENCES accounts(account_id) ON DELETE CASCADE
+    ) STRICT;
+",
+];
 
 /// Non-secret account metadata cached in `SQLite`.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -159,12 +185,52 @@ pub struct DraftRecord {
     pub updated_at: i64,
 }
 
+/// Non-secret identity needed to show a cached account without the network.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CachedAccount {
+    /// Normalized Zulip server root.
+    pub server_url: String,
+    /// Zulip API email.
+    pub email: String,
+    /// Zulip user ID.
+    pub user_id: i64,
+    /// User-facing name.
+    pub full_name: String,
+}
+
+/// The most recent navigation state for one account.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CachedSnapshot {
+    /// Organization users.
+    pub users: Vec<UserSummary>,
+    /// Subscribed channels.
+    pub channels: Vec<ChannelSummary>,
+    /// Known topics.
+    pub topics: Vec<TopicSummary>,
+    /// Recent messages, ascending by identifier.
+    pub messages: Vec<MessageSummary>,
+}
+
+/// One conversation as last fetched from the server.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CachedConversation {
+    /// Messages sorted by identifier.
+    pub messages: Vec<MessageSummary>,
+    /// Whether the oldest matching message was reached.
+    pub found_oldest: bool,
+    /// Whether the newest matching message was reached.
+    pub found_newest: bool,
+}
+
 /// Persistence and migration failures.
 #[derive(Debug, Error)]
 pub enum DatabaseError {
     /// `SQLite` operation failed.
     #[error("SQLite cache error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    /// A cache value could not be serialized.
+    #[error("cache value could not be serialized")]
+    Serialization,
     /// Database was created by a newer application schema.
     #[error("cache schema version {found} is newer than supported version {supported}")]
     SchemaTooNew {
@@ -247,6 +313,174 @@ impl CacheDatabase {
             ],
         )?;
         Ok(())
+    }
+
+    /// Replaces the cached identity and navigation snapshot for an account.
+    ///
+    /// Only the newest [`MAXIMUM_CACHED_MESSAGES`] messages are kept.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DatabaseError`] for serialization or write failures.
+    pub fn save_account_cache(
+        &self,
+        account_id: &str,
+        account: &CachedAccount,
+        snapshot: &CachedSnapshot,
+        now: i64,
+    ) -> Result<(), DatabaseError> {
+        let mut snapshot = snapshot.clone();
+        keep_newest(&mut snapshot.messages);
+        let transaction = self.connection.unchecked_transaction()?;
+        self.upsert_account(&AccountRecord {
+            account_id: account_id.to_owned(),
+            server_url: account.server_url.clone(),
+            email: account.email.clone(),
+            user_id: account.user_id,
+            display_name: account.full_name.clone(),
+            created_at: now,
+        })?;
+        self.put_state(account_id, ACCOUNT_STATE_KEY, account, now)?;
+        self.put_state(account_id, SNAPSHOT_STATE_KEY, &snapshot, now)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Replaces only the cached navigation snapshot of an already cached account.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DatabaseError`] for serialization, foreign-key, or write
+    /// failures.
+    pub fn save_snapshot(
+        &self,
+        account_id: &str,
+        snapshot: &CachedSnapshot,
+        now: i64,
+    ) -> Result<(), DatabaseError> {
+        let mut snapshot = snapshot.clone();
+        keep_newest(&mut snapshot.messages);
+        self.put_state(account_id, SNAPSHOT_STATE_KEY, &snapshot, now)
+    }
+
+    /// Removes every cached row for an account, as when the user disconnects.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DatabaseError`] if the delete fails.
+    pub fn delete_account_cache(&self, account_id: &str) -> Result<(), DatabaseError> {
+        self.connection
+            .execute("DELETE FROM accounts WHERE account_id = ?1", [account_id])?;
+        Ok(())
+    }
+
+    /// Loads the cached identity and snapshot for an account, if both exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DatabaseError`] for read failures. Unreadable payloads are
+    /// treated as absent so a damaged cache never blocks a fresh sync.
+    pub fn account_cache(
+        &self,
+        account_id: &str,
+    ) -> Result<Option<(CachedAccount, CachedSnapshot)>, DatabaseError> {
+        let account = self.state(account_id, ACCOUNT_STATE_KEY)?;
+        let snapshot = self.state(account_id, SNAPSHOT_STATE_KEY)?;
+        Ok(account.zip(snapshot))
+    }
+
+    /// Stores the latest page of one conversation and prunes old entries.
+    ///
+    /// The account row must exist, which [`Self::save_account_cache`] ensures.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DatabaseError`] for serialization, foreign-key, or write
+    /// failures.
+    pub fn save_conversation(
+        &self,
+        account_id: &str,
+        conversation_key: &str,
+        conversation: &CachedConversation,
+        now: i64,
+    ) -> Result<(), DatabaseError> {
+        let mut conversation = conversation.clone();
+        keep_newest(&mut conversation.messages);
+        let state_key = format!("{CONVERSATION_STATE_PREFIX}{conversation_key}");
+        let transaction = self.connection.unchecked_transaction()?;
+        self.put_state(account_id, &state_key, &conversation, now)?;
+        self.connection.execute(
+            r"
+            DELETE FROM cached_state
+            WHERE account_id = ?1 AND key LIKE ?2 ESCAPE '\'
+              AND key NOT IN (
+                  SELECT key FROM cached_state
+                  WHERE account_id = ?1 AND key LIKE ?2 ESCAPE '\'
+                  ORDER BY updated_at DESC, key
+                  LIMIT ?3
+              )
+            ",
+            params![
+                account_id,
+                format!("{CONVERSATION_STATE_PREFIX}%"),
+                MAXIMUM_CACHED_CONVERSATIONS
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Loads a previously cached conversation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DatabaseError`] for read failures.
+    pub fn conversation(
+        &self,
+        account_id: &str,
+        conversation_key: &str,
+    ) -> Result<Option<CachedConversation>, DatabaseError> {
+        self.state(
+            account_id,
+            &format!("{CONVERSATION_STATE_PREFIX}{conversation_key}"),
+        )
+    }
+
+    fn put_state<T: Serialize>(
+        &self,
+        account_id: &str,
+        key: &str,
+        value: &T,
+        now: i64,
+    ) -> Result<(), DatabaseError> {
+        let payload = serde_json::to_string(value).map_err(|_| DatabaseError::Serialization)?;
+        self.connection.execute(
+            r"
+            INSERT INTO cached_state (account_id, key, payload, updated_at)
+            VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(account_id, key) DO UPDATE SET
+                payload = excluded.payload,
+                updated_at = excluded.updated_at
+            ",
+            params![account_id, key, payload, now],
+        )?;
+        Ok(())
+    }
+
+    fn state<T: for<'de> Deserialize<'de>>(
+        &self,
+        account_id: &str,
+        key: &str,
+    ) -> Result<Option<T>, DatabaseError> {
+        let payload: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT payload FROM cached_state WHERE account_id = ?1 AND key = ?2",
+                params![account_id, key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(payload.and_then(|payload| serde_json::from_str(&payload).ok()))
     }
 
     /// Inserts or updates a normalized message in its account partition.
@@ -360,6 +594,13 @@ impl CacheDatabase {
     }
 }
 
+fn keep_newest(messages: &mut Vec<MessageSummary>) {
+    messages.sort_by_key(|message| message.id);
+    if messages.len() > MAXIMUM_CACHED_MESSAGES {
+        messages.drain(..messages.len() - MAXIMUM_CACHED_MESSAGES);
+    }
+}
+
 fn configure(connection: &Connection, enable_wal: bool) -> Result<(), rusqlite::Error> {
     connection.busy_timeout(Duration::from_secs(5))?;
     connection.pragma_update(None, "foreign_keys", true)?;
@@ -410,9 +651,104 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::{
-        AccountRecord, CacheDatabase, DatabaseError, DraftRecord, MessageRecord, SCHEMA_VERSION,
-        apply_migrations,
+        AccountRecord, CacheDatabase, CachedAccount, CachedConversation, CachedSnapshot,
+        DatabaseError, DraftRecord, MessageRecord, SCHEMA_VERSION, apply_migrations,
     };
+    use crate::sync::MessageSummary;
+
+    #[test]
+    fn caches_account_snapshot_and_conversations_with_pruning() {
+        let database = CacheDatabase::open_in_memory().expect("database");
+        let account = CachedAccount {
+            server_url: "https://acme.zulipchat.com".to_owned(),
+            email: "maya@example.com".to_owned(),
+            user_id: 9,
+            full_name: "Maya".to_owned(),
+        };
+        let messages = (1..=400)
+            .map(|id| MessageSummary {
+                id,
+                sender_id: 2,
+                sender_full_name: "Theo".to_owned(),
+                timestamp: 1_700_000_000 + id,
+                content_html: format!("<p>{id}</p>"),
+                stream_id: Some(5),
+                topic: Some("macOS".to_owned()),
+                recipient_ids: Vec::new(),
+                flags: vec!["read".to_owned()],
+                reactions: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let snapshot = CachedSnapshot {
+            users: Vec::new(),
+            channels: Vec::new(),
+            topics: Vec::new(),
+            messages: messages.clone(),
+        };
+        assert!(database.account_cache("acme|maya").expect("read").is_none());
+        database
+            .save_account_cache("acme|maya", &account, &snapshot, 10)
+            .expect("save account cache");
+        let (cached_account, cached_snapshot) = database
+            .account_cache("acme|maya")
+            .expect("read")
+            .expect("cached");
+        assert_eq!(cached_account, account);
+        assert_eq!(cached_snapshot.messages.len(), 300);
+        assert_eq!(cached_snapshot.messages.last().map(|m| m.id), Some(400));
+        assert_eq!(cached_snapshot.messages.first().map(|m| m.id), Some(101));
+
+        for index in 0..45_i64 {
+            database
+                .save_conversation(
+                    "acme|maya",
+                    &format!("topic-{index}"),
+                    &CachedConversation {
+                        messages: messages[..3].to_vec(),
+                        found_oldest: true,
+                        found_newest: true,
+                    },
+                    100 + index,
+                )
+                .expect("save conversation");
+        }
+        assert!(
+            database
+                .conversation("acme|maya", "topic-0")
+                .expect("read")
+                .is_none(),
+            "oldest conversations are pruned"
+        );
+        let newest = database
+            .conversation("acme|maya", "topic-44")
+            .expect("read")
+            .expect("newest kept");
+        assert_eq!(newest.messages.len(), 3);
+        assert!(newest.found_oldest);
+        assert!(
+            database.account_cache("acme|maya").expect("read").is_some(),
+            "pruning never removes the account snapshot"
+        );
+        assert!(
+            database
+                .conversation("other-account", "topic-44")
+                .expect("read")
+                .is_none(),
+            "cache is account scoped"
+        );
+
+        database
+            .delete_account_cache("acme|maya")
+            .expect("delete account cache");
+        assert!(database.account_cache("acme|maya").expect("read").is_none());
+        assert!(
+            database
+                .conversation("acme|maya", "topic-44")
+                .expect("read")
+                .is_none(),
+            "disconnecting forgets cached conversations"
+        );
+    }
 
     #[test]
     fn migrates_and_reopens_file_database() {

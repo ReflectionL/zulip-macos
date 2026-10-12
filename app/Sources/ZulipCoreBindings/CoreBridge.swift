@@ -349,6 +349,7 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
     case loadMedia(requestID: UInt64, accountID: String, remoteURL: String)
     case markRead(requestID: UInt64, accountID: String, messageIDs: [Int64])
     case disconnect(requestID: UInt64)
+    case loadCachedSession(requestID: UInt64, accountID: String)
 
     /// Backward-compatible foundation ping initializer.
     public init(requestID: UInt64, payload: String) {
@@ -375,7 +376,8 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
              let .uploadAttachment(requestID, _, _, _),
              let .loadMedia(requestID, _, _),
              let .markRead(requestID, _, _),
-             let .disconnect(requestID):
+             let .disconnect(requestID),
+             let .loadCachedSession(requestID, _):
             requestID
         }
     }
@@ -420,6 +422,8 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
             "BridgeCommand.markRead"
         case .disconnect:
             "BridgeCommand.disconnect"
+        case .loadCachedSession:
+            "BridgeCommand.loadCachedSession"
         }
     }
 
@@ -567,6 +571,8 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
             )
         case let .disconnect(requestID):
             .disconnect(requestId: requestID)
+        case let .loadCachedSession(requestID, accountID):
+            .loadCachedSession(requestId: requestID, accountId: accountID)
         }
     }
 }
@@ -583,6 +589,11 @@ public enum BridgeEvent:
         requestID: UInt64,
         identity: LiveSessionIdentity,
         credential: StoredAPICredential,
+        snapshot: LiveSnapshot
+    )
+    case cachedSessionLoaded(
+        requestID: UInt64,
+        identity: LiveSessionIdentity,
         snapshot: LiveSnapshot
     )
     case snapshotUpdated(accountID: String, snapshot: LiveSnapshot)
@@ -626,6 +637,7 @@ public enum BridgeEvent:
         switch self {
         case let .pong(requestID, _),
              let .sessionStarted(requestID, _, _, _),
+             let .cachedSessionLoaded(requestID, _, _),
              let .conversationOpened(requestID, _),
              let .conversationHistoryLoaded(requestID, _),
              let .searchCompleted(requestID, _, _),
@@ -654,6 +666,8 @@ public enum BridgeEvent:
             message
         case .sessionStarted:
             "Live session started"
+        case .cachedSessionLoaded:
+            "Cached session loaded"
         case .snapshotUpdated:
             "Live snapshot updated"
         case .conversationOpened:
@@ -747,9 +761,13 @@ public final class LiveCoreClient: CoreClientProtocol, @unchecked Sendable {
         let mediaCacheRoot = caches
             .appendingPathComponent("io.github.huahai.ZulipMac", isDirectory: true)
             .appendingPathComponent("Media", isDirectory: true)
+        let databaseURL = caches
+            .appendingPathComponent("io.github.huahai.ZulipMac", isDirectory: true)
+            .appendingPathComponent("Cache.sqlite")
         rustClient = RustCoreClient(
             eventSink: eventRelay,
-            mediaCacheRootPath: mediaCacheRoot.path
+            mediaCacheRootPath: mediaCacheRoot.path,
+            databasePath: databaseURL.path
         )
     }
 
@@ -954,6 +972,26 @@ private extension BridgeEvent {
                 credential: StoredAPICredential(
                     accountID: accountID,
                     apiKey: credential.apiKey
+                ),
+                snapshot: LiveSnapshot(snapshot)
+            )
+        case let .cachedSessionLoaded(
+            requestID,
+            accountID,
+            serverURL,
+            email,
+            userID,
+            fullName,
+            snapshot
+        ):
+            self = .cachedSessionLoaded(
+                requestID: requestID,
+                identity: LiveSessionIdentity(
+                    accountID: accountID,
+                    serverURL: serverURL,
+                    email: email,
+                    userID: userID,
+                    fullName: fullName
                 ),
                 snapshot: LiveSnapshot(snapshot)
             )
