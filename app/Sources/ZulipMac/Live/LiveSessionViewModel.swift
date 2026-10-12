@@ -194,6 +194,8 @@ final class LiveSessionViewModel {
     private var hasLiveSession = false
     @ObservationIgnored private var snapshotMessages: [Int64: LiveMessageSnapshot] = [:]
     @ObservationIgnored private var avatarURLs: [Int64: String] = [:]
+    @ObservationIgnored private var presenceStates: [Int64: PresenceState] = [:]
+    @ObservationIgnored private var presenceTask: Task<Void, Never>?
     private(set) var drafts: [ConversationKey: String] = [:]
     @ObservationIgnored private var draftSaveTasks: [ConversationKey: Task<Void, Never>] = [:]
     private var requestID: UInt64 = 1
@@ -915,6 +917,7 @@ final class LiveSessionViewModel {
             notificationPlanner.prime(with: snapshot)
             notifier?.requestAuthorization()
             loadDrafts(for: identity.accountID)
+            startPresenceUpdates(accountID: identity.accountID)
             do {
                 try await credentialStore.save(credential)
             } catch {
@@ -1111,6 +1114,12 @@ final class LiveSessionViewModel {
                 drafts[draft.key] = draft.content
             }
 
+        case let .presenceUpdated(accountID, presences):
+            guard identity?.accountID == accountID else {
+                return
+            }
+            applyPresence(presences)
+
         case let .syncResumed(accountID):
             if identity?.accountID == accountID, case .retrying = connectionState {
                 sessionLog.info("sync resumed")
@@ -1226,6 +1235,9 @@ final class LiveSessionViewModel {
         hasLiveSession = false
         snapshotMessages = [:]
         avatarURLs = [:]
+        presenceTask?.cancel()
+        presenceTask = nil
+        presenceStates = [:]
         notificationPlanner.reset()
         unseenNotificationCount = 0
         notifier?.setBadge(0)
@@ -1309,6 +1321,66 @@ final class LiveSessionViewModel {
         }
     }
 
+    /// Reports our own presence and refreshes everyone else's once a minute.
+    private func startPresenceUpdates(accountID: String) {
+        presenceTask?.cancel()
+        presenceTask = Task { [weak self] in
+            // Let the session settle before the first request.
+            try? await Task.sleep(for: .seconds(1.5))
+            while !Task.isCancelled {
+                guard self?.submitPresenceRefresh(accountID: accountID) != nil else {
+                    return
+                }
+                try? await Task.sleep(for: .seconds(60))
+            }
+        }
+    }
+
+    private func submitPresenceRefresh(accountID: String) {
+        client.submit(
+            .refreshPresence(
+                requestID: nextRequestID(),
+                accountID: accountID,
+                isActive: isApplicationActive()
+            )
+        )
+    }
+
+    private func applyPresence(_ presences: [LivePresence]) {
+        presenceStates = Dictionary(
+            presences.map { ($0.userID, $0.state) },
+            uniquingKeysWith: { _, latest in latest }
+        )
+        guard let sidebar = sidebarSnapshot else {
+            return
+        }
+        let directMessages = sidebar.directMessages.map { directMessage in
+            DirectMessageSnapshot(
+                userID: directMessage.userID,
+                displayName: directMessage.displayName,
+                initials: directMessage.initials,
+                unreadCount: directMessage.unreadCount,
+                presence: presenceStates[directMessage.userID] ?? .offline,
+                avatarURL: directMessage.avatarURL
+            )
+        }
+        guard directMessages != sidebar.directMessages else {
+            return
+        }
+        sidebarSnapshot = SidebarSnapshot(
+            accountID: sidebar.accountID,
+            organizationName: sidebar.organizationName,
+            organizationHost: sidebar.organizationHost,
+            quickLinks: sidebar.quickLinks,
+            channels: sidebar.channels,
+            directMessages: directMessages,
+            currentUserName: sidebar.currentUserName,
+            currentUserInitials: sidebar.currentUserInitials,
+            organizationIconURL: sidebar.organizationIconURL,
+            currentUserAvatarURL: sidebar.currentUserAvatarURL
+        )
+    }
+
     private func apply(_ snapshot: LiveSnapshot) {
         guard let identity else {
             return
@@ -1328,7 +1400,8 @@ final class LiveSessionViewModel {
         sidebarSnapshot = Self.makeSidebar(
             snapshot: snapshot,
             identity: identity,
-            topics: Array(knownTopics.values)
+            topics: Array(knownTopics.values),
+            presence: presenceStates
         )
         rebuildPresentation()
     }
@@ -1906,7 +1979,8 @@ final class LiveSessionViewModel {
     private static func makeSidebar(
         snapshot: LiveSnapshot,
         identity: LiveSessionIdentity,
-        topics: [LiveTopicSnapshot]
+        topics: [LiveTopicSnapshot],
+        presence: [Int64: PresenceState] = [:]
     ) -> SidebarSnapshot {
         let host = URL(string: identity.serverURL)?.host ?? identity.serverURL
         let organization = host.split(separator: ".").first
@@ -1923,7 +1997,7 @@ final class LiveSessionViewModel {
                         ? "\(currentName) (you)"
                         : $0.fullName,
                     initials: initials(for: $0.fullName),
-                    presence: .offline,
+                    presence: presence[$0.userID] ?? .offline,
                     avatarURL: $0.avatarURL
                 )
             }

@@ -25,7 +25,7 @@ use zulip_core::{
     media::MediaClient,
     messages::{
         ConversationTarget, MessageClient, MessageFlag, MessageWriteOperation, OutgoingMessage,
-        TopicPropagation, TopicSummary,
+        PresenceStatus, TopicPropagation, TopicSummary,
     },
     sync::{
         EventQueueClient, MessageSummary, RecoveryPolicy, SyncCycle, SyncSession, SyncSnapshot,
@@ -436,6 +436,17 @@ pub enum CoreCommand {
         /// Server message identifiers.
         message_ids: Vec<i64>,
     },
+    /// Reports the user's own presence and fetches everyone else's.
+    ///
+    /// Failures are silent: presence is advisory and the next refresh retries.
+    RefreshPresence {
+        /// Correlates the response.
+        request_id: u64,
+        /// Client-owned account partition.
+        account_id: String,
+        /// Whether the app is in active use (otherwise reported as idle).
+        is_active: bool,
+    },
     /// Ends the current live account session and forgets its cached data.
     Disconnect {
         /// Correlates the response.
@@ -490,6 +501,7 @@ impl CoreCommand {
             | Self::UploadAttachment { request_id, .. }
             | Self::LoadMedia { request_id, .. }
             | Self::MarkRead { request_id, .. }
+            | Self::RefreshPresence { request_id, .. }
             | Self::Disconnect { request_id } => *request_id,
         }
     }
@@ -511,6 +523,36 @@ impl From<CoreMessageFlag> for MessageFlag {
             CoreMessageFlag::Starred => Self::Starred,
         }
     }
+}
+
+/// Derived online state of one user.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum CorePresenceStatus {
+    /// Recently active.
+    Active,
+    /// Connected but not recently active.
+    Idle,
+    /// No recent presence.
+    Offline,
+}
+
+impl From<PresenceStatus> for CorePresenceStatus {
+    fn from(status: PresenceStatus) -> Self {
+        match status {
+            PresenceStatus::Active => Self::Active,
+            PresenceStatus::Idle => Self::Idle,
+            PresenceStatus::Offline => Self::Offline,
+        }
+    }
+}
+
+/// One user's online state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct CorePresence {
+    /// Zulip user identifier.
+    pub user_id: i64,
+    /// Derived state.
+    pub status: CorePresenceStatus,
 }
 
 /// One-time API credential returned for immediate Keychain persistence.
@@ -964,6 +1006,13 @@ pub enum CoreEvent {
         /// Last known immutable navigation state.
         snapshot: CoreSnapshot,
     },
+    /// Fresh online states for users known to the server.
+    PresenceUpdated {
+        /// Active account partition.
+        account_id: String,
+        /// Users sorted by identifier.
+        presences: Vec<CorePresence>,
+    },
     /// Polling succeeded again after one or more scheduled retries.
     SyncResumed {
         /// Active account partition.
@@ -1411,6 +1460,11 @@ async fn handle_command(
             account.as_ref(),
             event_sink,
         ),
+        CoreCommand::RefreshPresence {
+            account_id,
+            is_active,
+            ..
+        } => refresh_presence(account_id, is_active, account.as_ref(), event_sink),
         CoreCommand::MarkRead {
             request_id,
             account_id,
@@ -1455,6 +1509,33 @@ fn upload_attachment(
                 markdown: uploaded.markdown,
             }),
             Err(error) => emit_error(Some(request_id), error, &event_sink),
+        }
+    });
+}
+
+fn refresh_presence(
+    account_id: String,
+    is_active: bool,
+    account: Option<&AccountSession>,
+    event_sink: &Arc<dyn CoreEventSink>,
+) {
+    let Some(session) = account.filter(|item| item.account_id == account_id) else {
+        return;
+    };
+    let messages = Arc::clone(&session.messages);
+    let event_sink = Arc::clone(event_sink);
+    tokio::spawn(async move {
+        if let Ok(presences) = messages.update_presence(is_active).await {
+            event_sink.handle_event(CoreEvent::PresenceUpdated {
+                account_id,
+                presences: presences
+                    .into_iter()
+                    .map(|presence| CorePresence {
+                        user_id: presence.user_id,
+                        status: presence.status.into(),
+                    })
+                    .collect(),
+            });
         }
     });
 }

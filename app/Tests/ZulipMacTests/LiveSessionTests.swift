@@ -312,6 +312,22 @@ struct LiveSessionTests {
                 == "https://cdn.example.com/theo.png"
         )
 
+        func presence(of userID: Int64) -> PresenceState? {
+            model.sidebarSnapshot?.directMessages.first { $0.userID == userID }?.presence
+        }
+        #expect(presence(of: 22) == .offline)
+        core.emit(
+            .presenceUpdated(
+                accountID: accountID,
+                presences: [
+                    LivePresence(userID: 22, state: .active),
+                    LivePresence(userID: 9, state: .idle),
+                ]
+            )
+        )
+        await eventually { presence(of: 22) == .active }
+        #expect(presence(of: 9) == .idle)
+
         core.emit(
             .conversationOpened(
                 requestID: 99,

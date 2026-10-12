@@ -133,6 +133,17 @@ public struct LiveSnapshot: Equatable, Sendable {
     }
 }
 
+/// One user's online state from the server.
+public struct LivePresence: Equatable, Sendable {
+    public let userID: Int64
+    public let state: PresenceState
+
+    public init(userID: Int64, state: PresenceState) {
+        self.userID = userID
+        self.state = state
+    }
+}
+
 /// One persisted composer draft.
 public struct LiveDraft: Equatable, Sendable {
     public let key: ConversationKey
@@ -367,6 +378,7 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
     )
     case loadMedia(requestID: UInt64, accountID: String, remoteURL: String)
     case markRead(requestID: UInt64, accountID: String, messageIDs: [Int64])
+    case refreshPresence(requestID: UInt64, accountID: String, isActive: Bool)
     case disconnect(requestID: UInt64)
     case loadCachedSession(requestID: UInt64, accountID: String)
     case saveDraft(requestID: UInt64, key: ConversationKey, content: String)
@@ -397,6 +409,7 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
              let .uploadAttachment(requestID, _, _, _),
              let .loadMedia(requestID, _, _),
              let .markRead(requestID, _, _),
+             let .refreshPresence(requestID, _, _),
              let .disconnect(requestID),
              let .loadCachedSession(requestID, _),
              let .saveDraft(requestID, _, _),
@@ -443,6 +456,8 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
             "BridgeCommand.loadMedia"
         case .markRead:
             "BridgeCommand.markRead"
+        case .refreshPresence:
+            "BridgeCommand.refreshPresence"
         case .disconnect:
             "BridgeCommand.disconnect"
         case .loadCachedSession:
@@ -596,6 +611,8 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
                 accountId: accountID,
                 messageIds: messageIDs
             )
+        case let .refreshPresence(requestID, accountID, isActive):
+            .refreshPresence(requestId: requestID, accountId: accountID, isActive: isActive)
         case let .disconnect(requestID):
             .disconnect(requestId: requestID)
         case let .loadCachedSession(requestID, accountID):
@@ -662,6 +679,7 @@ public enum BridgeEvent:
     case messagesMarkedRead(requestID: UInt64, messageIDs: [Int64])
     case retryScheduled(accountID: String, delayMilliseconds: UInt64)
     case syncResumed(accountID: String)
+    case presenceUpdated(accountID: String, presences: [LivePresence])
     case disconnected(requestID: UInt64)
     case failed(requestID: UInt64?, message: String)
 
@@ -688,7 +706,7 @@ public enum BridgeEvent:
             requestID
         case let .failed(requestID, _):
             requestID ?? 0
-        case .snapshotUpdated, .retryScheduled, .syncResumed:
+        case .snapshotUpdated, .retryScheduled, .syncResumed, .presenceUpdated:
             0
         }
     }
@@ -735,6 +753,8 @@ public enum BridgeEvent:
             "Retry scheduled"
         case .syncResumed:
             "Sync resumed"
+        case .presenceUpdated:
+            "Presence updated"
         case .disconnected:
             "Disconnected"
         }
@@ -937,6 +957,16 @@ private extension InlineContent {
             self = .emoji(name: name, value: value)
         case let .styled(style, content):
             self = .styled(InlineStyle(style), content.map(InlineContent.init))
+        }
+    }
+}
+
+private extension PresenceState {
+    init(_ status: CorePresenceStatus) {
+        switch status {
+        case .active: self = .active
+        case .idle: self = .idle
+        case .offline: self = .offline
         }
     }
 }
@@ -1172,6 +1202,13 @@ private extension BridgeEvent {
             )
         case let .syncResumed(accountID):
             self = .syncResumed(accountID: accountID)
+        case let .presenceUpdated(accountID, presences):
+            self = .presenceUpdated(
+                accountID: accountID,
+                presences: presences.map {
+                    LivePresence(userID: $0.userId, state: PresenceState($0.status))
+                }
+            )
         case let .disconnected(requestID):
             self = .disconnected(requestID: requestID)
         case let .failed(requestID, message):

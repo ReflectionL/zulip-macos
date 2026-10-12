@@ -15,6 +15,9 @@ use crate::{
 
 const MESSAGES_PATH: &str = "api/v1/messages";
 const MESSAGE_FLAGS_PATH: &str = "api/v1/messages/flags";
+const PRESENCE_PATH: &str = "api/v1/users/me/presence";
+/// How recent a presence timestamp must be (Zulip's offline threshold) to count.
+const PRESENCE_FRESH_SECONDS: f64 = 140.0;
 const TOPICS_PATH_PREFIX: &str = "api/v1/users/me";
 const MAX_MESSAGES_RESPONSE_BYTES: usize = 16 * 1_048_576;
 const MAX_WRITE_RESPONSE_BYTES: usize = 1_048_576;
@@ -712,6 +715,109 @@ impl MessageClient {
         self.update_message_flag(message_ids, MessageFlag::Read, MessageWriteOperation::Add)
             .await
     }
+
+    /// Reports the current user's own presence and returns everyone else's.
+    ///
+    /// Zulip derives "online" from recent presence pings, so a client that never
+    /// pings is invisible to others and never learns who is online.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageApiError`] for transport, rejection, size, or response
+    /// failures.
+    pub async fn update_presence(
+        &self,
+        is_active: bool,
+    ) -> Result<Vec<UserPresence>, MessageApiError> {
+        let response = self
+            .http
+            .post(self.base_url.endpoint(PRESENCE_PATH))
+            .basic_auth(&self.email, Some(self.api_key.expose_secret()))
+            .form(&[
+                ("status", if is_active { "active" } else { "idle" }),
+                ("slim_presence", "true"),
+                ("new_user_input", if is_active { "true" } else { "false" }),
+            ])
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let document: PresenceDocument =
+            decode_response(response, MAX_MESSAGES_RESPONSE_BYTES).await?;
+        validate_api_result(document.result.as_deref(), document.code.as_deref())?;
+        let now = if document.server_timestamp > 0.0 {
+            document.server_timestamp
+        } else {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0.0, |elapsed| elapsed.as_secs_f64())
+        };
+        let mut presences = document
+            .presences
+            .into_iter()
+            .filter_map(|(key, record)| {
+                Some(UserPresence {
+                    user_id: key.parse().ok()?,
+                    status: presence_status(now, record.active_timestamp, record.idle_timestamp),
+                })
+            })
+            .collect::<Vec<_>>();
+        presences.sort_by_key(|presence| presence.user_id);
+        Ok(presences)
+    }
+}
+
+/// Whether a user is currently using Zulip.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PresenceStatus {
+    /// Recently active.
+    Active,
+    /// Connected but not recently active.
+    Idle,
+    /// No recent presence.
+    Offline,
+}
+
+/// One user's derived presence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UserPresence {
+    /// Zulip user identifier.
+    pub user_id: i64,
+    /// Derived state.
+    pub status: PresenceStatus,
+}
+
+/// Applies Zulip's offline threshold to a presence record.
+#[must_use]
+pub fn presence_status(now: f64, active: Option<f64>, idle: Option<f64>) -> PresenceStatus {
+    let is_fresh = |timestamp: Option<f64>| {
+        timestamp.is_some_and(|value| now - value < PRESENCE_FRESH_SECONDS)
+    };
+    if is_fresh(active) {
+        PresenceStatus::Active
+    } else if is_fresh(idle) {
+        PresenceStatus::Idle
+    } else {
+        PresenceStatus::Offline
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct PresenceDocument {
+    result: Option<String>,
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    server_timestamp: f64,
+    #[serde(default)]
+    presences: std::collections::HashMap<String, PresenceRecord>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PresenceRecord {
+    #[serde(default)]
+    active_timestamp: Option<f64>,
+    #[serde(default)]
+    idle_timestamp: Option<f64>,
 }
 
 struct NormalizedMessagesPage {
@@ -947,7 +1053,7 @@ mod tests {
 
     use super::{
         ConversationTarget, MessageApiError, MessageClient, MessageFlag, MessageWriteOperation,
-        OutgoingMessage, TopicPropagation,
+        OutgoingMessage, PresenceStatus, TopicPropagation,
     };
     use crate::auth::SecretString;
 
@@ -1021,6 +1127,45 @@ mod tests {
         assert_fetch_request(&requests.recv().expect("fetch request"));
         assert_send_request(&requests.recv().expect("send request"));
         assert_read_request(&requests.recv().expect("read request"));
+    }
+
+    #[tokio::test]
+    async fn presence_is_reported_and_derived_from_fresh_timestamps() {
+        let responses = vec![(
+            StatusCode::OK,
+            r#"{
+                "result":"success",
+                "server_timestamp":1000.5,
+                "presences":{
+                    "9":{"active_timestamp":990,"idle_timestamp":900},
+                    "7":{"active_timestamp":500,"idle_timestamp":950},
+                    "4":{"active_timestamp":100},
+                    "maya@example.com":{"aggregated":{"status":"active","timestamp":999}}
+                }
+            }"#
+            .to_owned(),
+        )];
+        let (server, requests) = spawn_mock(responses);
+        let client = MessageClient::new(&server, "maya@example.com", SecretString::new(API_KEY))
+            .expect("message client");
+
+        let presences = client.update_presence(true).await.expect("presence");
+        assert_eq!(
+            presences
+                .iter()
+                .map(|presence| (presence.user_id, presence.status))
+                .collect::<Vec<_>>(),
+            vec![
+                (4, PresenceStatus::Offline),
+                (7, PresenceStatus::Idle),
+                (9, PresenceStatus::Active),
+            ]
+        );
+        let request = requests.recv().expect("presence request");
+        assert!(request.starts_with("POST /api/v1/users/me/presence HTTP/1.1"));
+        assert!(request.contains("status=active"));
+        assert!(request.contains("slim_presence=true"));
+        assert!(!request.contains(API_KEY));
     }
 
     #[tokio::test]
