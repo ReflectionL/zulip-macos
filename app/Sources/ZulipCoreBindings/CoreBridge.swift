@@ -399,6 +399,7 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
     case loadMedia(requestID: UInt64, accountID: String, remoteURL: String)
     case markRead(requestID: UInt64, accountID: String, messageIDs: [Int64])
     case refreshPresence(requestID: UInt64, accountID: String, isActive: Bool)
+    case fetchReadReceipts(requestID: UInt64, accountID: String, messageID: Int64)
     case fetchMessageSource(requestID: UInt64, accountID: String, messageID: Int64)
     case createChannel(
         requestID: UInt64,
@@ -441,6 +442,7 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
              let .loadMedia(requestID, _, _),
              let .markRead(requestID, _, _),
              let .refreshPresence(requestID, _, _),
+             let .fetchReadReceipts(requestID, _, _),
              let .fetchMessageSource(requestID, _, _),
              let .createChannel(requestID, _, _, _, _, _),
              let .renameChannel(requestID, _, _, _),
@@ -494,6 +496,8 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
             "BridgeCommand.markRead"
         case .refreshPresence:
             "BridgeCommand.refreshPresence"
+        case .fetchReadReceipts:
+            "BridgeCommand.fetchReadReceipts"
         case .fetchMessageSource:
             "BridgeCommand.fetchMessageSource"
         case .createChannel:
@@ -657,6 +661,8 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
             )
         case let .refreshPresence(requestID, accountID, isActive):
             .refreshPresence(requestId: requestID, accountId: accountID, isActive: isActive)
+        case let .fetchReadReceipts(requestID, accountID, messageID):
+            .fetchReadReceipts(requestId: requestID, accountId: accountID, messageId: messageID)
         case let .createChannel(requestID, accountID, name, description, isPrivate, memberIDs):
             .createChannel(
                 requestId: requestID,
@@ -750,6 +756,14 @@ public enum BridgeEvent:
     case retryScheduled(accountID: String, delayMilliseconds: UInt64)
     case syncResumed(accountID: String)
     case presenceUpdated(accountID: String, presences: [LivePresence])
+    /// Who has read one of the user's messages; `isAvailable` is false when the
+    /// server cannot report read receipts for it.
+    case readReceiptsLoaded(
+        accountID: String,
+        messageID: Int64,
+        userIDs: [Int64],
+        isAvailable: Bool
+    )
     case disconnected(requestID: UInt64)
     case failed(requestID: UInt64?, message: String)
 
@@ -780,7 +794,8 @@ public enum BridgeEvent:
             requestID
         case let .failed(requestID, _):
             requestID ?? 0
-        case .snapshotUpdated, .retryScheduled, .syncResumed, .presenceUpdated:
+        case .snapshotUpdated, .retryScheduled, .syncResumed, .presenceUpdated,
+             .readReceiptsLoaded:
             0
         }
     }
@@ -837,6 +852,8 @@ public enum BridgeEvent:
             "Sync resumed"
         case .presenceUpdated:
             "Presence updated"
+        case .readReceiptsLoaded:
+            "Read receipts loaded"
         case .disconnected:
             "Disconnected"
         }
@@ -1314,6 +1331,13 @@ private extension BridgeEvent {
                         }
                     )
                 }
+            )
+        case let .readReceiptsLoaded(accountID, messageID, userIDs, isAvailable):
+            self = .readReceiptsLoaded(
+                accountID: accountID,
+                messageID: messageID,
+                userIDs: userIDs,
+                isAvailable: isAvailable
             )
         case let .disconnected(requestID):
             self = .disconnected(requestID: requestID)

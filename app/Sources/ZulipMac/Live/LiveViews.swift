@@ -446,7 +446,9 @@ private struct LiveWindowView: View {
                 requestMedia: session.loadMedia,
                 retryMedia: session.retryMedia,
                 initialDraft: session.draft(for: page.key),
-                draftChanged: { session.updateDraft($0, for: page.key) }
+                draftChanged: { session.updateDraft($0, for: page.key) },
+                readReceipts: session.readReceiptDisplay(for: page),
+                pollReadReceipts: { session.pollReadReceipts(messageID: $0, key: page.key) }
             )
         case let .offline(page):
             ConversationSurface(
