@@ -2,7 +2,7 @@ import SwiftUI
 import ZulipCoreBindings
 
 struct AppRootView: View {
-    @State private var session = LiveSessionViewModel()
+    @State private var session = LiveSessionViewModel(notifier: SystemMessageNotifier())
     @State private var isLoginPresented = false
 
     var body: some View {

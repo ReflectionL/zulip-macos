@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import Observation
 import ZulipCoreBindings
 
@@ -176,6 +177,10 @@ final class LiveSessionViewModel {
     @ObservationIgnored private let client: any CoreClientProtocol
     @ObservationIgnored private let credentialStore: any CredentialStore
     @ObservationIgnored private let defaults: UserDefaults
+    @ObservationIgnored private let notifier: (any MessageNotifier)?
+    @ObservationIgnored private var notificationPlanner = NotificationPlanner()
+    @ObservationIgnored var isApplicationActive: () -> Bool = { NSApplication.shared.isActive }
+    private var unseenNotificationCount = 0
     @ObservationIgnored private var eventTask: Task<Void, Never>?
     @ObservationIgnored private var reconnectTask: Task<Void, Never>?
     private var reconnectAttempt = 0
@@ -205,11 +210,48 @@ final class LiveSessionViewModel {
     init(
         client: any CoreClientProtocol = LiveCoreClient(),
         credentialStore: any CredentialStore = KeychainCredentialStore(),
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        notifier: (any MessageNotifier)? = nil
     ) {
         self.client = client
         self.credentialStore = credentialStore
         self.defaults = defaults
+        self.notifier = notifier
+        notifier?.onActivate = { [weak self] route in
+            self?.openFromNotification(route)
+        }
+        notifier?.onApplicationActivated = { [weak self] in
+            self?.unseenNotificationCount = 0
+        }
+    }
+
+    /// Takes the user to the conversation a notification was about.
+    func openFromNotification(_ route: NotificationRoute) {
+        guard identity?.accountID == route.key.accountID else {
+            return
+        }
+        requestedTopicNavigation = route.key
+    }
+
+    private func notifyAboutNewMessages(in snapshot: LiveSnapshot) {
+        guard let identity else {
+            return
+        }
+        let notifications = notificationPlanner.plan(snapshot: snapshot, identity: identity)
+        guard let notifier else {
+            return
+        }
+        for notification in notifications {
+            // Do not interrupt the conversation the user is already reading.
+            if isApplicationActive(), activeSelection == notification.route.key {
+                continue
+            }
+            notifier.post(notification)
+            unseenNotificationCount += 1
+        }
+        if unseenNotificationCount > 0 {
+            notifier.setBadge(unseenNotificationCount)
+        }
     }
 
     func startObserving() {
@@ -826,6 +868,7 @@ final class LiveSessionViewModel {
             serverURL = identity.serverURL
             email = identity.email
             apply(snapshot)
+            notificationPlanner.prime(with: snapshot)
             loadDrafts(for: identity.accountID)
             let inbox = ConversationKey.inbox(accountID: identity.accountID)
             openConversation(inbox)
@@ -838,6 +881,8 @@ final class LiveSessionViewModel {
             email = identity.email
             rememberLastAccount(identity)
             apply(snapshot)
+            notificationPlanner.prime(with: snapshot)
+            notifier?.requestAuthorization()
             loadDrafts(for: identity.accountID)
             do {
                 try await credentialStore.save(credential)
@@ -857,6 +902,7 @@ final class LiveSessionViewModel {
                 return
             }
             apply(snapshot)
+            notifyAboutNewMessages(in: snapshot)
             connectionState = .connected
             if let activeSelection {
                 refreshConversation(activeSelection)
@@ -1141,6 +1187,9 @@ final class LiveSessionViewModel {
 
     private func resetSessionState() {
         hasLiveSession = false
+        notificationPlanner.reset()
+        unseenNotificationCount = 0
+        notifier?.setBadge(0)
         draftSaveTasks.values.forEach { $0.cancel() }
         draftSaveTasks = [:]
         drafts = [:]
