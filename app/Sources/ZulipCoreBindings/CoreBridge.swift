@@ -618,6 +618,7 @@ public enum BridgeEvent:
     case topicUpdated(requestID: UInt64, update: LiveTopicUpdate)
     case messagesMarkedRead(requestID: UInt64, messageIDs: [Int64])
     case retryScheduled(accountID: String, delayMilliseconds: UInt64)
+    case syncResumed(accountID: String)
     case disconnected(requestID: UInt64)
     case failed(requestID: UInt64?, message: String)
 
@@ -642,7 +643,7 @@ public enum BridgeEvent:
             requestID
         case let .failed(requestID, _):
             requestID ?? 0
-        case .snapshotUpdated, .retryScheduled:
+        case .snapshotUpdated, .retryScheduled, .syncResumed:
             0
         }
     }
@@ -683,6 +684,8 @@ public enum BridgeEvent:
             "Messages marked read"
         case .retryScheduled:
             "Retry scheduled"
+        case .syncResumed:
+            "Sync resumed"
         case .disconnected:
             "Disconnected"
         }
@@ -1069,6 +1072,8 @@ private extension BridgeEvent {
                 accountID: accountID,
                 delayMilliseconds: delayMilliseconds
             )
+        case let .syncResumed(accountID):
+            self = .syncResumed(accountID: accountID)
         case let .disconnected(requestID):
             self = .disconnected(requestID: requestID)
         case let .failed(requestID, message):

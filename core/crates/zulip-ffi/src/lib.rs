@@ -763,6 +763,11 @@ pub enum CoreEvent {
         /// Delay before another poll or resync.
         delay_milliseconds: u64,
     },
+    /// Polling succeeded again after one or more scheduled retries.
+    SyncResumed {
+        /// Active account partition.
+        account_id: String,
+    },
     /// The active session ended.
     Disconnected {
         /// Originating request.
@@ -850,6 +855,7 @@ async fn run_actor(
 ) {
     let mut account: Option<AccountSession> = None;
     let mut poll_not_before = Instant::now();
+    let mut retrying = false;
 
     loop {
         let input = if let Some(session) = account.as_mut() {
@@ -884,6 +890,18 @@ async fn run_actor(
             ActorInput::Command(None) => break,
             ActorInput::Sync(cycle) => {
                 let terminal = matches!(&cycle, SyncCycle::Fatal { .. });
+                match &cycle {
+                    SyncCycle::RetryAfter { .. } => retrying = true,
+                    SyncCycle::Events(_) if retrying => {
+                        retrying = false;
+                        if let Some(session) = account.as_ref() {
+                            event_sink.handle_event(CoreEvent::SyncResumed {
+                                account_id: session.account_id.clone(),
+                            });
+                        }
+                    }
+                    _ => retrying = false,
+                }
                 poll_not_before = handle_sync_cycle(cycle, account.as_ref(), &event_sink);
                 if terminal {
                     account = None;

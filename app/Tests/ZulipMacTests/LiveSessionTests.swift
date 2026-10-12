@@ -7,14 +7,14 @@ import ZulipCoreBindings
 @Suite("Live session presentation")
 @MainActor
 struct LiveSessionTests {
-    @Test("Login defaults to the primary Zulip Cloud organization")
+    @Test("Login does not assume a particular organization")
     func defaultServer() {
         let model = LiveSessionViewModel(
             client: RecordingCoreClient(),
             credentialStore: MemoryCredentialStore()
         )
 
-        #expect(model.serverURL == "https://shitcreator.zulipchat.com")
+        #expect(model.serverURL.isEmpty)
         #expect(model.email.isEmpty)
         #expect(model.secret.isEmpty)
     }
@@ -217,8 +217,37 @@ struct LiveSessionTests {
         #expect(relaunchCore.commands.isEmpty)
     }
 
-    @Test("A core-ended session returns to sign-in with the reason")
+    @Test("A core-ended session returns to sign-in and drops the rejected key")
     func coreEndedSessionIsReported() async {
+        let core = RecordingCoreClient()
+        let credentials = MemoryCredentialStore()
+        let model = LiveSessionViewModel(
+            client: core,
+            credentialStore: credentials
+        )
+        model.startObserving()
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: "account-1"),
+                credential: StoredAPICredential(accountID: "account-1", apiKey: "key"),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.connectionState == .connected }
+        #expect(await credentials.savedCredential() != nil)
+
+        core.emit(.failed(requestID: nil, message: "sign in again"))
+        await eventually { model.connectionState == .failed(message: "sign in again") }
+
+        #expect(model.identity == nil)
+        #expect(model.sidebarSnapshot == nil)
+        #expect(model.notice?.contains("Earlier messages") != true)
+        await eventually { await credentials.savedCredential() == nil }
+    }
+
+    @Test("Retry state clears once polling succeeds again")
+    func retryingClearsWhenSyncResumes() async {
         let core = RecordingCoreClient()
         let model = LiveSessionViewModel(
             client: core,
@@ -235,12 +264,11 @@ struct LiveSessionTests {
         )
         await eventually { model.connectionState == .connected }
 
-        core.emit(.failed(requestID: nil, message: "sign in again"))
-        await eventually { model.connectionState == .failed(message: "sign in again") }
+        core.emit(.retryScheduled(accountID: "account-1", delayMilliseconds: 1_000))
+        await eventually { model.connectionState == .retrying(delayMilliseconds: 1_000) }
 
-        #expect(model.identity == nil)
-        #expect(model.sidebarSnapshot == nil)
-        #expect(model.notice?.contains("Earlier messages") != true)
+        core.emit(.syncResumed(accountID: "account-1"))
+        await eventually { model.connectionState == .connected }
     }
 
     @Test("A loaded conversation is mapped safely and marked read")
