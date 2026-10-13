@@ -39,7 +39,7 @@ struct LiveSessionTests {
         #expect(model.secret == "render-only-secret")
     }
 
-    @Test("Password login is redacted, persisted as an API key, and opens Inbox")
+    @Test("Password login is redacted, persisted as an API key, and opens Mentions")
     func passwordLogin() async throws {
         let core = RecordingCoreClient()
         let credentials = MemoryCredentialStore()
@@ -89,7 +89,7 @@ struct LiveSessionTests {
             model.connectionState == .connected
                 && core.commands.contains {
                     if case let .openConversation(_, key, _) = $0 {
-                        return key == .inbox(accountID: accountID)
+                        return key == .mentions(accountID: accountID)
                     }
                     return false
                 }
@@ -99,7 +99,7 @@ struct LiveSessionTests {
         #expect(model.sidebarSnapshot?.currentUserName == "Maya Chen")
         #expect(
             model.sidebarSnapshot?.quickLinks.map(\.title)
-                == ["Inbox", "Mentions", "Starred", "Unread"]
+                == ["Mentions", "Starred"]
         )
         #expect(
             model.navigationDirectory
@@ -429,7 +429,7 @@ struct LiveSessionTests {
             .conversationOpened(
                 requestID: 99,
                 page: LiveConversationPage(
-                    key: .inbox(accountID: accountID),
+                    key: .mentions(accountID: accountID),
                     messages: [
                         LiveMessageSnapshot(
                             messageID: 44,
@@ -1000,11 +1000,109 @@ struct LiveSessionTests {
         #expect(shown.messages.map(\.plainText) == ["Hello"])
     }
 
+    @Test("Unread counts reach the sidebar, Mentions and the topic rows")
+    func unreadCountsInSidebar() async {
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(
+            client: core,
+            credentialStore: MemoryCredentialStore()
+        )
+        model.startObserving()
+        let accountID = "account-1"
+        let base = snapshot
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: accountID),
+                credential: StoredAPICredential(accountID: accountID, apiKey: "key"),
+                snapshot: LiveSnapshot(
+                    revision: base.revision,
+                    lastEventID: base.lastEventID,
+                    users: base.users,
+                    channels: base.channels,
+                    topics: base.topics,
+                    messages: base.messages,
+                    unread: [
+                        LiveUnreadBucket(streamID: 5, topic: "macOS", count: 3, mentionCount: 1),
+                        LiveUnreadBucket(streamID: 5, topic: "design", count: 2),
+                        LiveUnreadBucket(userIDs: [9, 22], count: 4),
+                    ]
+                )
+            )
+        )
+        await eventually { model.sidebarSnapshot != nil }
+
+        let sidebar = model.sidebarSnapshot
+        #expect(sidebar?.channels.first?.unreadCount == 5)
+        #expect(sidebar?.channels.first?.topics.first { $0.name == "macOS" }?.unreadCount == 3)
+        #expect(sidebar?.directMessages.first { $0.userID == 22 }?.unreadCount == 4)
+        #expect(sidebar?.quickLinks.first { $0.title == "Mentions" }?.unreadCount == 1)
+    }
+
+    @Test("Nothing is marked read while the app is in the background or from a collection")
+    func doesNotReadWhileAway() async {
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(
+            client: core,
+            credentialStore: MemoryCredentialStore()
+        )
+        model.startObserving()
+        let accountID = "account-1"
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: accountID),
+                credential: StoredAPICredential(accountID: accountID, apiKey: "key"),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.connectionState == .connected }
+
+        let key = ConversationKey.topic(accountID: accountID, streamID: 5, topic: "macOS")
+        model.openConversation(key)
+        let message = LiveMessageSnapshot(
+            messageID: 44,
+            senderID: 22,
+            senderFullName: "Theo Martin",
+            timestamp: Date(timeIntervalSince1970: 1_700_000_000),
+            content: [.paragraph([.text("Hello")])],
+            streamID: 5,
+            topic: "macOS",
+            recipientIDs: []
+        )
+        model.isApplicationActive = { false }
+        core.emit(
+            .conversationOpened(
+                requestID: 3,
+                page: LiveConversationPage(
+                    key: key,
+                    messages: [message],
+                    foundOldest: true,
+                    foundNewest: true
+                )
+            )
+        )
+        await eventually {
+            if case .loaded = model.conversationState { return true }
+            return false
+        }
+        #expect(!core.commands.contains {
+            if case .markRead = $0 { return true }
+            return false
+        })
+
+        // Collections list messages out of context; opening one never reads them.
+        #expect(LiveSessionViewModel.marksMessagesRead(in: key))
+        #expect(!LiveSessionViewModel.marksMessagesRead(in: .mentions(accountID: accountID)))
+        #expect(!LiveSessionViewModel.marksMessagesRead(in: .starred(accountID: accountID)))
+    }
+
     @Test("A loaded conversation is mapped safely and marked read")
     func openConversation() async {
         let core = RecordingCoreClient()
         let credentials = MemoryCredentialStore()
         let model = LiveSessionViewModel(client: core, credentialStore: credentials)
+        model.isApplicationActive = { true }
         model.startObserving()
         let accountID = "account-1"
 

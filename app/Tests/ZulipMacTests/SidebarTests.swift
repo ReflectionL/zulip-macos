@@ -9,7 +9,7 @@ struct SidebarTests {
     @Test("Required navigation destinations are present")
     func requiredQuickLinks() {
         let titles = Set(FixtureSidebar.snapshot.quickLinks.map(\.title))
-        #expect(titles == ["Inbox", "Mentions", "Starred", "Unread", "Drafts"])
+        #expect(titles == ["Mentions", "Starred", "Drafts"])
     }
 
     @Test("Every fixture item preserves the account identity")

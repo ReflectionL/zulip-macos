@@ -9,12 +9,6 @@ enum FixtureSidebar {
         organizationHost: "northstar.zulipchat.com",
         quickLinks: [
             QuickLinkSnapshot(
-                key: .inbox(accountID: accountID),
-                title: "Inbox",
-                systemImage: "tray.full",
-                unreadCount: 12
-            ),
-            QuickLinkSnapshot(
                 key: .mentions(accountID: accountID),
                 title: "Mentions",
                 systemImage: "at",
@@ -24,12 +18,6 @@ enum FixtureSidebar {
                 key: .starred(accountID: accountID),
                 title: "Starred",
                 systemImage: "star"
-            ),
-            QuickLinkSnapshot(
-                key: .unread(accountID: accountID),
-                title: "Unread",
-                systemImage: "circle.fill",
-                unreadCount: 12
             ),
             QuickLinkSnapshot(
                 key: .drafts(accountID: accountID),
@@ -88,5 +76,5 @@ enum FixtureSidebar {
         currentUserInitials: "HH"
     )
 
-    static let defaultSelection = ConversationKey.inbox(accountID: accountID)
+    static let defaultSelection = ConversationKey.channel(accountID: accountID, streamID: 10)
 }

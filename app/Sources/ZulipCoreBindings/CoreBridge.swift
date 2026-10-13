@@ -115,6 +115,33 @@ public struct LiveRecentDirectConversation: Equatable, Sendable {
     }
 }
 
+/// The unread messages of one conversation, counted by the core.
+public struct LiveUnreadBucket: Equatable, Sendable {
+    /// Channel identifier for channel conversations.
+    public let streamID: Int64?
+    /// Topic name for channel conversations.
+    public let topic: String?
+    /// Direct-message participants as reported; the current user may be listed.
+    public let userIDs: [Int64]
+    public let count: Int
+    /// How many of the unread messages mention the current user.
+    public let mentionCount: Int
+
+    public init(
+        streamID: Int64? = nil,
+        topic: String? = nil,
+        userIDs: [Int64] = [],
+        count: Int,
+        mentionCount: Int = 0
+    ) {
+        self.streamID = streamID
+        self.topic = topic
+        self.userIDs = userIDs
+        self.count = count
+        self.mentionCount = mentionCount
+    }
+}
+
 /// Immutable live state emitted after register or a changed event batch.
 public struct LiveSnapshot: Equatable, Sendable {
     public let revision: UInt64
@@ -127,6 +154,8 @@ public struct LiveSnapshot: Equatable, Sendable {
     public let realmIconURL: String?
     /// Server-side recent one-to-one and group conversations, newest first.
     public let recentDirectConversations: [LiveRecentDirectConversation]
+    /// Unread messages counted per conversation.
+    public let unread: [LiveUnreadBucket]
 
     public init(
         revision: UInt64,
@@ -136,7 +165,8 @@ public struct LiveSnapshot: Equatable, Sendable {
         topics: [LiveTopicSnapshot] = [],
         messages: [LiveMessageSnapshot],
         realmIconURL: String? = nil,
-        recentDirectConversations: [LiveRecentDirectConversation] = []
+        recentDirectConversations: [LiveRecentDirectConversation] = [],
+        unread: [LiveUnreadBucket] = []
     ) {
         self.revision = revision
         self.lastEventID = lastEventID
@@ -146,6 +176,7 @@ public struct LiveSnapshot: Equatable, Sendable {
         self.messages = messages
         self.realmIconURL = realmIconURL
         self.recentDirectConversations = recentDirectConversations
+        self.unread = unread
     }
 }
 
@@ -997,6 +1028,15 @@ private extension LiveSnapshot {
         realmIconURL = snapshot.realmIconUrl
         recentDirectConversations = snapshot.recentDirectConversations.map {
             LiveRecentDirectConversation(userIDs: $0.userIds, maxMessageID: $0.maxMessageId)
+        }
+        unread = snapshot.unread.map {
+            LiveUnreadBucket(
+                streamID: $0.streamId,
+                topic: $0.topic,
+                userIDs: $0.userIds,
+                count: Int($0.count),
+                mentionCount: Int($0.mentionCount)
+            )
         }
     }
 }

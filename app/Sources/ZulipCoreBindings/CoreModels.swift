@@ -61,13 +61,15 @@ public struct TopicSnapshot: Identifiable, Equatable, Sendable {
     public let streamID: Int64
     public let name: String
     public let maxMessageID: Int64
+    public let unreadCount: Int
 
     public var id: ID { ID(streamID: streamID, name: name) }
 
-    public init(streamID: Int64, name: String, maxMessageID: Int64) {
+    public init(streamID: Int64, name: String, maxMessageID: Int64, unreadCount: Int = 0) {
         self.streamID = streamID
         self.name = name
         self.maxMessageID = maxMessageID
+        self.unreadCount = unreadCount
     }
 }
 

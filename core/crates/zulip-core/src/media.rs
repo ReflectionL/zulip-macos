@@ -33,8 +33,10 @@ const UPLOAD_ROUTE_PREFIX: &str = "/user_uploads/";
 const TEMPORARY_ROUTE_PREFIX: &str = "/user_uploads/temporary/";
 const MAX_UPLOAD_BYTES: usize = 25 * 1_048_576;
 const MAX_DOWNLOAD_BYTES: usize = 32 * 1_048_576;
-const MAX_PUBLIC_IMAGE_BYTES: usize = 2 * 1_048_576;
+const MAX_PUBLIC_IMAGE_BYTES: usize = 16 * 1_048_576;
 const AVATAR_ROUTE_PREFIX: &str = "/user_avatars/";
+/// Where the server proxies images linked from other sites; no credentials needed.
+const EXTERNAL_CONTENT_ROUTE_PREFIX: &str = "/external_content/";
 const MAX_JSON_BYTES: usize = 1_048_576;
 const MAX_FILENAME_BYTES: usize = 1_024;
 static TEMPORARY_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -219,9 +221,10 @@ impl MediaClient {
     /// Resolves a protected Zulip upload and stores it in the account cache.
     ///
     /// Only same-origin `/user_uploads/` message URLs are accepted for
-    /// authenticated downloads. Public avatar and organization-icon images
-    /// (same-origin `/user_avatars/` or any HTTPS host such as Gravatar) are
-    /// fetched without credentials and capped at 2 MiB. The short-lived
+    /// authenticated downloads. Public images (same-origin `/user_avatars/` or
+    /// `/external_content/`, or any HTTPS host such as Gravatar or an image
+    /// linked from another site) are fetched without credentials and capped at
+    /// 16 MiB. The short-lived
     /// download URL is consumed immediately and never persisted.
     ///
     /// # Errors
@@ -344,6 +347,7 @@ impl MediaClient {
         }
         let allowed = if same_origin(&url, self.base_url.as_str()) {
             url.path().starts_with(AVATAR_ROUTE_PREFIX)
+                || url.path().starts_with(EXTERNAL_CONTENT_ROUTE_PREFIX)
         } else {
             url.scheme() == "https"
         };
@@ -838,6 +842,27 @@ mod tests {
                 Err(MediaError::InvalidInput)
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn proxied_external_images_are_fetched_without_credentials() {
+        let (server, requests) = spawn_mock(vec![MockResponse::bytes(
+            StatusCode::OK,
+            "image/jpeg",
+            vec![7; 3 * 1_048_576],
+        )]);
+        let fixture = TempDir::new().expect("fixture directory");
+        let client = media_client(&server, &fixture, "account-a");
+
+        let media = client
+            .load_media("/external_content/ab12/cat")
+            .await
+            .expect("proxied image");
+        assert_eq!(media.byte_count, 3 * 1_048_576);
+
+        let request = requests.recv().expect("image request");
+        assert!(request.starts_with("GET /external_content/ab12/cat HTTP/1.1"));
+        assert!(!request.to_ascii_lowercase().contains("authorization:"));
     }
 
     #[tokio::test]

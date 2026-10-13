@@ -1,5 +1,7 @@
 import AppKit
+import ImageIO
 import SwiftUI
+import UniformTypeIdentifiers
 import ZulipCoreBindings
 
 struct MessageContentView: View {
@@ -370,7 +372,9 @@ private struct NativeImageBlock: View {
                 }
             }
             .aspectRatio(aspectRatio, contentMode: .fit)
-            .frame(maxWidth: 520)
+            // Capping the width at `maximumHeight × ratio` caps the height too: a
+            // frame cannot re-propose a smaller height to an aspect-ratio child.
+            .frame(maxWidth: min(Self.maximumWidth, Self.maximumHeight * aspectRatio))
             .clipShape(
                 RoundedRectangle(
                     cornerRadius: AppTheme.Metrics.panelRadius,
@@ -384,13 +388,18 @@ private struct NativeImageBlock: View {
                 )
                 .stroke(AppTheme.Colors.subtleStroke, lineWidth: 1)
             }
+            .contentShape(Rectangle())
+            .onTapGesture(perform: openFullSize)
+            .help(nativeImage == nil ? "" : "Open full size")
 
-            Text(alt)
-                .font(AppTheme.Typography.metadata)
-                .foregroundStyle(AppTheme.Colors.secondaryText)
+            if showsCaption {
+                Text(alt)
+                    .font(AppTheme.Typography.metadata)
+                    .foregroundStyle(AppTheme.Colors.secondaryText)
+            }
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Image, \(alt)")
+        .accessibilityLabel(showsCaption ? "Image, \(alt)" : "Image")
         .task(id: localURL) {
             guard !url.hasPrefix("fixture://") else { return }
             guard let localURL,
@@ -408,11 +417,42 @@ private struct NativeImageBlock: View {
         }
     }
 
+    /// Images are shown no larger than this; clicking one opens it full size.
+    private static let maximumWidth: CGFloat = 520
+    private static let maximumHeight: CGFloat = 420
+
+    /// The picture's own shape once it is loaded, else the server's dimensions,
+    /// else a placeholder shape. Images linked from other sites carry no
+    /// dimensions, and a guessed shape would letterbox them.
     private var aspectRatio: CGFloat {
+        if let size = nativeImage?.size, size.width > 0, size.height > 0 {
+            return size.width / size.height
+        }
         guard let width, let height, height > 0 else {
             return 16 / 9
         }
         return CGFloat(width) / CGFloat(height)
+    }
+
+    /// A file name is worth showing under the picture; the generic "Image" is not.
+    private var showsCaption: Bool {
+        let trimmed = alt.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !trimmed.isEmpty && trimmed != "Image"
+    }
+
+    private func openFullSize() {
+        guard nativeImage != nil,
+              let localURL,
+              let fileURL = URL(string: localURL),
+              fileURL.isFileURL
+        else {
+            return
+        }
+        Task { @MainActor in
+            if let copy = await NativeImageDecoder.exportedCopy(of: fileURL) {
+                NSWorkspace.shared.open(copy)
+            }
+        }
     }
 }
 
@@ -421,6 +461,37 @@ struct SendableNativeImage: @unchecked Sendable {
 }
 
 enum NativeImageDecoder {
+    /// A copy of a cached picture under a name that ends in the right extension,
+    /// so the system can open it in the default viewer. Cache files carry none.
+    nonisolated static func exportedCopy(of fileURL: URL) async -> URL? {
+        await Task.detached(priority: .utility) { () -> URL? in
+            guard fileURL.isFileURL,
+                  let source = CGImageSourceCreateWithURL(fileURL as CFURL, nil),
+                  let identifier = CGImageSourceGetType(source),
+                  let type = UTType(identifier as String)
+            else {
+                return nil
+            }
+            let directory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("ZulipMacImages", isDirectory: true)
+            let target = directory
+                .appendingPathComponent(fileURL.deletingPathExtension().lastPathComponent)
+                .appendingPathExtension(type.preferredFilenameExtension ?? "img")
+            do {
+                try FileManager.default.createDirectory(
+                    at: directory,
+                    withIntermediateDirectories: true
+                )
+                if !FileManager.default.fileExists(atPath: target.path) {
+                    try FileManager.default.copyItem(at: fileURL, to: target)
+                }
+                return target
+            } catch {
+                return nil
+            }
+        }.value
+    }
+
     nonisolated static func load(_ fileURL: URL) async -> SendableNativeImage {
         await Task.detached(priority: .utility) {
             guard fileURL.isFileURL else {

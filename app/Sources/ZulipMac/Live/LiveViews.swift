@@ -2,7 +2,7 @@ import SwiftUI
 import ZulipCoreBindings
 
 struct AppRootView: View {
-    @State private var session = LiveSessionViewModel(notifier: SystemMessageNotifier())
+    let session: LiveSessionViewModel
     @State private var isLoginPresented = false
 
     var body: some View {
@@ -293,7 +293,7 @@ private struct LiveWindowView: View {
             .frame(width: 0, height: 0)
             .opacity(0)
 
-            ForEach(0..<4, id: \.self) { index in
+            ForEach(0..<2, id: \.self) { index in
                 Button("Go to destination \(index + 1)") {
                     navigation.selectQuickLink(index)
                 }

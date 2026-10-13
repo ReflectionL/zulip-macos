@@ -126,36 +126,87 @@ struct NotificationTests {
         core.emit(
             .snapshotUpdated(
                 accountID: identity.accountID,
-                snapshot: snapshot([message(id: 2, direct: true, text: "Ping")])
+                snapshot: snapshot(
+                    [message(id: 2, direct: true, text: "Ping")],
+                    unread: [LiveUnreadBucket(userIDs: [9, 22], count: 1)]
+                )
             )
         )
         await eventually { !notifier.posted.isEmpty }
         #expect(notifier.posted.first?.body == "Ping")
+        // The Dock badge counts unread messages, not notifications.
         #expect(notifier.badge == 1)
 
         let route = notifier.posted[0].route
         notifier.onActivate?(route)
         #expect(model.requestedTopicNavigation == route.key)
 
-        notifier.onApplicationActivated?()
+        core.emit(
+            .snapshotUpdated(
+                accountID: identity.accountID,
+                snapshot: snapshot(
+                    [
+                        message(id: 2, direct: true, text: "Ping"),
+                        message(id: 3, direct: true, text: "Again"),
+                    ],
+                    unread: [LiveUnreadBucket(userIDs: [9, 22], count: 2)]
+                )
+            )
+        )
+        await eventually { notifier.posted.count == 2 }
+        #expect(notifier.badge == 2)
+
+        // Reading everything elsewhere clears the badge.
         core.emit(
             .snapshotUpdated(
                 accountID: identity.accountID,
                 snapshot: snapshot([
-                    message(id: 2, direct: true, text: "Ping"),
-                    message(id: 3, direct: true, text: "Again"),
+                    message(id: 2, direct: true, flags: ["read"], text: "Ping"),
+                    message(id: 3, direct: true, flags: ["read"], text: "Again"),
                 ])
             )
         )
-        await eventually { notifier.posted.count == 2 }
-        #expect(notifier.badge == 1)
+        await eventually { notifier.badge == 0 }
+    }
+
+    @Test("Muted channels do not count toward the badge, mentions in others do")
+    func badgeCountsDirectMessagesAndMentions() {
+        let summary = UnreadSummary(
+            buckets: [
+                LiveUnreadBucket(userIDs: [22], count: 2),
+                LiveUnreadBucket(userIDs: [9, 22, 23], count: 1),
+                LiveUnreadBucket(streamID: 5, topic: "macOS", count: 10, mentionCount: 2),
+                LiveUnreadBucket(streamID: 6, topic: "noise", count: 7, mentionCount: 1),
+            ],
+            selfUserID: 9,
+            mutedChannels: [6]
+        )
+
+        #expect(summary.badge == 2 + 1 + 2)
+        #expect(summary.mentions == 3)
+        #expect(summary.unreadCount(streamID: 5) == 10)
+        #expect(summary.unreadCount(streamID: 6) == 0)
+        #expect(summary.unreadCount(streamID: 5, topic: "macOS") == 10)
+        #expect(summary.unreadCount(directMessageWith: 22) == 2)
+        #expect(summary.unreadCount(directMessageWith: 23) == 0, "group chats have no row")
+    }
+
+    @Test("Notes to yourself count against your own row")
+    func selfConversationUnread() {
+        let summary = UnreadSummary(
+            buckets: [LiveUnreadBucket(userIDs: [], count: 1), LiveUnreadBucket(userIDs: [9], count: 1)],
+            selfUserID: 9,
+            mutedChannels: []
+        )
+        #expect(summary.unreadCount(directMessageWith: 9) == 2)
     }
 
     // MARK: - Helpers
 
     private func snapshot(
         _ messages: [LiveMessageSnapshot],
-        mutedChannel: Bool = false
+        mutedChannel: Bool = false,
+        unread: [LiveUnreadBucket] = []
     ) -> LiveSnapshot {
         LiveSnapshot(
             revision: 1,
@@ -169,7 +220,8 @@ struct NotificationTests {
                     isMuted: mutedChannel
                 ),
             ],
-            messages: messages
+            messages: messages,
+            unread: unread
         )
     }
 
@@ -211,6 +263,7 @@ struct NotificationTests {
 private final class RecordingNotifier: MessageNotifier {
     var onActivate: ((NotificationRoute) -> Void)?
     var onApplicationActivated: (() -> Void)?
+    var onNotificationsDisabled: (() -> Void)?
     private(set) var posted: [MessageNotification] = []
     private(set) var badge = 0
     private(set) var didRequestAuthorization = false

@@ -119,6 +119,37 @@ pub struct RecentDirectConversation {
     pub max_message_id: i64,
 }
 
+/// One unread message and the conversation it belongs to.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UnreadMessage {
+    /// Zulip message identifier.
+    pub id: i64,
+    /// Channel identifier for channel messages.
+    pub stream_id: Option<i64>,
+    /// Topic name for channel messages.
+    pub topic: Option<String>,
+    /// Direct-message participants as the source reported them, sorted. The
+    /// current user may or may not be listed; consumers normalize.
+    pub user_ids: Vec<i64>,
+    /// Whether the message mentions the current user (directly or by wildcard).
+    pub mentioned: bool,
+}
+
+/// The unread messages of one conversation, counted.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UnreadBucket {
+    /// Channel identifier for channel conversations.
+    pub stream_id: Option<i64>,
+    /// Topic name for channel conversations.
+    pub topic: Option<String>,
+    /// Direct-message participants as reported, sorted.
+    pub user_ids: Vec<i64>,
+    /// Number of unread messages.
+    pub count: u32,
+    /// How many of them mention the current user.
+    pub mention_count: u32,
+}
+
 /// Immutable state seeded by the atomic `register` response.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct BootstrapState {
@@ -132,6 +163,8 @@ pub struct BootstrapState {
     pub realm_icon_url: Option<String>,
     /// Direct-message conversations ordered by the server, newest first.
     pub recent_direct_conversations: Vec<RecentDirectConversation>,
+    /// Messages the account has not read yet, from the server's unread index.
+    pub unread: Vec<UnreadMessage>,
 }
 
 /// Result of registering a live event queue.
@@ -150,6 +183,8 @@ pub struct RegisteredQueue {
 pub struct MessageUpdate {
     /// Message being updated.
     pub message_id: i64,
+    /// Every message a topic or channel move applies to (includes `message_id`).
+    pub message_ids: Vec<i64>,
     /// Replacement rendered content, when changed.
     pub content_html: Option<String>,
     /// Replacement topic, when changed.
@@ -232,6 +267,11 @@ pub enum SyncEvent {
         flag: String,
         /// Affected message identifiers.
         message_ids: Vec<i64>,
+        /// What the server says about messages marked unread, so they can be
+        /// counted even when this client never loaded them.
+        details: Vec<UnreadMessage>,
+        /// The server's "mark everything as read": `message_ids` is then empty.
+        all: bool,
     },
     /// An emoji reaction was added to or removed from a message.
     ReactionChanged {
@@ -335,6 +375,8 @@ pub struct SyncSnapshot {
     pub realm_icon_url: Option<String>,
     /// Direct-message conversations known at registration, newest first.
     pub recent_direct_conversations: Vec<RecentDirectConversation>,
+    /// Unread messages grouped by conversation, ordered by conversation.
+    pub unread: Vec<UnreadBucket>,
 }
 
 /// Reduction statistics and at most one snapshot for a complete poll batch.
@@ -833,6 +875,7 @@ pub struct SyncReducer {
     messages: BTreeMap<i64, MessageSummary>,
     realm_icon_url: Option<String>,
     recent_direct_conversations: Vec<RecentDirectConversation>,
+    unread: BTreeMap<i64, UnreadMessage>,
 }
 
 impl SyncReducer {
@@ -863,6 +906,11 @@ impl SyncReducer {
                 .collect(),
             realm_icon_url: bootstrap.realm_icon_url,
             recent_direct_conversations: bootstrap.recent_direct_conversations,
+            unread: bootstrap
+                .unread
+                .into_iter()
+                .map(|message| (message.id, message))
+                .collect(),
         }
     }
 
@@ -877,7 +925,38 @@ impl SyncReducer {
             messages: self.messages.values().cloned().collect(),
             realm_icon_url: self.realm_icon_url.clone(),
             recent_direct_conversations: self.recent_direct_conversations.clone(),
+            unread: self.unread_buckets(),
         }
+    }
+
+    /// Counts the unread messages per conversation.
+    fn unread_buckets(&self) -> Vec<UnreadBucket> {
+        type Key = (Option<i64>, Option<String>, Vec<i64>);
+        let mut buckets: BTreeMap<Key, (u32, u32)> = BTreeMap::new();
+        for message in self.unread.values() {
+            let key = (
+                message.stream_id,
+                message.topic.clone(),
+                message.user_ids.clone(),
+            );
+            let entry = buckets.entry(key).or_default();
+            entry.0 = entry.0.saturating_add(1);
+            if message.mentioned {
+                entry.1 = entry.1.saturating_add(1);
+            }
+        }
+        buckets
+            .into_iter()
+            .map(
+                |((stream_id, topic, user_ids), (count, mention_count))| UnreadBucket {
+                    stream_id,
+                    topic,
+                    user_ids,
+                    count,
+                    mention_count,
+                },
+            )
+            .collect()
     }
 
     /// Returns the current snapshot revision.
@@ -950,6 +1029,133 @@ impl SyncReducer {
         changed
     }
 
+    fn mark_everything_read(&mut self) -> bool {
+        let mut changed = !self.unread.is_empty();
+        self.unread.clear();
+        for message in self.messages.values_mut() {
+            if !message.flags.iter().any(|flag| flag == "read") {
+                message.flags.push("read".to_owned());
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn delete_messages(&mut self, message_ids: &[i64]) -> bool {
+        let mut changed = false;
+        for message_id in message_ids {
+            changed |= self.messages.remove(message_id).is_some();
+            changed |= self.unread.remove(message_id).is_some();
+        }
+        changed
+    }
+
+    fn remove_channels(&mut self, channel_ids: &[i64]) -> bool {
+        let unread_before = self.unread.len();
+        self.unread.retain(|_, message| {
+            message
+                .stream_id
+                .is_none_or(|stream_id| !channel_ids.contains(&stream_id))
+        });
+        let mut changed = self.unread.len() != unread_before;
+        for channel_id in channel_ids {
+            changed |= self.channels.remove(channel_id).is_some();
+        }
+        changed
+    }
+
+    /// Records or clears the unread entry for a freshly delivered message.
+    fn track_unread(&mut self, message: &MessageSummary) -> bool {
+        if message.flags.iter().any(|flag| flag == "read") {
+            return self.unread.remove(&message.id).is_some();
+        }
+        let entry = unread_message(message);
+        self.unread.insert(message.id, entry.clone()) != Some(entry)
+    }
+
+    /// Applies a `read` flag change to the unread index. Marking unread uses the
+    /// loaded message when there is one and the server's details otherwise.
+    fn apply_read_change(
+        &mut self,
+        added: bool,
+        message_ids: &[i64],
+        details: &[UnreadMessage],
+    ) -> bool {
+        let mut changed = false;
+        if added {
+            for message_id in message_ids {
+                changed |= self.unread.remove(message_id).is_some();
+            }
+            return changed;
+        }
+        for message_id in message_ids {
+            let entry = self.messages.get(message_id).map_or_else(
+                || {
+                    details
+                        .iter()
+                        .find(|detail| detail.id == *message_id)
+                        .cloned()
+                },
+                |message| Some(unread_message(message)),
+            );
+            if let Some(entry) = entry {
+                changed |= self.unread.insert(*message_id, entry.clone()) != Some(entry);
+            }
+        }
+        changed
+    }
+
+    /// Applies an edit, topic rename or channel move to messages and the unread
+    /// index. A move can span many messages; a content edit names exactly one.
+    fn apply_message_update(&mut self, update: &MessageUpdate) -> bool {
+        let mut changed = false;
+        if let Some(content_html) = &update.content_html
+            && let Some(message) = self.messages.get_mut(&update.message_id)
+            && message.content_html != *content_html
+        {
+            message.content_html.clone_from(content_html);
+            changed = true;
+        }
+        if update.topic.is_none() && update.stream_id.is_none() {
+            return changed;
+        }
+        let mut targets = update.message_ids.clone();
+        if !targets.contains(&update.message_id) {
+            targets.push(update.message_id);
+        }
+        for message_id in targets {
+            if let Some(message) = self.messages.get_mut(&message_id) {
+                if let Some(topic) = &update.topic
+                    && message.topic.as_ref() != Some(topic)
+                {
+                    message.topic = Some(topic.clone());
+                    changed = true;
+                }
+                if let Some(stream_id) = update.stream_id
+                    && message.stream_id != Some(stream_id)
+                {
+                    message.stream_id = Some(stream_id);
+                    changed = true;
+                }
+            }
+            if let Some(entry) = self.unread.get_mut(&message_id) {
+                if let Some(topic) = &update.topic
+                    && entry.topic.as_ref() != Some(topic)
+                {
+                    entry.topic = Some(topic.clone());
+                    changed = true;
+                }
+                if let Some(stream_id) = update.stream_id
+                    && entry.stream_id != Some(stream_id)
+                {
+                    entry.stream_id = Some(stream_id);
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
     fn apply_reaction_change(
         &mut self,
         added: bool,
@@ -979,34 +1185,29 @@ impl SyncReducer {
             }
             SyncEvent::ServerRestart { .. } | SyncEvent::Unknown { .. } => false,
             SyncEvent::MessageAdded { message, .. } => {
+                let unread_changed = self.track_unread(&message);
                 let previous = self.messages.insert(message.id, message.clone());
-                previous.as_ref() != Some(&message)
+                unread_changed || previous.as_ref() != Some(&message)
             }
-            SyncEvent::MessageUpdated { update, .. } => {
-                let Some(message) = self.messages.get_mut(&update.message_id) else {
-                    return false;
-                };
-                let previous = message.clone();
-                if let Some(content_html) = update.content_html {
-                    message.content_html = content_html;
-                }
-                if let Some(topic) = update.topic {
-                    message.topic = Some(topic);
-                }
-                if let Some(stream_id) = update.stream_id {
-                    message.stream_id = Some(stream_id);
-                }
-                *message != previous
-            }
-            SyncEvent::MessagesDeleted { message_ids, .. } => message_ids
-                .into_iter()
-                .any(|message_id| self.messages.remove(&message_id).is_some()),
+            SyncEvent::MessageUpdated { update, .. } => self.apply_message_update(&update),
+            SyncEvent::MessagesDeleted { message_ids, .. } => self.delete_messages(&message_ids),
             SyncEvent::MessageFlagsUpdated {
                 added,
                 flag,
                 message_ids,
+                details,
+                all,
                 ..
-            } => self.apply_flag_change(added, &flag, &message_ids),
+            } => {
+                let mut changed = self.apply_flag_change(added, &flag, &message_ids);
+                if flag == "read" {
+                    changed |= self.apply_read_change(added, &message_ids, &details);
+                    if added && all {
+                        changed |= self.mark_everything_read();
+                    }
+                }
+                changed
+            }
             SyncEvent::ReactionChanged {
                 added,
                 message_id,
@@ -1037,9 +1238,7 @@ impl SyncReducer {
                 }
                 *channel != previous
             }
-            SyncEvent::ChannelsRemoved { channel_ids, .. } => channel_ids
-                .into_iter()
-                .any(|channel_id| self.channels.remove(&channel_id).is_some()),
+            SyncEvent::ChannelsRemoved { channel_ids, .. } => self.remove_channels(&channel_ids),
             SyncEvent::UserUpserted { user, .. } => {
                 let previous = self.users.insert(user.id, user.clone());
                 previous.as_ref() != Some(&user)
@@ -1071,6 +1270,187 @@ impl SyncReducer {
     }
 }
 
+/// The unread-index entry that describes `message`.
+fn unread_message(message: &MessageSummary) -> UnreadMessage {
+    let is_channel = message.stream_id.is_some();
+    let mut user_ids = if is_channel {
+        Vec::new()
+    } else {
+        message.recipient_ids.clone()
+    };
+    user_ids.sort_unstable();
+    user_ids.dedup();
+    UnreadMessage {
+        id: message.id,
+        stream_id: message.stream_id,
+        topic: if is_channel {
+            message.topic.clone()
+        } else {
+            None
+        },
+        user_ids,
+        mentioned: message
+            .flags
+            .iter()
+            .any(|flag| flag == "mentioned" || flag == "wildcard_mentioned"),
+    }
+}
+
+/// Reads the server's `unread_msgs` index. Unrecognized shapes are skipped so
+/// they can never make registration fail.
+fn parse_unread_messages(value: Option<&Value>) -> Vec<UnreadMessage> {
+    let Some(index) = value.and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let mentioned: Vec<i64> = index
+        .get("mentions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_i64)
+        .collect();
+    let mut unread = BTreeMap::new();
+    let mut add = |ids: &Value, stream_id: Option<i64>, topic: Option<String>, user_ids: &[i64]| {
+        let mut user_ids = user_ids.to_vec();
+        user_ids.sort_unstable();
+        user_ids.dedup();
+        for id in ids
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_i64)
+        {
+            unread.insert(
+                id,
+                UnreadMessage {
+                    id,
+                    stream_id,
+                    topic: topic.clone(),
+                    user_ids: user_ids.clone(),
+                    mentioned: mentioned.contains(&id),
+                },
+            );
+        }
+    };
+    for entry in index
+        .get("streams")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(stream_id) = entry.get("stream_id").and_then(Value::as_i64) else {
+            continue;
+        };
+        let topic = entry
+            .get("topic")
+            .or_else(|| entry.get("subject"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        add(
+            entry.get("unread_message_ids").unwrap_or(&Value::Null),
+            Some(stream_id),
+            Some(topic),
+            &[],
+        );
+    }
+    for entry in index
+        .get("pms")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(other) = entry
+            .get("other_user_id")
+            .or_else(|| entry.get("sender_id"))
+            .and_then(Value::as_i64)
+        else {
+            continue;
+        };
+        add(
+            entry.get("unread_message_ids").unwrap_or(&Value::Null),
+            None,
+            None,
+            &[other],
+        );
+    }
+    for entry in index
+        .get("huddles")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let user_ids: Vec<i64> = entry
+            .get("user_ids_string")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .split(',')
+            .filter_map(|id| id.trim().parse().ok())
+            .collect();
+        if user_ids.is_empty() {
+            continue;
+        }
+        add(
+            entry.get("unread_message_ids").unwrap_or(&Value::Null),
+            None,
+            None,
+            &user_ids,
+        );
+    }
+    unread.into_values().collect()
+}
+
+/// Reads the `message_details` that accompany a "marked unread" flag event.
+fn parse_unread_details(payload: &Map<String, Value>) -> Vec<UnreadMessage> {
+    let Some(details) = payload.get("message_details").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    details
+        .iter()
+        .filter_map(|(id, detail)| {
+            let id = id.parse::<i64>().ok()?;
+            let mentioned = ["mentioned", "wildcard_mentioned"]
+                .iter()
+                .any(|name| detail.get(name).and_then(Value::as_bool) == Some(true));
+            match detail.get("type").and_then(Value::as_str)? {
+                "stream" | "channel" => Some(UnreadMessage {
+                    id,
+                    stream_id: Some(detail.get("stream_id")?.as_i64()?),
+                    topic: Some(
+                        detail
+                            .get("topic")
+                            .or_else(|| detail.get("subject"))
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                    ),
+                    user_ids: Vec::new(),
+                    mentioned,
+                }),
+                "private" => {
+                    let mut user_ids: Vec<i64> = detail
+                        .get("user_ids")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_i64)
+                        .collect();
+                    user_ids.sort_unstable();
+                    user_ids.dedup();
+                    Some(UnreadMessage {
+                        id,
+                        stream_id: None,
+                        topic: None,
+                        user_ids,
+                        mentioned,
+                    })
+                }
+                _ => None,
+            }
+        })
+        .collect()
+}
+
 #[derive(Debug, Deserialize)]
 struct RegisterDocument {
     result: Option<String>,
@@ -1094,6 +1474,8 @@ struct RegisterDocument {
     realm_icon_url: Option<String>,
     #[serde(default)]
     recent_private_conversations: Vec<RecentConversationDocument>,
+    #[serde(default)]
+    unread_msgs: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1148,6 +1530,7 @@ impl RegisterDocument {
             .into_iter()
             .filter_map(|message| message.normalize().ok())
             .collect();
+        let unread = parse_unread_messages(self.unread_msgs.as_ref());
 
         Ok(RegisteredQueue {
             queue: EventQueue {
@@ -1174,6 +1557,7 @@ impl RegisterDocument {
                     conversations.sort_by_key(|item| std::cmp::Reverse(item.max_message_id));
                     conversations
                 },
+                unread,
             },
             zulip_feature_level: self.zulip_feature_level,
         })
@@ -1206,8 +1590,15 @@ impl EventDocument {
             "restart" => Ok(SyncEvent::ServerRestart { event_id: self.id }),
             "message" => {
                 let message = value_field(&self.payload, "message")?;
-                let message: MessageDocument = serde_json::from_value(message.clone())
+                let mut message: MessageDocument = serde_json::from_value(message.clone())
                     .map_err(|_| SyncError::InvalidResponse("invalid message event"))?;
+                // The personal flags (`read`, `mentioned`, ...) travel beside the
+                // message in the event, not inside it.
+                for flag in string_array_field(&self.payload, "flags") {
+                    if !message.flags.contains(&flag) {
+                        message.flags.push(flag);
+                    }
+                }
                 Ok(SyncEvent::MessageAdded {
                     event_id: self.id,
                     message: message.normalize()?,
@@ -1217,12 +1608,15 @@ impl EventDocument {
                 event_id: self.id,
                 update: MessageUpdate {
                     message_id: integer_field(&self.payload, "message_id")?,
+                    message_ids: integer_array_field(&self.payload, "message_ids"),
                     content_html: string_field(&self.payload, "rendered_content")
                         .or_else(|| string_field(&self.payload, "content")),
                     topic: string_field(&self.payload, "topic")
                         .or_else(|| string_field(&self.payload, "subject")),
-                    stream_id: optional_integer_field(&self.payload, "stream_id")
-                        .or_else(|| optional_integer_field(&self.payload, "new_stream_id")),
+                    // `stream_id` names the channel before a move; `new_stream_id`
+                    // is only present when the message moved.
+                    stream_id: optional_integer_field(&self.payload, "new_stream_id")
+                        .or_else(|| optional_integer_field(&self.payload, "stream_id")),
                 },
             }),
             "delete_message" => {
@@ -1250,6 +1644,8 @@ impl EventDocument {
                     added: string_field(&self.payload, "op").as_deref() != Some("remove"),
                     flag,
                     message_ids: integer_array_field(&self.payload, "messages"),
+                    details: parse_unread_details(&self.payload),
+                    all: self.payload.get("all").and_then(Value::as_bool) == Some(true),
                 })
             }
             "reaction" => {
@@ -1591,6 +1987,16 @@ fn integer_array_field(payload: &Map<String, Value>, name: &str) -> Vec<i64> {
         .collect()
 }
 
+fn string_array_field(payload: &Map<String, Value>, name: &str) -> Vec<String> {
+    payload
+        .get(name)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value.as_str().map(str::to_owned))
+        .collect()
+}
+
 fn string_field(payload: &Map<String, Value>, name: &str) -> Option<String> {
     payload.get(name).and_then(Value::as_str).map(str::to_owned)
 }
@@ -1659,7 +2065,8 @@ mod tests {
     use super::{
         BootstrapState, ChannelSummary, EventQueueClient, MessageSummary, MessageUpdate,
         RecoveryPolicy, ResyncReason, RetryBackoff, RetryOperation, SyncCycle, SyncError,
-        SyncEvent, SyncReducer, SyncSession, UserSummary,
+        SyncEvent, SyncReducer, SyncSession, UnreadBucket, UserSummary, Value,
+        parse_unread_messages,
     };
     use crate::auth::SecretString;
 
@@ -1807,6 +2214,7 @@ mod tests {
                 messages: vec![],
                 realm_icon_url: None,
                 recent_direct_conversations: Vec::new(),
+                unread: Vec::new(),
             },
         );
         let message = fixture_message(100, "<p>first</p>");
@@ -1816,6 +2224,7 @@ mod tests {
                 event_id: 15,
                 update: MessageUpdate {
                     message_id: 100,
+                    message_ids: Vec::new(),
                     content_html: Some("<p>edited</p>".to_owned()),
                     topic: None,
                     stream_id: None,
@@ -1866,6 +2275,7 @@ mod tests {
                 messages: vec![fixture_message(100, "<p>old</p>")],
                 realm_icon_url: None,
                 recent_direct_conversations: Vec::new(),
+                unread: Vec::new(),
             },
         );
 
@@ -2103,6 +2513,186 @@ mod tests {
         let message = &outcome.snapshot.expect("changed").messages[0];
         assert!(message.flags.is_empty());
         assert!(message.reactions.is_empty());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn unread_index_events_and_message_flags_drive_unread_counts() {
+        let register = r#"{
+            "result":"success",
+            "queue_id":"queue-fixture",
+            "last_event_id":10,
+            "realm_users":[],
+            "subscriptions":[{"stream_id":5,"name":"general"}],
+            "unread_msgs":{
+                "count":5,
+                "pms":[{"other_user_id":7,"sender_id":7,"unread_message_ids":[21,22]}],
+                "streams":[{"stream_id":5,"topic":"launch","unread_message_ids":[31,32]}],
+                "huddles":[{"user_ids_string":"3,7,9","unread_message_ids":[41]}],
+                "mentions":[32]
+            }
+        }"#
+        .to_owned();
+        let events = r#"{
+            "result":"success",
+            "queue_id":"queue-fixture",
+            "events":[
+                {"id":11,"type":"message","flags":["mentioned"],"message":{
+                    "id":50,"sender_id":2,"sender_full_name":"Theo","timestamp":1,
+                    "content":"<p>hi</p>","type":"stream","stream_id":5,"subject":"launch",
+                    "display_recipient":"general"}},
+                {"id":12,"type":"message","flags":["read"],"message":{
+                    "id":51,"sender_id":1,"sender_full_name":"Me","timestamp":2,
+                    "content":"<p>mine</p>","type":"stream","stream_id":5,"subject":"launch",
+                    "display_recipient":"general"}},
+                {"id":13,"type":"message","flags":[],"message":{
+                    "id":52,"sender_id":7,"sender_full_name":"Maya","timestamp":3,
+                    "content":"<p>dm</p>","type":"private",
+                    "display_recipient":[{"id":1},{"id":7}]}},
+                {"id":14,"type":"update_message_flags","op":"add","flag":"read","messages":[31,21]}
+            ]
+        }"#
+        .to_owned();
+        let later = r#"{
+            "result":"success",
+            "queue_id":"queue-fixture",
+            "events":[
+                {"id":15,"type":"update_message_flags","op":"remove","flag":"read","messages":[60],
+                 "message_details":{"60":{"type":"stream","stream_id":5,"topic":"ops","mentioned":true}}},
+                {"id":16,"type":"delete_message","message_id":22},
+                {"id":17,"type":"update_message","message_id":50,"message_ids":[32,50],
+                 "stream_id":5,"subject":"launch-2","orig_subject":"launch"}
+            ]
+        }"#
+        .to_owned();
+        let everything = r#"{
+            "result":"success",
+            "queue_id":"queue-fixture",
+            "events":[
+                {"id":18,"type":"update_message_flags","op":"add","flag":"read",
+                 "all":true,"messages":[]}
+            ]
+        }"#
+        .to_owned();
+        let (server, _) = spawn_mock(vec![
+            (StatusCode::OK, register),
+            (StatusCode::OK, events),
+            (StatusCode::OK, later),
+            (StatusCode::OK, everything),
+        ]);
+        let client = EventQueueClient::new(&server, "maya@example.com", SecretString::new(API_KEY))
+            .expect("sync client");
+        let (mut session, initial) = SyncSession::start(client, RecoveryPolicy::default(), 3)
+            .await
+            .expect("initial registration");
+
+        let bucket =
+            |stream_id, topic: &str, user_ids: &[i64], count, mention_count| UnreadBucket {
+                stream_id,
+                topic: (stream_id.is_some()).then(|| topic.to_owned()),
+                user_ids: user_ids.to_vec(),
+                count,
+                mention_count,
+            };
+        assert_eq!(
+            initial.unread,
+            vec![
+                bucket(None, "", &[3, 7, 9], 1, 0),
+                bucket(None, "", &[7], 2, 0),
+                bucket(Some(5), "launch", &[], 2, 1),
+            ]
+        );
+
+        let SyncCycle::Events(outcome) = session.advance().await else {
+            panic!("events expected");
+        };
+        let snapshot = outcome.snapshot.expect("changed");
+        let mentioned = snapshot
+            .messages
+            .iter()
+            .find(|message| message.id == 50)
+            .expect("message 50");
+        assert_eq!(mentioned.flags, ["mentioned"], "event-level flags are kept");
+        assert_eq!(
+            snapshot.unread,
+            vec![
+                bucket(None, "", &[1, 7], 1, 0),
+                bucket(None, "", &[3, 7, 9], 1, 0),
+                bucket(None, "", &[7], 1, 0),
+                bucket(Some(5), "launch", &[], 2, 2),
+            ],
+            "own read message is not counted; read flags clear the index"
+        );
+
+        let SyncCycle::Events(outcome) = session.advance().await else {
+            panic!("events expected");
+        };
+        assert_eq!(
+            outcome.snapshot.expect("changed").unread,
+            vec![
+                bucket(None, "", &[1, 7], 1, 0),
+                bucket(None, "", &[3, 7, 9], 1, 0),
+                bucket(Some(5), "launch-2", &[], 2, 2),
+                bucket(Some(5), "ops", &[], 1, 1),
+            ],
+            "details seed unloaded messages; deletes and topic moves reach the index"
+        );
+
+        let SyncCycle::Events(outcome) = session.advance().await else {
+            panic!("events expected");
+        };
+        let snapshot = outcome.snapshot.expect("changed");
+        assert!(
+            snapshot.unread.is_empty(),
+            "mark all as read clears the index"
+        );
+        assert!(
+            snapshot
+                .messages
+                .iter()
+                .all(|message| message.flags.iter().any(|flag| flag == "read"))
+        );
+    }
+
+    #[test]
+    fn malformed_unread_index_never_blocks_registration() {
+        let value = serde_json::json!({
+            "streams": [{"topic": "no stream id"}, {"stream_id": 1, "unread_message_ids": "x"}],
+            "pms": [{"unread_message_ids": [1]}],
+            "huddles": [{"user_ids_string": "", "unread_message_ids": [2]}],
+            "mentions": "nope"
+        });
+        assert!(parse_unread_messages(Some(&value)).is_empty());
+        assert!(parse_unread_messages(Some(&Value::Null)).is_empty());
+        assert!(parse_unread_messages(None).is_empty());
+    }
+
+    #[test]
+    fn channel_moves_prefer_the_new_channel_and_apply_to_every_message() {
+        let mut reducer = SyncReducer::new(
+            0,
+            BootstrapState {
+                messages: vec![
+                    fixture_message(1, "<p>a</p>"),
+                    fixture_message(2, "<p>b</p>"),
+                ],
+                ..BootstrapState::default()
+            },
+        );
+        let outcome = reducer.apply_batch(vec![SyncEvent::MessageUpdated {
+            event_id: 1,
+            update: MessageUpdate {
+                message_id: 1,
+                message_ids: vec![1, 2],
+                content_html: None,
+                topic: Some("moved".to_owned()),
+                stream_id: Some(9),
+            },
+        }]);
+        let snapshot = outcome.snapshot.expect("changed");
+        assert!(snapshot.messages.iter().all(|message| {
+            message.stream_id == Some(9) && message.topic.as_deref() == Some("moved")
+        }));
     }
 
     #[tokio::test]
