@@ -1,8 +1,11 @@
 import AppKit
 import ImageIO
+import os
 import SwiftUI
 import UniformTypeIdentifiers
 import ZulipCoreBindings
+
+private let imageLog = Logger(subsystem: "io.github.huahai.ZulipMac", category: "images")
 
 struct MessageContentView: View {
     let blocks: [ContentBlock]
@@ -362,9 +365,15 @@ private struct NativeImageBlock: View {
                         .foregroundStyle(AppTheme.Colors.destructive)
                         .padding()
                     } else if decodeFailed {
-                        Label("Image could not be decoded", systemImage: "photo.badge.exclamationmark")
-                            .font(AppTheme.Typography.metadata)
-                            .foregroundStyle(AppTheme.Colors.secondaryText)
+                        VStack(spacing: AppTheme.Spacing.extraSmall) {
+                            Label("Image could not be shown", systemImage: "photo.badge.exclamationmark")
+                            Text("The file is damaged or its format is not supported.")
+                                .foregroundStyle(AppTheme.Colors.tertiaryText)
+                        }
+                        .font(AppTheme.Typography.metadata)
+                        .foregroundStyle(AppTheme.Colors.secondaryText)
+                        .multilineTextAlignment(.center)
+                        .padding()
                     } else {
                         ProgressView()
                             .controlSize(.small)
@@ -497,7 +506,26 @@ enum NativeImageDecoder {
             guard fileURL.isFileURL else {
                 return SendableNativeImage(image: nil)
             }
-            return SendableNativeImage(image: NSImage(contentsOf: fileURL))
+            if let image = NSImage(contentsOf: fileURL),
+               image.size.width > 0, image.size.height > 0
+            {
+                return SendableNativeImage(image: image)
+            }
+            // ImageIO recognises pictures by their bytes, whatever the cache file is called.
+            guard let source = CGImageSourceCreateWithURL(fileURL as CFURL, nil),
+                  let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil)
+            else {
+                let byteCount = (try? fileURL.resourceValues(forKeys: [.fileSizeKey]))?
+                    .fileSize ?? -1
+                imageLog.error("A cached picture could not be decoded (\(byteCount) bytes)")
+                return SendableNativeImage(image: nil)
+            }
+            return SendableNativeImage(
+                image: NSImage(
+                    cgImage: cgImage,
+                    size: NSSize(width: cgImage.width, height: cgImage.height)
+                )
+            )
         }.value
     }
 }

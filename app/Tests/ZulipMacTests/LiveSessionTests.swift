@@ -1738,6 +1738,142 @@ struct LiveSessionTests {
         await eventually { model.topicActionState == .idle }
     }
 
+    @Test("Topics the server no longer reports leave the sidebar")
+    func staleTopicsDisappear() async throws {
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(
+            client: core,
+            credentialStore: MemoryCredentialStore()
+        )
+        model.startObserving()
+        let accountID = "account-1"
+        let base = snapshot
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: accountID),
+                credential: StoredAPICredential(accountID: accountID, apiKey: "key"),
+                snapshot: LiveSnapshot(
+                    revision: 1,
+                    lastEventID: 10,
+                    users: base.users,
+                    channels: base.channels,
+                    topics: [
+                        LiveTopicSnapshot(streamID: 5, name: "macOS", maxMessageID: 40),
+                        LiveTopicSnapshot(streamID: 5, name: "old name", maxMessageID: 30),
+                    ],
+                    messages: []
+                )
+            )
+        )
+        await eventually { model.connectionState == .connected }
+        _ = try #require(model.beginNewTopic(streamID: 5, name: "draft topic"))
+
+        func topicNames() -> Set<String> {
+            Set(model.sidebarSnapshot?.channels.first?.topics.map(\.name) ?? [])
+        }
+        #expect(topicNames() == ["macOS", "old name", "draft topic"])
+
+        // The core re-read the channel after a rename: "old name" is gone.
+        core.emit(
+            .snapshotUpdated(
+                accountID: accountID,
+                snapshot: LiveSnapshot(
+                    revision: 2,
+                    lastEventID: 11,
+                    users: base.users,
+                    channels: base.channels,
+                    topics: [
+                        LiveTopicSnapshot(streamID: 5, name: "macOS", maxMessageID: 40),
+                        LiveTopicSnapshot(streamID: 5, name: "new name", maxMessageID: 41),
+                    ],
+                    messages: []
+                )
+            )
+        )
+        await eventually { topicNames().contains("new name") }
+        #expect(topicNames() == ["macOS", "new name", "draft topic"])
+    }
+
+    @Test("Typing notices show who is typing and expire")
+    func receivesTyping() async throws {
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(
+            client: core,
+            credentialStore: MemoryCredentialStore()
+        )
+        model.startObserving()
+        let accountID = "account-1"
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: accountID),
+                credential: StoredAPICredential(accountID: accountID, apiKey: "key"),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.connectionState == .connected }
+
+        let key = ConversationKey.directMessage(accountID: accountID, recipientIDs: [22])
+        #expect(model.typingDescription(for: key) == nil)
+
+        core.emit(.typingChanged(accountID: accountID, key: key, senderID: 22, isTyping: true))
+        await eventually { model.typingDescription(for: key) == "Theo Martin is typing…" }
+
+        // Your own typing, other accounts, and other conversations never show.
+        core.emit(.typingChanged(accountID: accountID, key: key, senderID: 9, isTyping: true))
+        core.emit(.typingChanged(accountID: "other", key: key, senderID: 23, isTyping: true))
+        core.emit(.typingChanged(accountID: accountID, key: key, senderID: 22, isTyping: false))
+        await eventually { model.typingDescription(for: key) == nil }
+    }
+
+    @Test("Typing is announced once, refreshed, and withdrawn")
+    func sendsTyping() async throws {
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(
+            client: core,
+            credentialStore: MemoryCredentialStore()
+        )
+        model.startObserving()
+        let accountID = "account-1"
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: accountID),
+                credential: StoredAPICredential(accountID: accountID, apiKey: "key"),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.connectionState == .connected }
+
+        func typingCommands() -> [Bool] {
+            core.commands.compactMap { command -> Bool? in
+                guard case let .setTyping(_, _, isTyping) = command else { return nil }
+                return isTyping
+            }
+        }
+        let topic = ConversationKey.topic(accountID: accountID, streamID: 5, topic: "macOS")
+
+        model.composerTyping(true, in: topic)
+        model.composerTyping(true, in: topic)
+        #expect(typingCommands() == [true], "keystrokes within the interval send one notice")
+
+        model.composerTyping(false, in: topic)
+        #expect(typingCommands() == [true, false])
+        model.composerTyping(false, in: topic)
+        #expect(typingCommands() == [true, false], "nothing to withdraw")
+
+        // Collections and your own notes have nobody to tell.
+        model.composerTyping(true, in: .mentions(accountID: accountID))
+        model.composerTyping(true, in: .directMessage(accountID: accountID, recipientIDs: [9]))
+        #expect(typingCommands() == [true, false])
+
+        // Moving to another conversation withdraws the notice.
+        model.composerTyping(true, in: topic)
+        model.openConversation(.directMessage(accountID: accountID, recipientIDs: [22]))
+        #expect(typingCommands() == [true, false, true, false])
+    }
+
     @Test("Server search ignores stale responses and focuses the selected message")
     func messageSearchAndFocus() async throws {
         let core = RecordingCoreClient()

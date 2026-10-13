@@ -39,6 +39,10 @@ struct ConversationSurface: View {
     var retryMedia: ((String) -> Void)?
     var initialDraft = ""
     var draftChanged: ((String) -> Void)?
+    /// Who is typing in this conversation, ready to show above the composer.
+    var typingDescription: String?
+    /// Reports whether the user is typing (true) or stopped (false).
+    var typingChanged: ((Bool) -> Void)?
     var readReceipts: ReadReceiptDisplay?
     /// Asks the core who has read the given message; returns whether to keep asking.
     var pollReadReceipts: ((Int64) -> Bool)?
@@ -89,6 +93,8 @@ struct ConversationSurface: View {
         retryMedia: ((String) -> Void)? = nil,
         initialDraft: String = "",
         draftChanged: ((String) -> Void)? = nil,
+        typingDescription: String? = nil,
+        typingChanged: ((Bool) -> Void)? = nil,
         readReceipts: ReadReceiptDisplay? = nil,
         pollReadReceipts: ((Int64) -> Bool)? = nil
     ) {
@@ -127,6 +133,8 @@ struct ConversationSurface: View {
         self.retryMedia = retryMedia
         self.initialDraft = initialDraft
         self.draftChanged = draftChanged
+        self.typingDescription = typingDescription
+        self.typingChanged = typingChanged
         self.readReceipts = readReceipts
         self.pollReadReceipts = pollReadReceipts
         _messages = State(initialValue: page.messages)
@@ -311,6 +319,15 @@ struct ConversationSurface: View {
                 retryAttachmentUpload: retryAttachmentUpload,
                 send: sendDraft
             )
+            .overlay(alignment: .topLeading) {
+                if let typingDescription {
+                    TypingIndicator(text: typingDescription)
+                        .alignmentGuide(.top) { $0[.bottom] }
+                        .padding(.leading, AppTheme.Spacing.large)
+                        .transition(.opacity)
+                }
+            }
+            .animation(.easeOut(duration: 0.15), value: typingDescription)
         }
         .background(AppTheme.Colors.canvas)
         .conversationToolbar(
@@ -349,6 +366,11 @@ struct ConversationSurface: View {
         }
         .onChange(of: draft) {
             draftChanged?(draft)
+            // Text restored from a saved draft is not typing; only the focused
+            // composer announces it, and emptying the box always withdraws it.
+            if draft.isEmpty || isComposerFocused {
+                typingChanged?(!draft.isEmpty)
+            }
         }
         .onChange(of: page.key) {
             pendingQuote = nil
@@ -1384,4 +1406,21 @@ private struct ComposerView: View {
         )
     )
     .frame(width: 800, height: 720)
+}
+
+/// A small note floating above the composer while someone else is typing.
+private struct TypingIndicator: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(AppTheme.Typography.metadata)
+            .foregroundStyle(AppTheme.Colors.secondaryText)
+            .lineLimit(1)
+            .padding(.horizontal, AppTheme.Spacing.medium)
+            .padding(.vertical, 3)
+            .background(.regularMaterial, in: Capsule())
+            .allowsHitTesting(false)
+            .accessibilityLabel(text)
+    }
 }

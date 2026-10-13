@@ -447,6 +447,8 @@ private struct LiveWindowView: View {
                 retryMedia: session.retryMedia,
                 initialDraft: session.draft(for: page.key),
                 draftChanged: { session.updateDraft($0, for: page.key) },
+                typingDescription: session.typingDescription(for: page.key),
+                typingChanged: { session.composerTyping($0, in: page.key) },
                 readReceipts: session.readReceiptDisplay(for: page),
                 pollReadReceipts: { session.pollReadReceipts(messageID: $0, key: page.key) }
             )

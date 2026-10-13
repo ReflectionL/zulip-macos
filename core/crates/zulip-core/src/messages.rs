@@ -16,6 +16,7 @@ use crate::{
 const MESSAGES_PATH: &str = "api/v1/messages";
 const MESSAGE_FLAGS_PATH: &str = "api/v1/messages/flags";
 const PRESENCE_PATH: &str = "api/v1/users/me/presence";
+const TYPING_PATH: &str = "api/v1/typing";
 const STREAMS_PATH_PREFIX: &str = "api/v1/streams";
 const SUBSCRIPTIONS_PATH: &str = "api/v1/users/me/subscriptions";
 const MAX_CHANNEL_NAME_CHARS: usize = 60;
@@ -140,6 +141,23 @@ pub enum TopicPropagation {
     ChangeOne,
     /// Rename every message in the selected message's current topic.
     ChangeAll,
+}
+
+/// A conversation the account may be typing in.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TypingTarget {
+    /// A direct-message conversation: the other participants (not the sender).
+    Direct {
+        /// Recipient user identifiers.
+        user_ids: Vec<i64>,
+    },
+    /// A topic in a channel.
+    Topic {
+        /// Channel identifier.
+        stream_id: i64,
+        /// Topic name.
+        topic: String,
+    },
 }
 
 /// Personal message flag supported by the first daily-use write surface.
@@ -899,6 +917,55 @@ impl MessageClient {
             .await
     }
 
+    /// Tells the server that the account started or stopped typing in a
+    /// conversation, so its participants can show it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageApiError`] for an empty recipient list or an invalid
+    /// topic, and for transport, rejection, size, or response failures.
+    pub async fn send_typing(
+        &self,
+        started: bool,
+        target: &TypingTarget,
+    ) -> Result<(), MessageApiError> {
+        let (kind, recipients, topic) = match target {
+            TypingTarget::Direct { user_ids } => {
+                if user_ids.is_empty() || user_ids.iter().any(|id| *id <= 0) {
+                    return Err(MessageApiError::InvalidInput);
+                }
+                // "private" is the spelling every server version accepts.
+                ("private", serde_json::to_string(user_ids), None)
+            }
+            TypingTarget::Topic { stream_id, topic } => {
+                if *stream_id <= 0 || topic.chars().any(char::is_control) || topic.len() > 200 {
+                    return Err(MessageApiError::InvalidInput);
+                }
+                ("stream", serde_json::to_string(&[*stream_id]), Some(topic))
+            }
+        };
+        let recipients = recipients.map_err(|_| MessageApiError::InvalidInput)?;
+        let mut form = vec![
+            ("op", if started { "start" } else { "stop" }),
+            ("type", kind),
+            ("to", recipients.as_str()),
+        ];
+        if let Some(topic) = topic {
+            form.push(("topic", topic.as_str()));
+        }
+        let response = self
+            .http
+            .post(self.base_url.endpoint(TYPING_PATH))
+            .basic_auth(&self.email, Some(self.api_key.expose_secret()))
+            .form(&form)
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let document: ApiResultDocument =
+            decode_response(response, MAX_WRITE_RESPONSE_BYTES).await?;
+        document.validate_result()
+    }
+
     /// Reports the current user's own presence and returns everyone else's.
     ///
     /// Zulip derives "online" from recent presence pings, so a client that never
@@ -1294,7 +1361,7 @@ mod tests {
 
     use super::{
         ConversationTarget, MessageApiError, MessageClient, MessageFlag, MessageWriteOperation,
-        OutgoingMessage, PresenceStatus, ReadReceipts, TopicPropagation,
+        OutgoingMessage, PresenceStatus, ReadReceipts, TopicPropagation, TypingTarget,
     };
     use crate::auth::SecretString;
 
@@ -1414,6 +1481,53 @@ mod tests {
         assert!(request.contains("status=active"));
         assert!(request.contains("slim_presence=true"));
         assert!(!request.contains(API_KEY));
+    }
+
+    #[tokio::test]
+    async fn typing_notifications_name_the_conversation() {
+        let ok = || (StatusCode::OK, r#"{"result":"success"}"#.to_owned());
+        let (server, requests) = spawn_mock(vec![ok(), ok()]);
+        let client = MessageClient::new(&server, "maya@example.com", SecretString::new(API_KEY))
+            .expect("message client");
+
+        client
+            .send_typing(
+                true,
+                &TypingTarget::Direct {
+                    user_ids: vec![22, 23],
+                },
+            )
+            .await
+            .expect("direct typing");
+        client
+            .send_typing(
+                false,
+                &TypingTarget::Topic {
+                    stream_id: 5,
+                    topic: "Rust core".to_owned(),
+                },
+            )
+            .await
+            .expect("topic typing");
+        assert!(
+            client
+                .send_typing(true, &TypingTarget::Direct { user_ids: vec![] })
+                .await
+                .is_err()
+        );
+
+        let direct = requests.recv().expect("direct request");
+        assert!(direct.starts_with("POST /api/v1/typing HTTP/1.1"));
+        assert!(direct.contains("op=start"));
+        assert!(direct.contains("type=private"));
+        assert!(direct.contains("to=%5B22%2C23%5D"));
+        assert!(!direct.contains("topic="));
+        let topic = requests.recv().expect("topic request");
+        assert!(topic.contains("op=stop"));
+        assert!(topic.contains("type=stream"));
+        assert!(topic.contains("to=%5B5%5D"));
+        assert!(topic.contains("topic=Rust+core"));
+        assert!(!topic.contains(API_KEY));
     }
 
     #[tokio::test]

@@ -234,6 +234,16 @@ final class LiveSessionViewModel {
     /// Bumps whenever presence is refreshed, so views showing it redraw.
     private(set) var presenceRevision = 0
     @ObservationIgnored private var presenceTask: Task<Void, Never>?
+    /// People currently typing, by conversation, with the time their typing
+    /// notice expires (the server sends no stop when a client just goes quiet).
+    private(set) var typingUsers: [ConversationKey: [Int64: Date]] = [:]
+    @ObservationIgnored private var typingPruneTask: Task<Void, Never>?
+    /// The conversation the user is typing in and when that was last announced.
+    @ObservationIgnored private var localTyping: (key: ConversationKey, announcedAt: Date)?
+    @ObservationIgnored private var localTypingStopTask: Task<Void, Never>?
+    private static let typingExpiry: TimeInterval = 15
+    private static let typingAnnounceInterval: TimeInterval = 10
+    private static let typingIdleDelay: Duration = .seconds(5)
     @ObservationIgnored private var userNames: [Int64: String] = [:]
     /// Readers of the user's recent sent messages, by message identifier.
     @ObservationIgnored private var readReceiptReaders: [Int64: [Int64]] = [:]
@@ -499,6 +509,122 @@ final class LiveSessionViewModel {
         }
     }
 
+    /// The composer of `key` gained or lost text. Others see "typing" while text
+    /// keeps changing; it is announced again every few seconds and withdrawn
+    /// when the box empties, the user goes quiet, or the conversation changes.
+    func composerTyping(_ hasText: Bool, in key: ConversationKey) {
+        guard hasLiveSession, supportsTypingNotices(key) else {
+            return
+        }
+        guard hasText else {
+            if localTyping?.key == key {
+                stopLocalTyping()
+            }
+            return
+        }
+        if let current = localTyping, current.key != key {
+            stopLocalTyping()
+        }
+        let now = Date.now
+        let announcedRecently = localTyping.map {
+            now.timeIntervalSince($0.announcedAt) < Self.typingAnnounceInterval
+        } ?? false
+        if !announcedRecently {
+            client.submit(.setTyping(requestID: nextRequestID(), key: key, isTyping: true))
+            localTyping = (key, now)
+        }
+        localTypingStopTask?.cancel()
+        localTypingStopTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.typingIdleDelay)
+            guard !Task.isCancelled else { return }
+            self?.stopLocalTyping()
+        }
+    }
+
+    private func stopLocalTyping() {
+        localTypingStopTask?.cancel()
+        localTypingStopTask = nil
+        guard let current = localTyping else {
+            return
+        }
+        localTyping = nil
+        client.submit(.setTyping(requestID: nextRequestID(), key: current.key, isTyping: false))
+    }
+
+    /// Typing notices exist for topics and for conversations with other people.
+    private func supportsTypingNotices(_ key: ConversationKey) -> Bool {
+        switch key {
+        case .topic:
+            true
+        case let .directMessage(_, recipientIDs):
+            !recipientIDs.isEmpty && recipientIDs != [identity?.userID ?? 0]
+        default:
+            false
+        }
+    }
+
+    /// "Theo is typing…" for the people typing in `key`, or nil when nobody is.
+    func typingDescription(for key: ConversationKey) -> String? {
+        let names = (typingUsers[key] ?? [:])
+            .keys
+            .sorted()
+            .map { userNames[$0] ?? "Someone" }
+        switch names.count {
+        case 0: return nil
+        case 1: return "\(names[0]) is typing…"
+        case 2: return "\(names[0]) and \(names[1]) are typing…"
+        default: return "Several people are typing…"
+        }
+    }
+
+    private func applyTyping(
+        accountID: String,
+        key: ConversationKey,
+        senderID: Int64,
+        isTyping: Bool
+    ) {
+        guard identity?.accountID == accountID, senderID != identity?.userID else {
+            return
+        }
+        if isTyping {
+            typingUsers[key, default: [:]][senderID] = Date.now.addingTimeInterval(Self.typingExpiry)
+            startPruningTyping()
+        } else {
+            typingUsers[key]?.removeValue(forKey: senderID)
+            if typingUsers[key]?.isEmpty == true {
+                typingUsers.removeValue(forKey: key)
+            }
+        }
+    }
+
+    private func startPruningTyping() {
+        guard typingPruneTask == nil else {
+            return
+        }
+        typingPruneTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard let self, !Task.isCancelled else { return }
+                self.pruneTyping(now: .now)
+                if self.typingUsers.isEmpty {
+                    self.typingPruneTask = nil
+                    return
+                }
+            }
+        }
+    }
+
+    private func pruneTyping(now: Date) {
+        for (key, users) in typingUsers {
+            let active = users.filter { $0.value > now }
+            if active.isEmpty {
+                typingUsers.removeValue(forKey: key)
+            } else if active.count != users.count {
+                typingUsers[key] = active
+            }
+        }
+    }
+
     private func loadDrafts(for accountID: String) {
         client.submit(.loadDrafts(requestID: nextRequestID(), accountID: accountID))
     }
@@ -568,6 +694,9 @@ final class LiveSessionViewModel {
             return
         }
         stashVisiblePage()
+        if localTyping?.key != key {
+            stopLocalTyping()
+        }
         pendingFocusedMessageRequestID = nil
         pendingOlderRequestID = nil
         isLoadingOlderMessages = false
@@ -1274,12 +1403,12 @@ final class LiveSessionViewModel {
     }
 
     func loadMedia(_ remoteURL: String) {
-        guard let identity,
-              !remoteURL.isEmpty,
+        guard !remoteURL.isEmpty,
               mediaLocalURLs[remoteURL] == nil,
               !pendingMediaURLs.contains(remoteURL)
         else { return }
-        guard hasLiveSession else {
+        guard let identity, hasLiveSession else {
+            // Asked for before the live session exists: requested once it does.
             deferredMediaURLs.insert(remoteURL)
             return
         }
@@ -1608,6 +1737,9 @@ final class LiveSessionViewModel {
             }
             applyPresence(presences)
 
+        case let .typingChanged(accountID, key, senderID, isTyping):
+            applyTyping(accountID: accountID, key: key, senderID: senderID, isTyping: isTyping)
+
         case let .readReceiptsLoaded(accountID, messageID, userIDs, isAvailable):
             guard identity?.accountID == accountID else {
                 return
@@ -1749,6 +1881,12 @@ final class LiveSessionViewModel {
         avatarURLs = [:]
         presenceTask?.cancel()
         presenceTask = nil
+        typingPruneTask?.cancel()
+        typingPruneTask = nil
+        localTypingStopTask?.cancel()
+        localTypingStopTask = nil
+        localTyping = nil
+        typingUsers = [:]
         presenceStates = [:]
         lastActiveDates = [:]
         userNames = [:]
@@ -1953,8 +2091,7 @@ final class LiveSessionViewModel {
                     detail: $0.email ?? ""
                 )
             }
-        rememberTopics(from: snapshot.topics)
-        rememberTopics(from: snapshot.messages)
+        replaceKnownTopics(from: snapshot)
         unreadSummary = UnreadSummary(
             buckets: snapshot.unread,
             selfUserID: identity.userID,
@@ -2418,6 +2555,15 @@ final class LiveSessionViewModel {
                 limit: Self.conversationPageSize
             )
         )
+    }
+
+    /// The core's topic list follows the server, so a topic it no longer reports
+    /// (renamed, moved to another channel, emptied or deleted) leaves the sidebar.
+    /// Only topics still waiting for their first message are kept.
+    private func replaceKnownTopics(from snapshot: LiveSnapshot) {
+        knownTopics = knownTopics.filter { $0.value.maxMessageID == 0 }
+        rememberTopics(from: snapshot.topics)
+        rememberTopics(from: snapshot.messages)
     }
 
     private func rememberTopics(from topics: [LiveTopicSnapshot]) {
