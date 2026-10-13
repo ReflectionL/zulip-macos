@@ -8,7 +8,7 @@ use thiserror::Error;
 
 use crate::{
     messages::TopicSummary,
-    sync::{ChannelSummary, MessageSummary, RecentDirectConversation, UserSummary},
+    sync::{ChannelSummary, MessageSummary, RecentDirectConversation, UnreadBucket, UserSummary},
 };
 
 const ACCOUNT_STATE_KEY: &str = "account";
@@ -215,6 +215,9 @@ pub struct CachedSnapshot {
     /// Direct-message conversations ordered by the server, newest first.
     #[serde(default)]
     pub recent_direct_conversations: Vec<RecentDirectConversation>,
+    /// Unread messages per conversation, so counts show before the first sync.
+    #[serde(default)]
+    pub unread: Vec<UnreadBucket>,
 }
 
 /// One conversation as last fetched from the server.
@@ -699,7 +702,7 @@ mod tests {
         AccountRecord, CacheDatabase, CachedAccount, CachedConversation, CachedSnapshot,
         DatabaseError, DraftRecord, MessageRecord, SCHEMA_VERSION, apply_migrations,
     };
-    use crate::sync::{MessageSummary, RecentDirectConversation};
+    use crate::sync::{MessageSummary, RecentDirectConversation, UnreadBucket};
 
     #[test]
     fn drafts_list_delete_and_stay_account_scoped() {
@@ -746,6 +749,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn caches_account_snapshot_and_conversations_with_pruning() {
         let database = CacheDatabase::open_in_memory().expect("database");
         let account = CachedAccount {
@@ -778,6 +782,13 @@ mod tests {
                 user_ids: vec![7],
                 max_message_id: 12,
             }],
+            unread: vec![UnreadBucket {
+                stream_id: Some(5),
+                topic: Some("macOS".to_owned()),
+                user_ids: Vec::new(),
+                count: 3,
+                mention_count: 1,
+            }],
         };
         assert!(database.account_cache("acme|maya").expect("read").is_none());
         database
@@ -791,6 +802,7 @@ mod tests {
         assert_eq!(cached_snapshot.messages.len(), 300);
         assert_eq!(cached_snapshot.messages.last().map(|m| m.id), Some(400));
         assert_eq!(cached_snapshot.messages.first().map(|m| m.id), Some(101));
+        assert_eq!(cached_snapshot.unread, snapshot.unread);
 
         for index in 0..45_i64 {
             database

@@ -194,7 +194,7 @@ final class LiveSessionViewModel {
     private(set) var sidebarSnapshot: SidebarSnapshot?
     private(set) var navigationDirectory = NavigationDirectory(destinations: [])
     private(set) var conversationState = ConversationLoadState.loading(
-        title: "Inbox",
+        title: "Mentions",
         subtitle: "Live Zulip"
     )
     private(set) var isLoadingOlderMessages = false
@@ -212,7 +212,7 @@ final class LiveSessionViewModel {
     @ObservationIgnored private let notifier: (any MessageNotifier)?
     @ObservationIgnored private var notificationPlanner = NotificationPlanner()
     @ObservationIgnored var isApplicationActive: () -> Bool = { NSApplication.shared.isActive }
-    private var unseenNotificationCount = 0
+    @ObservationIgnored private var unreadSummary = UnreadSummary()
     @ObservationIgnored private var eventTask: Task<Void, Never>?
     @ObservationIgnored private var wakeObserver: NSObjectProtocol?
     @ObservationIgnored private var reconnectTask: Task<Void, Never>?
@@ -295,8 +295,21 @@ final class LiveSessionViewModel {
             self?.openFromNotification(route)
         }
         notifier?.onApplicationActivated = { [weak self] in
-            self?.unseenNotificationCount = 0
+            self?.applicationBecameActive()
         }
+        notifier?.onNotificationsDisabled = { [weak self] in
+            self?.notice = "Notifications are turned off for Zulip Mac. "
+                + "Turn them on in System Settings › Notifications."
+        }
+    }
+
+    /// Messages that arrived while the app was in the background were not marked
+    /// read, so the open conversation is read now that the user is looking at it.
+    private func applicationBecameActive() {
+        guard let activeSelection, case .loaded = conversationState else {
+            return
+        }
+        refreshConversation(activeSelection)
     }
 
     /// Takes the user to the conversation a notification was about.
@@ -321,10 +334,6 @@ final class LiveSessionViewModel {
                 continue
             }
             notifier.post(notification)
-            unseenNotificationCount += 1
-        }
-        if unseenNotificationCount > 0 {
-            notifier.setBadge(unseenNotificationCount)
         }
     }
 
@@ -1320,8 +1329,7 @@ final class LiveSessionViewModel {
             apply(snapshot)
             notificationPlanner.prime(with: snapshot)
             loadDrafts(for: identity.accountID)
-            let inbox = ConversationKey.inbox(accountID: identity.accountID)
-            openConversation(inbox)
+            openConversation(Self.landingConversation(accountID: identity.accountID))
 
         case let .sessionStarted(_, identity, credential, snapshot):
             cancelReconnect()
@@ -1346,7 +1354,7 @@ final class LiveSessionViewModel {
                 // Keep the user's place when a cached session went live.
                 refreshConversation(activeSelection)
             } else {
-                openConversation(ConversationKey.inbox(accountID: identity.accountID))
+                openConversation(Self.landingConversation(accountID: identity.accountID))
             }
 
         case let .snapshotUpdated(accountID, snapshot):
@@ -1379,8 +1387,12 @@ final class LiveSessionViewModel {
                 return
             }
             conversationState = .loaded(conversationPage)
+            // While the app is in the background the user cannot be reading these;
+            // `applicationBecameActive` marks them read once they return.
             let messageIDs = page.messages.map(\.messageID)
-            if !messageIDs.isEmpty, let identity {
+            if !messageIDs.isEmpty, let identity, isApplicationActive(),
+               Self.marksMessagesRead(in: page.key)
+            {
                 client.submit(
                     .markRead(
                         requestID: nextRequestID(),
@@ -1451,7 +1463,7 @@ final class LiveSessionViewModel {
                 makeConversationPage(page, focusedMessageID: messageID)
             )
             let messageIDs = page.messages.map(\.messageID)
-            if !messageIDs.isEmpty, let identity {
+            if !messageIDs.isEmpty, let identity, Self.marksMessagesRead(in: page.key) {
                 client.submit(
                     .markRead(
                         requestID: nextRequestID(),
@@ -1749,7 +1761,7 @@ final class LiveSessionViewModel {
         recentPages = [:]
         recentPageOrder = []
         notificationPlanner.reset()
-        unseenNotificationCount = 0
+        unreadSummary = UnreadSummary()
         notifier?.setBadge(0)
         draftSaveTasks.values.forEach { $0.cancel() }
         draftSaveTasks = [:]
@@ -1943,11 +1955,18 @@ final class LiveSessionViewModel {
             }
         rememberTopics(from: snapshot.topics)
         rememberTopics(from: snapshot.messages)
+        unreadSummary = UnreadSummary(
+            buckets: snapshot.unread,
+            selfUserID: identity.userID,
+            mutedChannels: Set(snapshot.channels.filter(\.isMuted).map(\.streamID))
+        )
+        notifier?.setBadge(unreadSummary.badge)
         sidebarSnapshot = Self.makeSidebar(
             snapshot: snapshot,
             identity: identity,
             topics: Array(knownTopics.values),
-            presence: presenceStates
+            presence: presenceStates,
+            unread: unreadSummary
         )
         rebuildPresentation()
     }
@@ -2525,7 +2544,11 @@ final class LiveSessionViewModel {
                         TopicSnapshot(
                             streamID: $0.streamID,
                             name: $0.name,
-                            maxMessageID: $0.maxMessageID
+                            maxMessageID: $0.maxMessageID,
+                            unreadCount: unreadSummary.unreadCount(
+                                streamID: $0.streamID,
+                                topic: $0.name
+                            )
                         )
                     }
             )
@@ -2582,6 +2605,24 @@ final class LiveSessionViewModel {
 
     private var organizationName: String {
         sidebarSnapshot?.organizationName ?? "Live Zulip"
+    }
+
+    /// Whether opening `key` counts as reading what it lists. Collections such as
+    /// Mentions or Starred list messages out of context, so opening one must not
+    /// clear their unread state; a channel, topic or direct message does.
+    static func marksMessagesRead(in key: ConversationKey) -> Bool {
+        switch key {
+        case .channel, .topic, .directMessage:
+            true
+        case .inbox, .mentions, .starred, .unread, .drafts:
+            false
+        }
+    }
+
+    /// What the window shows before the user picks something. Inbox and Unread are
+    /// no longer offered, so Mentions leads the sidebar and opens first.
+    static func landingConversation(accountID: String) -> ConversationKey {
+        .mentions(accountID: accountID)
     }
 
     private func nextRequestID() -> UInt64 {
@@ -2649,7 +2690,8 @@ final class LiveSessionViewModel {
         snapshot: LiveSnapshot,
         identity: LiveSessionIdentity,
         topics: [LiveTopicSnapshot],
-        presence: [Int64: PresenceState] = [:]
+        presence: [Int64: PresenceState] = [:],
+        unread: UnreadSummary = UnreadSummary()
     ) -> SidebarSnapshot {
         let host = URL(string: identity.serverURL)?.host ?? identity.serverURL
         let organization = host.split(separator: ".").first
@@ -2671,6 +2713,7 @@ final class LiveSessionViewModel {
                         ? "\(currentName) (you)"
                         : $0.fullName,
                     initials: initials(for: $0.fullName),
+                    unreadCount: unread.unreadCount(directMessageWith: $0.userID),
                     presence: presence[$0.userID] ?? .offline,
                     avatarURL: $0.avatarURL
                 )
@@ -2691,24 +2734,15 @@ final class LiveSessionViewModel {
             organizationHost: host,
             quickLinks: [
                 QuickLinkSnapshot(
-                    key: .inbox(accountID: identity.accountID),
-                    title: "Inbox",
-                    systemImage: "tray.full"
-                ),
-                QuickLinkSnapshot(
                     key: .mentions(accountID: identity.accountID),
                     title: "Mentions",
-                    systemImage: "at"
+                    systemImage: "at",
+                    unreadCount: unread.mentions
                 ),
                 QuickLinkSnapshot(
                     key: .starred(accountID: identity.accountID),
                     title: "Starred",
                     systemImage: "star"
-                ),
-                QuickLinkSnapshot(
-                    key: .unread(accountID: identity.accountID),
-                    title: "Unread",
-                    systemImage: "circle.fill"
                 ),
             ],
             channels: snapshot.channels.map { channel in
@@ -2718,6 +2752,7 @@ final class LiveSessionViewModel {
                     streamID: channel.streamID,
                     name: channel.name,
                     colorHex: channel.colorHex,
+                    unreadCount: unread.unreadCount(streamID: channel.streamID),
                     isMuted: channel.isMuted,
                     topics: channelTopics
                         .sorted { $0.maxMessageID > $1.maxMessageID }
@@ -2725,7 +2760,11 @@ final class LiveSessionViewModel {
                             TopicSnapshot(
                                 streamID: $0.streamID,
                                 name: $0.name,
-                                maxMessageID: $0.maxMessageID
+                                maxMessageID: $0.maxMessageID,
+                                unreadCount: unread.unreadCount(
+                                    streamID: $0.streamID,
+                                    topic: $0.name
+                                )
                             )
                         }
                 )

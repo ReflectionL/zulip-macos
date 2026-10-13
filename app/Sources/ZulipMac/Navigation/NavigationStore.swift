@@ -107,7 +107,7 @@ final class NavigationStore {
         select(navigable[next].key)
     }
 
-    /// Selects the nth sidebar quick link (Inbox, Mentions, Starred, Unread, …).
+    /// Selects the nth sidebar quick link (Mentions, Starred, …).
     func selectQuickLink(_ index: Int) {
         let quickLinks = directory.destinations.filter { destination in
             switch destination.key {

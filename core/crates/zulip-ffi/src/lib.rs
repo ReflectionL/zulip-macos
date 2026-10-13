@@ -29,7 +29,7 @@ use zulip_core::{
     },
     sync::{
         EventQueueClient, MessageSummary, RecentDirectConversation, RecoveryPolicy, SyncCycle,
-        SyncSession, SyncSnapshot, UserSummary,
+        SyncSession, SyncSnapshot, UnreadBucket, UserSummary,
     },
 };
 
@@ -835,6 +835,35 @@ pub struct CoreSnapshot {
     pub realm_icon_url: Option<String>,
     /// Direct-message conversations ordered by the server, newest first.
     pub recent_direct_conversations: Vec<CoreRecentDirectConversation>,
+    /// Unread messages counted per conversation.
+    pub unread: Vec<CoreUnreadBucket>,
+}
+
+/// The unread messages of one conversation.
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct CoreUnreadBucket {
+    /// Channel identifier for channel conversations.
+    pub stream_id: Option<i64>,
+    /// Topic name for channel conversations.
+    pub topic: Option<String>,
+    /// Direct-message participants as reported; may include the current user.
+    pub user_ids: Vec<i64>,
+    /// Unread messages in the conversation.
+    pub count: u32,
+    /// How many of them mention the current user.
+    pub mention_count: u32,
+}
+
+impl From<UnreadBucket> for CoreUnreadBucket {
+    fn from(bucket: UnreadBucket) -> Self {
+        Self {
+            stream_id: bucket.stream_id,
+            topic: bucket.topic,
+            user_ids: bucket.user_ids,
+            count: bucket.count,
+            mention_count: bucket.mention_count,
+        }
+    }
 }
 
 /// A direct-message conversation and its newest message.
@@ -2629,6 +2658,7 @@ fn cached_snapshot(snapshot: &SyncSnapshot, topics: &[TopicSummary]) -> CachedSn
         messages: snapshot.messages.clone(),
         realm_icon_url: snapshot.realm_icon_url.clone(),
         recent_direct_conversations: snapshot.recent_direct_conversations.clone(),
+        unread: snapshot.unread.clone(),
     }
 }
 
@@ -2727,6 +2757,7 @@ fn load_cached_session(
         messages: cached.messages,
         realm_icon_url: cached.realm_icon_url,
         recent_direct_conversations: cached.recent_direct_conversations,
+        unread: cached.unread,
     };
     event_sink.handle_event(CoreEvent::CachedSessionLoaded {
         request_id,
@@ -2891,6 +2922,7 @@ impl CoreSnapshot {
                 .into_iter()
                 .map(Into::into)
                 .collect(),
+            unread: snapshot.unread.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -2923,7 +2955,7 @@ mod tests {
     use tempfile::TempDir;
     use zulip_core::{
         messages::{ConversationTarget, TopicSummary},
-        sync::{MessageSummary, RecentDirectConversation, SyncSnapshot},
+        sync::{MessageSummary, RecentDirectConversation, SyncSnapshot, UnreadBucket},
     };
 
     #[derive(Default)]
@@ -3011,6 +3043,13 @@ mod tests {
                     user_ids: vec![7],
                     max_message_id: 9,
                 }],
+                unread: vec![UnreadBucket {
+                    stream_id: Some(5),
+                    topic: Some("macOS".to_owned()),
+                    user_ids: Vec::new(),
+                    count: 4,
+                    mention_count: 1,
+                }],
             },
             &[TopicSummary {
                 stream_id: 5,
@@ -3026,6 +3065,11 @@ mod tests {
         );
         assert_eq!(snapshot.recent_direct_conversations.len(), 1);
         assert_eq!(snapshot.recent_direct_conversations[0].max_message_id, 9);
+        assert_eq!(snapshot.unread.len(), 1);
+        assert_eq!(
+            (snapshot.unread[0].count, snapshot.unread[0].mention_count),
+            (4, 1)
+        );
         assert_eq!(snapshot.topics[0].name, "macOS");
         assert_eq!(snapshot.topics[0].max_message_id, 44);
     }

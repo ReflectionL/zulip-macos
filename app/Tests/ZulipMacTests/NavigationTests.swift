@@ -124,7 +124,7 @@ struct NavigationTests {
         )
     }
 
-    @Test("Quick link shortcuts select Inbox first and ignore missing slots")
+    @Test("Quick link shortcuts select Mentions first and ignore missing slots")
     func quickLinkSelection() {
         let store = NavigationStore(
             directory: FixtureNavigation.directory,
@@ -132,7 +132,7 @@ struct NavigationTests {
         )
 
         store.selectQuickLink(0)
-        #expect(store.selection == .inbox(accountID: FixtureSidebar.accountID))
+        #expect(store.selection == .mentions(accountID: FixtureSidebar.accountID))
 
         let before = store.selection
         store.selectQuickLink(99)

@@ -3,10 +3,14 @@ import SwiftUI
 @main
 struct ZulipMacApp: App {
     @State private var updates = UpdateController()
+    /// Owned here, not by the window: a window's view is rebuilt whenever this
+    /// scene's state changes, and every rebuild would create another session (and
+    /// another notification delegate that replaces the working one).
+    @State private var session = LiveSessionViewModel(notifier: SystemMessageNotifier())
 
     var body: some Scene {
         WindowGroup(AppIdentity.displayName) {
-            AppRootView()
+            AppRootView(session: session)
                 .environment(updates)
                 .task { await updates.checkAutomatically() }
         }
@@ -26,7 +30,7 @@ struct ZulipMacApp: App {
                 Section("Keyboard") {
                     LabeledContent("Quick switcher", value: "⌘K")
                     LabeledContent("Search messages", value: "⌘F")
-                    LabeledContent("Inbox, Mentions, Starred, Unread", value: "⌘1 – ⌘4")
+                    LabeledContent("Mentions, Starred", value: "⌘1 – ⌘2")
                     LabeledContent("Previous / next conversation", value: "⌥⌘↑ / ⌥⌘↓")
                     LabeledContent("Focus message composer", value: "⇧⌘L")
                     LabeledContent("Send message", value: "Return")

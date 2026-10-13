@@ -318,6 +318,10 @@ impl ContentParser {
 
     fn parse_image_with_url(&mut self, element: &Element, url: String) -> Vec<ContentBlock> {
         let alt = element.attr("alt").unwrap_or("Image").trim().to_owned();
+        self.image_block(element, url, alt)
+    }
+
+    fn image_block(&mut self, element: &Element, url: String, alt: String) -> Vec<ContentBlock> {
         let (width, height) = image_dimensions(element);
         self.record_text(&alt);
         self.block(ContentBlock::Image {
@@ -338,17 +342,30 @@ impl ContentParser {
                 summary: "Unsupported image preview".to_owned(),
             });
         };
-        let original_url = node.descendants().find_map(|descendant| {
+        let anchor = node.descendants().find_map(|descendant| {
             let element = descendant.value().as_element()?;
-            (element.name() == "a")
-                .then(|| element.attr("href"))
-                .flatten()
-                .and_then(safe_url)
+            (element.name() == "a").then_some(element)
         });
-        match original_url {
-            Some(url) => self.parse_image_with_url(image, url),
-            None => self.parse_image(image),
-        }
+        let original_url = anchor
+            .and_then(|element| element.attr("href"))
+            .and_then(safe_url);
+        let preview_url = image.attr("src").and_then(safe_url);
+        // Uploads show their original. Anything else (a picture linked from another
+        // site, a video thumbnail) shows the server's preview, because the link
+        // itself may be a web page, plain HTTP, or far too large.
+        let url = match (original_url, preview_url) {
+            (Some(original), _) if is_uploaded_file(&original) => original,
+            (_, Some(preview)) => preview,
+            (Some(original), None) => original,
+            (None, None) => return self.parse_image(image),
+        };
+        let alt = image
+            .attr("alt")
+            .or_else(|| anchor.and_then(|element| element.attr("title")))
+            .unwrap_or("Image")
+            .trim()
+            .to_owned();
+        self.image_block(image, url, alt)
     }
 
     fn parse_inline_children(
@@ -518,6 +535,12 @@ fn safe_url(value: &str) -> Option<String> {
     }
     let parsed = Url::parse(value).ok()?;
     matches!(parsed.scheme(), "https" | "http" | "mailto").then(|| value.to_owned())
+}
+
+/// Whether `url` points at a file uploaded to a Zulip server.
+fn is_uploaded_file(url: &str) -> bool {
+    const PREFIX: &str = "/user_uploads/";
+    url.starts_with(PREFIX) || Url::parse(url).is_ok_and(|parsed| parsed.path().starts_with(PREFIX))
 }
 
 fn image_dimension(value: Option<&str>) -> Option<u32> {
@@ -868,6 +891,53 @@ mod tests {
                 height: Some(1080),
             } if url == "/user_uploads/original.png" && alt == "Preview"
         ));
+    }
+
+    #[test]
+    fn linked_pictures_show_the_server_preview_and_use_the_link_title_as_alt() {
+        let blocks = parse_zulip_html(
+            r#"<div class="message_inline_image">
+                    <a href="https://photos.example/cat.jpg" title="cat.jpg">
+                        <img src="/external_content/ab12/cat">
+                    </a>
+                </div>
+                <div class="youtube-video message_inline_image">
+                    <a href="https://www.youtube.com/watch?v=abc">
+                        <img src="/external_content/cd34/thumb" alt="Video">
+                    </a>
+                </div>
+                <div class="message_inline_image">
+                    <a href="/user_uploads/1/ab/shot.png" title="shot.png">
+                        <img src="/user_uploads/thumbnail/1/ab/shot.png/840x560.webp"
+                            data-original-dimensions="1170x2532">
+                    </a>
+                </div>"#,
+        );
+        let images = blocks
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Image {
+                    url,
+                    alt,
+                    width,
+                    height,
+                } => Some((url.as_str(), alt.as_str(), *width, *height)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            images,
+            vec![
+                ("/external_content/ab12/cat", "cat.jpg", None, None),
+                ("/external_content/cd34/thumb", "Video", None, None),
+                (
+                    "/user_uploads/1/ab/shot.png",
+                    "shot.png",
+                    Some(1170),
+                    Some(2532)
+                ),
+            ]
+        );
     }
 
     #[test]

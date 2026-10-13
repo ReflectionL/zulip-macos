@@ -171,6 +171,7 @@ struct SidebarView: View {
                                     SidebarRow(
                                         title: TopicName.display(topic.name),
                                         systemImage: "text.bubble",
+                                        unreadCount: topic.unreadCount,
                                         isSelected: selection == topicKey
                                     ) {
                                         selection = topicKey
