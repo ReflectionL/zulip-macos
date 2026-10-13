@@ -106,6 +106,9 @@ pub enum MediaError {
     /// A response was malformed or requested an unsafe route.
     #[error("the server returned an invalid attachment response")]
     InvalidResponse,
+    /// The download was a web page or JSON document, not a picture.
+    #[error("the server sent a web page instead of the image (content type {0})")]
+    NotAnImage(String),
     /// The private cache could not be created or updated atomically.
     #[error("the media cache is unavailable")]
     CacheUnavailable,
@@ -241,7 +244,12 @@ impl MediaClient {
         self.prepare_cache_directory().await?;
 
         if let Some(byte_count) = valid_cached_file(&final_path).await? {
-            return cached_media(remote_url, final_path, None, byte_count, true);
+            if cached_file_is_text(&final_path).await {
+                // An earlier build cached an error page as if it were the picture.
+                let _ = fs::remove_file(&final_path).await;
+            } else {
+                return cached_media(remote_url, final_path, None, byte_count, true);
+            }
         }
 
         let api_path = format!(
@@ -278,6 +286,12 @@ impl MediaClient {
             .get(CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .and_then(sanitized_content_type);
+        if let Some(value) = content_type
+            .as_deref()
+            .filter(|value| is_text_document(value))
+        {
+            return Err(MediaError::NotAnImage(value.to_owned()));
+        }
         let byte_count = self
             .write_download_atomically(response, &final_path, &digest, MAX_DOWNLOAD_BYTES)
             .await?;
@@ -573,6 +587,29 @@ async fn valid_cached_file(path: &Path) -> Result<Option<u64>, MediaError> {
     Ok(Some(metadata.len()))
 }
 
+/// Whether a response type is a web page or data document rather than a picture.
+fn is_text_document(content_type: &str) -> bool {
+    let lower = content_type.to_ascii_lowercase();
+    lower.starts_with("text/")
+        || lower.starts_with("application/json")
+        || lower.starts_with("application/xhtml")
+}
+
+/// Whether a cached download begins like an HTML page or JSON error body.
+async fn cached_file_is_text(path: &Path) -> bool {
+    use tokio::io::AsyncReadExt as _;
+    let Ok(mut file) = fs::File::open(path).await else {
+        return false;
+    };
+    let mut head = [0_u8; 16];
+    let Ok(count) = file.read(&mut head).await else {
+        return false;
+    };
+    let head = head[..count].to_ascii_lowercase();
+    let head = head.trim_ascii_start();
+    head.starts_with(b"<!doctype html") || head.starts_with(b"<html") || head.starts_with(b"{")
+}
+
 fn cached_media(
     remote_url: String,
     path: PathBuf,
@@ -863,6 +900,52 @@ mod tests {
         let request = requests.recv().expect("image request");
         assert!(request.starts_with("GET /external_content/ab12/cat HTTP/1.1"));
         assert!(!request.to_ascii_lowercase().contains("authorization:"));
+    }
+
+    #[tokio::test]
+    async fn web_pages_are_not_cached_as_pictures_and_old_ones_are_replaced() {
+        let responses = vec![
+            MockResponse::json(
+                StatusCode::OK,
+                r#"{"result":"success","url":"/user_uploads/temporary/token/page.png"}"#,
+            ),
+            MockResponse::bytes(
+                StatusCode::OK,
+                "text/html; charset=utf-8",
+                b"<html>".to_vec(),
+            ),
+            MockResponse::json(
+                StatusCode::OK,
+                r#"{"result":"success","url":"/user_uploads/temporary/token/page.png"}"#,
+            ),
+            MockResponse::bytes(StatusCode::OK, "image/png", b"real-png".to_vec()),
+        ];
+        let (server, _requests) = spawn_mock(responses);
+        let fixture = TempDir::new().expect("fixture directory");
+        let client = media_client(&server, &fixture, "account-a");
+
+        assert!(matches!(
+            client.load_media("/user_uploads/1/ab/page.png").await,
+            Err(MediaError::NotAnImage(_))
+        ));
+
+        // A page cached by an older build is discarded rather than served again.
+        let cached = client.account_cache_directory.join(format!(
+            "{}.media",
+            super::sha256_hex(b"/user_uploads/1/ab/page.png")
+        ));
+        tokio::fs::write(&cached, b"<!DOCTYPE html><html>login</html>")
+            .await
+            .expect("seed poisoned cache");
+        let media = client
+            .load_media("/user_uploads/1/ab/page.png")
+            .await
+            .expect("replacement download");
+        assert!(!media.cache_hit);
+        assert_eq!(
+            tokio::fs::read(&cached).await.expect("cached bytes"),
+            b"real-png"
+        );
     }
 
     #[tokio::test]

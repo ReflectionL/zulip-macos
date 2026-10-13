@@ -25,11 +25,11 @@ use zulip_core::{
     media::MediaClient,
     messages::{
         ConversationTarget, MessageClient, MessageFlag, MessageWriteOperation, OutgoingMessage,
-        PresenceStatus, ReadReceipts, TopicPropagation, TopicSummary,
+        PresenceStatus, ReadReceipts, TopicPropagation, TopicSummary, TypingTarget,
     },
     sync::{
         EventQueueClient, MessageSummary, RecentDirectConversation, RecoveryPolicy, SyncCycle,
-        SyncSession, SyncSnapshot, UnreadBucket, UserSummary,
+        SyncSession, SyncSnapshot, TypingNotice, TypingScope, UnreadBucket, UserSummary,
     },
 };
 
@@ -492,6 +492,18 @@ pub enum CoreCommand {
         /// Whether the app is in active use (otherwise reported as idle).
         is_active: bool,
     },
+    /// Tells the conversation's other participants that the user started or
+    /// stopped typing. Skipped when the account's privacy settings forbid it.
+    ///
+    /// Failures are silent: typing is advisory and the next keystroke retries.
+    SetTyping {
+        /// Correlates the request; no response is sent.
+        request_id: u64,
+        /// Topic or direct-message conversation being typed in.
+        key: CoreConversationKey,
+        /// Whether typing started (`true`) or stopped (`false`).
+        is_typing: bool,
+    },
     /// Asks who has read one message (the user's own sent message).
     ///
     /// Failures are silent: read receipts are advisory and the next poll retries.
@@ -559,6 +571,7 @@ impl CoreCommand {
             | Self::LoadMedia { request_id, .. }
             | Self::MarkRead { request_id, .. }
             | Self::RefreshPresence { request_id, .. }
+            | Self::SetTyping { request_id, .. }
             | Self::FetchReadReceipts { request_id, .. }
             | Self::FetchMessageSource { request_id, .. }
             | Self::CreateChannel { request_id, .. }
@@ -1168,6 +1181,17 @@ pub enum CoreEvent {
         /// False when the server cannot report read receipts for this message.
         is_available: bool,
     },
+    /// Somebody else started or stopped typing in a conversation.
+    TypingChanged {
+        /// Active account partition.
+        account_id: String,
+        /// Topic or direct-message conversation they are typing in.
+        key: CoreConversationKey,
+        /// Who is typing.
+        sender_id: i64,
+        /// Whether they started (`true`) or stopped (`false`).
+        is_typing: bool,
+    },
     /// Polling succeeded again after one or more scheduled retries.
     SyncResumed {
         /// Active account partition.
@@ -1322,6 +1346,9 @@ async fn run_actor(
                         }
                     }
                     _ => retrying = false,
+                }
+                if let Some(session) = account.as_mut() {
+                    refresh_changed_topics(session, &cycle).await;
                 }
                 poll_not_before = handle_sync_cycle(cycle, account.as_ref(), &event_sink);
                 if terminal {
@@ -1625,6 +1652,9 @@ async fn handle_command(
             is_active,
             ..
         } => refresh_presence(account_id, is_active, account.as_ref(), event_sink),
+        CoreCommand::SetTyping { key, is_typing, .. } => {
+            set_typing(key, is_typing, account.as_ref());
+        }
         CoreCommand::FetchReadReceipts {
             account_id,
             message_id,
@@ -1799,6 +1829,56 @@ fn fetch_message_source(
             Err(error) => emit_error(Some(request_id), error, &event_sink),
         }
     });
+}
+
+fn set_typing(key: CoreConversationKey, is_typing: bool, account: Option<&AccountSession>) {
+    let Some(session) = account.filter(|item| item.account_id == key.account_id()) else {
+        return;
+    };
+    let preferences = session.sync.typing_preferences();
+    let target = match key {
+        CoreConversationKey::DirectMessage { recipient_ids, .. }
+            if preferences.direct && !recipient_ids.is_empty() =>
+        {
+            TypingTarget::Direct {
+                user_ids: recipient_ids,
+            }
+        }
+        CoreConversationKey::Topic {
+            stream_id, topic, ..
+        } if preferences.channel => TypingTarget::Topic { stream_id, topic },
+        _ => return,
+    };
+    let messages = Arc::clone(&session.messages);
+    tokio::spawn(async move {
+        let _ = messages.send_typing(is_typing, &target).await;
+    });
+}
+
+/// The conversation a typing notice belongs to, in the app's own key shape:
+/// direct messages are keyed by everyone except the account itself.
+fn typing_key(account_id: &str, own_user_id: i64, notice: &TypingNotice) -> CoreConversationKey {
+    match &notice.scope {
+        TypingScope::Topic { stream_id, topic } => CoreConversationKey::Topic {
+            account_id: account_id.to_owned(),
+            stream_id: *stream_id,
+            topic: topic.clone(),
+        },
+        TypingScope::Direct { user_ids } => {
+            let mut recipient_ids: Vec<i64> = user_ids
+                .iter()
+                .copied()
+                .chain(std::iter::once(notice.sender_id))
+                .filter(|id| *id != own_user_id)
+                .collect();
+            recipient_ids.sort_unstable();
+            recipient_ids.dedup();
+            CoreConversationKey::DirectMessage {
+                account_id: account_id.to_owned(),
+                recipient_ids,
+            }
+        }
+    }
 }
 
 fn refresh_presence(
@@ -2302,6 +2382,9 @@ async fn update_topic(
                 });
             }
             normalize_topics(&mut session.topics);
+            // The local edit above is only a stopgap: a single-message move can
+            // empty the old topic, which only the server's list shows.
+            refresh_topics(session, &[stream_id]).await;
             event_sink.handle_event(CoreEvent::TopicUpdated {
                 request_id,
                 account_id,
@@ -2317,6 +2400,42 @@ async fn update_topic(
         }
         Err(error) => emit_error(Some(request_id), error, event_sink),
     }
+}
+
+/// Re-reads the topic lists a sync cycle may have invalidated: channels with a
+/// renamed, moved or emptied topic, or every channel after a full reload.
+async fn refresh_changed_topics(session: &mut AccountSession, cycle: &SyncCycle) {
+    let stream_ids: Vec<i64> = match cycle {
+        SyncCycle::Events(outcome) => outcome.topic_changed_streams.clone(),
+        SyncCycle::Resynchronized { snapshot, .. } => {
+            let channels: Vec<i64> = snapshot.channels.iter().map(|channel| channel.id).collect();
+            session
+                .topics
+                .retain(|topic| channels.contains(&topic.stream_id));
+            channels
+        }
+        _ => return,
+    };
+    refresh_topics(session, &stream_ids).await;
+}
+
+/// Replaces the stored topics of `stream_ids` with the server's current lists.
+/// A channel whose request fails keeps its previous topics.
+async fn refresh_topics(session: &mut AccountSession, stream_ids: &[i64]) {
+    for chunk in stream_ids.chunks(TOPIC_FETCH_CONCURRENCY) {
+        let mut tasks = JoinSet::new();
+        for &stream_id in chunk {
+            let messages = Arc::clone(&session.messages);
+            tasks.spawn(async move { (stream_id, messages.fetch_topics(stream_id).await) });
+        }
+        while let Some(result) = tasks.join_next().await {
+            if let Ok((stream_id, Ok(fresh))) = result {
+                session.topics.retain(|topic| topic.stream_id != stream_id);
+                session.topics.extend(fresh);
+            }
+        }
+    }
+    normalize_topics(&mut session.topics);
 }
 
 fn normalize_topics(topics: &mut Vec<TopicSummary>) {
@@ -2619,6 +2738,16 @@ fn handle_sync_cycle(
     };
     match cycle {
         SyncCycle::Events(outcome) => {
+            for notice in &outcome.typing {
+                if notice.sender_id != account.own_user_id {
+                    event_sink.handle_event(CoreEvent::TypingChanged {
+                        account_id: account.account_id.clone(),
+                        key: typing_key(&account.account_id, account.own_user_id, notice),
+                        sender_id: notice.sender_id,
+                        is_typing: notice.started,
+                    });
+                }
+            }
             if let Some(snapshot) = outcome.snapshot {
                 cache_snapshot_throttled(account, &snapshot);
                 event_sink.handle_event(CoreEvent::SnapshotUpdated {
@@ -2950,12 +3079,15 @@ mod tests {
     use super::{
         CoreCommand, CoreContentBlock, CoreConversationKey, CoreEvent, CoreEventSink,
         CoreInlineContent, CoreMessage, CoreMessageFlag, CoreSnapshot, CoreTopicPropagation,
-        RustCoreClient, conversation_key_for_message,
+        RustCoreClient, conversation_key_for_message, typing_key,
     };
     use tempfile::TempDir;
     use zulip_core::{
         messages::{ConversationTarget, TopicSummary},
-        sync::{MessageSummary, RecentDirectConversation, SyncSnapshot, UnreadBucket},
+        sync::{
+            MessageSummary, RecentDirectConversation, SyncSnapshot, TypingNotice, TypingScope,
+            UnreadBucket,
+        },
     };
 
     #[derive(Default)]
@@ -3003,6 +3135,50 @@ mod tests {
                 message
             } if message.ends_with("received: ping")
         ));
+    }
+
+    #[test]
+    fn typing_notices_map_to_the_apps_conversation_keys() {
+        let direct = |sender_id, user_ids: Vec<i64>| TypingNotice {
+            started: true,
+            sender_id,
+            scope: TypingScope::Direct { user_ids },
+        };
+        // Everyone but the account itself, sorted, however the server lists them.
+        assert_eq!(
+            typing_key("acct", 9, &direct(22, vec![23, 9, 22])),
+            CoreConversationKey::DirectMessage {
+                account_id: "acct".to_owned(),
+                recipient_ids: vec![22, 23],
+            }
+        );
+        // A server that omits the sender from the list gives the same key.
+        assert_eq!(
+            typing_key("acct", 9, &direct(22, vec![9])),
+            CoreConversationKey::DirectMessage {
+                account_id: "acct".to_owned(),
+                recipient_ids: vec![22],
+            }
+        );
+        assert_eq!(
+            typing_key(
+                "acct",
+                9,
+                &TypingNotice {
+                    started: false,
+                    sender_id: 22,
+                    scope: TypingScope::Topic {
+                        stream_id: 5,
+                        topic: "macOS".to_owned()
+                    },
+                }
+            ),
+            CoreConversationKey::Topic {
+                account_id: "acct".to_owned(),
+                stream_id: 5,
+                topic: "macOS".to_owned(),
+            }
+        );
     }
 
     #[test]

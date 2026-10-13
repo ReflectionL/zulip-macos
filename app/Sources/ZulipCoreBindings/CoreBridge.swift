@@ -430,6 +430,10 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
     case loadMedia(requestID: UInt64, accountID: String, remoteURL: String)
     case markRead(requestID: UInt64, accountID: String, messageIDs: [Int64])
     case refreshPresence(requestID: UInt64, accountID: String, isActive: Bool)
+    /// Tells the conversation's other participants that the user started or
+    /// stopped typing. The core skips it when the account's privacy settings
+    /// forbid sharing; there is no response.
+    case setTyping(requestID: UInt64, key: ConversationKey, isTyping: Bool)
     case fetchReadReceipts(requestID: UInt64, accountID: String, messageID: Int64)
     case fetchMessageSource(requestID: UInt64, accountID: String, messageID: Int64)
     case createChannel(
@@ -473,6 +477,7 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
              let .loadMedia(requestID, _, _),
              let .markRead(requestID, _, _),
              let .refreshPresence(requestID, _, _),
+             let .setTyping(requestID, _, _),
              let .fetchReadReceipts(requestID, _, _),
              let .fetchMessageSource(requestID, _, _),
              let .createChannel(requestID, _, _, _, _, _),
@@ -527,6 +532,8 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
             "BridgeCommand.markRead"
         case .refreshPresence:
             "BridgeCommand.refreshPresence"
+        case .setTyping:
+            "BridgeCommand.setTyping"
         case .fetchReadReceipts:
             "BridgeCommand.fetchReadReceipts"
         case .fetchMessageSource:
@@ -692,6 +699,8 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
             )
         case let .refreshPresence(requestID, accountID, isActive):
             .refreshPresence(requestId: requestID, accountId: accountID, isActive: isActive)
+        case let .setTyping(requestID, key, isTyping):
+            .setTyping(requestId: requestID, key: try key.ffiValue(), isTyping: isTyping)
         case let .fetchReadReceipts(requestID, accountID, messageID):
             .fetchReadReceipts(requestId: requestID, accountId: accountID, messageId: messageID)
         case let .createChannel(requestID, accountID, name, description, isPrivate, memberIDs):
@@ -787,6 +796,9 @@ public enum BridgeEvent:
     case retryScheduled(accountID: String, delayMilliseconds: UInt64)
     case syncResumed(accountID: String)
     case presenceUpdated(accountID: String, presences: [LivePresence])
+    /// Somebody else started or stopped typing in a topic or direct-message
+    /// conversation. `key` is the app's own key for that conversation.
+    case typingChanged(accountID: String, key: ConversationKey, senderID: Int64, isTyping: Bool)
     /// Who has read one of the user's messages; `isAvailable` is false when the
     /// server cannot report read receipts for it.
     case readReceiptsLoaded(
@@ -826,7 +838,7 @@ public enum BridgeEvent:
         case let .failed(requestID, _):
             requestID ?? 0
         case .snapshotUpdated, .retryScheduled, .syncResumed, .presenceUpdated,
-             .readReceiptsLoaded:
+             .typingChanged, .readReceiptsLoaded:
             0
         }
     }
@@ -883,6 +895,8 @@ public enum BridgeEvent:
             "Sync resumed"
         case .presenceUpdated:
             "Presence updated"
+        case .typingChanged:
+            "Typing changed"
         case .readReceiptsLoaded:
             "Read receipts loaded"
         case .disconnected:
@@ -1371,6 +1385,13 @@ private extension BridgeEvent {
                         }
                     )
                 }
+            )
+        case let .typingChanged(accountID, key, senderID, isTyping):
+            self = .typingChanged(
+                accountID: accountID,
+                key: ConversationKey(key),
+                senderID: senderID,
+                isTyping: isTyping
             )
         case let .readReceiptsLoaded(accountID, messageID, userIDs, isAvailable):
             self = .readReceiptsLoaded(

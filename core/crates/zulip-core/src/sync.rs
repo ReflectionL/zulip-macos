@@ -1,6 +1,9 @@
 //! Initial Zulip state registration, event long-polling, and domain reduction.
 
-use std::{collections::BTreeMap, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Duration,
+};
 
 use futures_util::StreamExt;
 use reqwest::{Client, Response};
@@ -23,13 +26,14 @@ const MIN_LONGPOLL_TIMEOUT_SECONDS: u64 = 5;
 const MAX_LONGPOLL_TIMEOUT_SECONDS: u64 = 600;
 const EVENT_TYPES_JSON: &str = concat!(
     r#"["message","subscription","realm_user","update_message","#,
-    r#""delete_message","reaction","update_message_flags","heartbeat","restart"]"#
+    r#""delete_message","reaction","update_message_flags","typing","user_settings","#,
+    r#""heartbeat","restart"]"#
 );
 /// Initial state additionally includes organization settings (for the icon);
 /// realm change events are not consumed, so they are not subscribed to.
 const FETCH_EVENT_TYPES_JSON: &str = concat!(
     r#"["message","recent_private_conversations","subscription","realm_user","realm","update_message","#,
-    r#""delete_message","reaction","update_message_flags","heartbeat","restart"]"#
+    r#""delete_message","reaction","update_message_flags","user_settings","heartbeat","restart"]"#
 );
 
 /// A server-allocated queue and its current acknowledgement cursor.
@@ -150,6 +154,54 @@ pub struct UnreadBucket {
     pub mention_count: u32,
 }
 
+/// Where somebody is typing a message.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TypingScope {
+    /// A direct-message conversation: every participant the event names.
+    Direct {
+        /// Recipients as reported by the server (the sender may be included).
+        user_ids: Vec<i64>,
+    },
+    /// A topic in a channel.
+    Topic {
+        /// Channel identifier.
+        stream_id: i64,
+        /// Topic name; empty for the channel's general chat.
+        topic: String,
+    },
+}
+
+/// One person starting or stopping typing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TypingNotice {
+    /// `true` for `start`, `false` for `stop`.
+    pub started: bool,
+    /// Who is typing.
+    pub sender_id: i64,
+    /// Where they are typing.
+    pub scope: TypingScope,
+}
+
+/// Whether the account lets others see that it is typing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TypingPreferences {
+    /// `send_private_message_typing_notifications`.
+    pub direct: bool,
+    /// `send_stream_typing_notifications`.
+    pub channel: bool,
+}
+
+impl Default for TypingPreferences {
+    /// Servers that predate the settings send direct-message typing and know
+    /// nothing of channel typing.
+    fn default() -> Self {
+        Self {
+            direct: true,
+            channel: false,
+        }
+    }
+}
+
 /// Immutable state seeded by the atomic `register` response.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct BootstrapState {
@@ -165,6 +217,8 @@ pub struct BootstrapState {
     pub recent_direct_conversations: Vec<RecentDirectConversation>,
     /// Messages the account has not read yet, from the server's unread index.
     pub unread: Vec<UnreadMessage>,
+    /// Typing-notification privacy settings of the account.
+    pub typing_preferences: TypingPreferences,
 }
 
 /// Result of registering a live event queue.
@@ -191,6 +245,8 @@ pub struct MessageUpdate {
     pub topic: Option<String>,
     /// Replacement channel identifier, when moved.
     pub stream_id: Option<i64>,
+    /// Channel the message was in before this update, when the event names it.
+    pub origin_stream_id: Option<i64>,
 }
 
 /// A partial update to one subscribed channel.
@@ -256,6 +312,24 @@ pub enum SyncEvent {
         event_id: i64,
         /// Deleted message identifiers.
         message_ids: Vec<i64>,
+        /// Channel the messages were in, when the event names it.
+        stream_id: Option<i64>,
+    },
+    /// Somebody started or stopped typing.
+    Typing {
+        /// Monotonic queue-local event identifier.
+        event_id: i64,
+        /// The notice itself.
+        notice: TypingNotice,
+    },
+    /// The account changed whether it sends typing notifications.
+    TypingPreferenceChanged {
+        /// Monotonic queue-local event identifier.
+        event_id: i64,
+        /// `true` for channel typing, `false` for direct-message typing.
+        channel: bool,
+        /// The new setting.
+        enabled: bool,
     },
     /// A personal flag such as `read` or `starred` was added or removed.
     MessageFlagsUpdated {
@@ -345,6 +419,8 @@ impl SyncEvent {
             | Self::MessageAdded { event_id, .. }
             | Self::MessageUpdated { event_id, .. }
             | Self::MessagesDeleted { event_id, .. }
+            | Self::Typing { event_id, .. }
+            | Self::TypingPreferenceChanged { event_id, .. }
             | Self::MessageFlagsUpdated { event_id, .. }
             | Self::ReactionChanged { event_id, .. }
             | Self::ChannelsUpserted { event_id, .. }
@@ -390,6 +466,10 @@ pub struct BatchOutcome {
     pub heartbeats: usize,
     /// One immutable snapshot when the batch changed domain state.
     pub snapshot: Option<SyncSnapshot>,
+    /// Channels whose topic lists a rename, move or deletion may have changed.
+    pub topic_changed_streams: Vec<i64>,
+    /// People who started or stopped typing, oldest first.
+    pub typing: Vec<TypingNotice>,
 }
 
 /// Errors while registering or polling a Zulip event queue.
@@ -481,6 +561,7 @@ impl EventQueueClient {
             "empty_topic_name": true,
             "notification_settings_null": true,
             "simplified_presence_events": true,
+            "stream_typing_notifications": true,
             "user_list_incomplete": true
         })
         .to_string();
@@ -788,6 +869,12 @@ impl SyncSession {
         self.reducer.snapshot()
     }
 
+    /// Returns whether the account shares that it is typing.
+    #[must_use]
+    pub const fn typing_preferences(&self) -> TypingPreferences {
+        self.reducer.typing_preferences()
+    }
+
     /// Polls or continues a pending full resynchronization.
     ///
     /// Queue expiry and fresh `restart` events immediately attempt an atomic
@@ -876,6 +963,9 @@ pub struct SyncReducer {
     realm_icon_url: Option<String>,
     recent_direct_conversations: Vec<RecentDirectConversation>,
     unread: BTreeMap<i64, UnreadMessage>,
+    topic_changed_streams: BTreeSet<i64>,
+    typing_preferences: TypingPreferences,
+    typing_notices: Vec<TypingNotice>,
 }
 
 impl SyncReducer {
@@ -911,6 +1001,9 @@ impl SyncReducer {
                 .into_iter()
                 .map(|message| (message.id, message))
                 .collect(),
+            topic_changed_streams: BTreeSet::new(),
+            typing_preferences: bootstrap.typing_preferences,
+            typing_notices: Vec::new(),
         }
     }
 
@@ -971,6 +1064,12 @@ impl SyncReducer {
         self.last_event_id
     }
 
+    /// Returns whether the account shares that it is typing.
+    #[must_use]
+    pub const fn typing_preferences(&self) -> TypingPreferences {
+        self.typing_preferences
+    }
+
     /// Reduces one poll response and publishes no more than one new snapshot.
     ///
     /// Events are sorted defensively. IDs need not be consecutive; duplicates
@@ -996,6 +1095,9 @@ impl SyncReducer {
             self.last_event_id = event_id;
         }
 
+        // A rename or deletion changes the channel's topic list even when none of
+        // the affected messages is stored here, and the snapshot carries that list.
+        domain_changed |= !self.topic_changed_streams.is_empty();
         let snapshot = if domain_changed {
             self.revision = self.revision.saturating_add(1);
             Some(self.snapshot())
@@ -1008,6 +1110,10 @@ impl SyncReducer {
             ignored_events,
             heartbeats,
             snapshot,
+            topic_changed_streams: std::mem::take(&mut self.topic_changed_streams)
+                .into_iter()
+                .collect(),
+            typing: std::mem::take(&mut self.typing_notices),
         }
     }
 
@@ -1041,9 +1147,13 @@ impl SyncReducer {
         changed
     }
 
-    fn delete_messages(&mut self, message_ids: &[i64]) -> bool {
+    fn delete_messages(&mut self, message_ids: &[i64], stream_id: Option<i64>) -> bool {
         let mut changed = false;
+        self.topic_changed_streams.extend(stream_id);
         for message_id in message_ids {
+            if let Some(stream_id) = self.messages.get(message_id).and_then(|m| m.stream_id) {
+                self.topic_changed_streams.insert(stream_id);
+            }
             changed |= self.messages.remove(message_id).is_some();
             changed |= self.unread.remove(message_id).is_some();
         }
@@ -1109,6 +1219,12 @@ impl SyncReducer {
     /// index. A move can span many messages; a content edit names exactly one.
     fn apply_message_update(&mut self, update: &MessageUpdate) -> bool {
         let mut changed = false;
+        if update.topic.is_some()
+            || (update.stream_id.is_some() && update.stream_id != update.origin_stream_id)
+        {
+            self.topic_changed_streams
+                .extend(update.origin_stream_id.into_iter().chain(update.stream_id));
+        }
         if let Some(content_html) = &update.content_html
             && let Some(message) = self.messages.get_mut(&update.message_id)
             && message.content_html != *content_html
@@ -1156,6 +1272,21 @@ impl SyncReducer {
         changed
     }
 
+    /// Typing is transient: reported with the batch, never part of a snapshot.
+    fn record_typing(&mut self, notice: TypingNotice) -> bool {
+        self.typing_notices.push(notice);
+        false
+    }
+
+    fn set_typing_preference(&mut self, channel: bool, enabled: bool) -> bool {
+        if channel {
+            self.typing_preferences.channel = enabled;
+        } else {
+            self.typing_preferences.direct = enabled;
+        }
+        false
+    }
+
     fn apply_reaction_change(
         &mut self,
         added: bool,
@@ -1190,7 +1321,15 @@ impl SyncReducer {
                 unread_changed || previous.as_ref() != Some(&message)
             }
             SyncEvent::MessageUpdated { update, .. } => self.apply_message_update(&update),
-            SyncEvent::MessagesDeleted { message_ids, .. } => self.delete_messages(&message_ids),
+            SyncEvent::Typing { notice, .. } => self.record_typing(notice),
+            SyncEvent::TypingPreferenceChanged {
+                channel, enabled, ..
+            } => self.set_typing_preference(channel, enabled),
+            SyncEvent::MessagesDeleted {
+                message_ids,
+                stream_id,
+                ..
+            } => self.delete_messages(&message_ids, stream_id),
             SyncEvent::MessageFlagsUpdated {
                 added,
                 flag,
@@ -1476,6 +1615,8 @@ struct RegisterDocument {
     recent_private_conversations: Vec<RecentConversationDocument>,
     #[serde(default)]
     unread_msgs: Option<Value>,
+    #[serde(default)]
+    user_settings: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1531,6 +1672,7 @@ impl RegisterDocument {
             .filter_map(|message| message.normalize().ok())
             .collect();
         let unread = parse_unread_messages(self.unread_msgs.as_ref());
+        let typing_preferences = parse_typing_preferences(self.user_settings.as_ref());
 
         Ok(RegisteredQueue {
             queue: EventQueue {
@@ -1558,6 +1700,7 @@ impl RegisterDocument {
                     conversations
                 },
                 unread,
+                typing_preferences,
             },
             zulip_feature_level: self.zulip_feature_level,
         })
@@ -1617,6 +1760,7 @@ impl EventDocument {
                     // is only present when the message moved.
                     stream_id: optional_integer_field(&self.payload, "new_stream_id")
                         .or_else(|| optional_integer_field(&self.payload, "stream_id")),
+                    origin_stream_id: optional_integer_field(&self.payload, "stream_id"),
                 },
             }),
             "delete_message" => {
@@ -1634,6 +1778,7 @@ impl EventDocument {
                 Ok(SyncEvent::MessagesDeleted {
                     event_id: self.id,
                     message_ids,
+                    stream_id: optional_integer_field(&self.payload, "stream_id"),
                 })
             }
             "update_message_flags" => {
@@ -1664,10 +1809,82 @@ impl EventDocument {
             }
             "subscription" => self.normalize_subscription(),
             "realm_user" => self.normalize_user(),
+            "typing" => Ok(self.normalize_typing()),
+            "user_settings" => Ok(self.normalize_user_setting()),
             _ => Ok(SyncEvent::Unknown {
                 event_id: self.id,
                 event_type: self.event_type,
             }),
+        }
+    }
+
+    fn normalize_typing(self) -> SyncEvent {
+        let unknown = |event_id: i64| SyncEvent::Unknown {
+            event_id,
+            event_type: "typing".to_owned(),
+        };
+        let Some(sender_id) = self
+            .payload
+            .get("sender")
+            .and_then(|sender| sender.get("user_id"))
+            .and_then(Value::as_i64)
+        else {
+            return unknown(self.id);
+        };
+        let scope = match string_field(&self.payload, "message_type").as_deref() {
+            Some("stream") => {
+                let (Some(stream_id), Some(topic)) = (
+                    optional_integer_field(&self.payload, "stream_id"),
+                    string_field(&self.payload, "topic")
+                        .or_else(|| string_field(&self.payload, "subject")),
+                ) else {
+                    return unknown(self.id);
+                };
+                TypingScope::Topic { stream_id, topic }
+            }
+            Some("direct" | "private") => TypingScope::Direct {
+                user_ids: self
+                    .payload
+                    .get("recipients")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|recipient| recipient.get("user_id").and_then(Value::as_i64))
+                    .collect(),
+            },
+            _ => return unknown(self.id),
+        };
+        SyncEvent::Typing {
+            event_id: self.id,
+            notice: TypingNotice {
+                started: string_field(&self.payload, "op").as_deref() != Some("stop"),
+                sender_id,
+                scope,
+            },
+        }
+    }
+
+    fn normalize_user_setting(self) -> SyncEvent {
+        let channel = match string_field(&self.payload, "property").as_deref() {
+            Some("send_private_message_typing_notifications") => false,
+            Some("send_stream_typing_notifications") => true,
+            _ => {
+                return SyncEvent::Unknown {
+                    event_id: self.id,
+                    event_type: self.event_type,
+                };
+            }
+        };
+        match self.payload.get("value").and_then(Value::as_bool) {
+            Some(enabled) => SyncEvent::TypingPreferenceChanged {
+                event_id: self.id,
+                channel,
+                enabled,
+            },
+            None => SyncEvent::Unknown {
+                event_id: self.id,
+                event_type: self.event_type,
+            },
         }
     }
 
@@ -1959,6 +2176,21 @@ fn default_channel_color() -> String {
     "#888888".to_owned()
 }
 
+/// Reads the typing privacy settings from a `register` response's `user_settings`.
+fn parse_typing_preferences(settings: Option<&Value>) -> TypingPreferences {
+    let defaults = TypingPreferences::default();
+    let flag = |name: &str, fallback: bool| {
+        settings
+            .and_then(|value| value.get(name))
+            .and_then(Value::as_bool)
+            .unwrap_or(fallback)
+    };
+    TypingPreferences {
+        direct: flag("send_private_message_typing_notifications", defaults.direct),
+        channel: flag("send_stream_typing_notifications", defaults.channel),
+    }
+}
+
 fn value_field<'a>(
     payload: &'a Map<String, Value>,
     name: &'static str,
@@ -2065,8 +2297,8 @@ mod tests {
     use super::{
         BootstrapState, ChannelSummary, EventQueueClient, MessageSummary, MessageUpdate,
         RecoveryPolicy, ResyncReason, RetryBackoff, RetryOperation, SyncCycle, SyncError,
-        SyncEvent, SyncReducer, SyncSession, UnreadBucket, UserSummary, Value,
-        parse_unread_messages,
+        SyncEvent, SyncReducer, SyncSession, TypingNotice, TypingPreferences, TypingScope,
+        UnreadBucket, UserSummary, Value, parse_unread_messages,
     };
     use crate::auth::SecretString;
 
@@ -2215,6 +2447,7 @@ mod tests {
                 realm_icon_url: None,
                 recent_direct_conversations: Vec::new(),
                 unread: Vec::new(),
+                typing_preferences: TypingPreferences::default(),
             },
         );
         let message = fixture_message(100, "<p>first</p>");
@@ -2228,6 +2461,7 @@ mod tests {
                     content_html: Some("<p>edited</p>".to_owned()),
                     topic: None,
                     stream_id: None,
+                    origin_stream_id: None,
                 },
             },
             SyncEvent::Heartbeat { event_id: 12 },
@@ -2276,6 +2510,7 @@ mod tests {
                 realm_icon_url: None,
                 recent_direct_conversations: Vec::new(),
                 unread: Vec::new(),
+                typing_preferences: TypingPreferences::default(),
             },
         );
 
@@ -2295,6 +2530,7 @@ mod tests {
             SyncEvent::MessagesDeleted {
                 event_id: 8,
                 message_ids: vec![100],
+                stream_id: None,
             },
         ]);
 
@@ -2668,6 +2904,62 @@ mod tests {
     }
 
     #[test]
+    fn renames_and_deletions_report_the_channels_whose_topics_changed() {
+        let mut reducer = SyncReducer::new(
+            0,
+            BootstrapState {
+                messages: vec![fixture_message(1, "<p>a</p>")],
+                ..BootstrapState::default()
+            },
+        );
+        let quiet = reducer.apply_batch(vec![SyncEvent::MessageUpdated {
+            event_id: 1,
+            update: MessageUpdate {
+                message_id: 1,
+                content_html: Some("<p>edited</p>".to_owned()),
+                stream_id: Some(5),
+                origin_stream_id: Some(5),
+                ..MessageUpdate::default()
+            },
+        }]);
+        assert!(quiet.topic_changed_streams.is_empty());
+
+        let renamed = reducer.apply_batch(vec![SyncEvent::MessageUpdated {
+            event_id: 2,
+            update: MessageUpdate {
+                message_id: 1,
+                topic: Some("renamed".to_owned()),
+                stream_id: Some(5),
+                origin_stream_id: Some(5),
+                ..MessageUpdate::default()
+            },
+        }]);
+        assert_eq!(renamed.topic_changed_streams, vec![5]);
+
+        // The deleted message is known, so its channel is found even when the
+        // event names none; an unknown message still reports the event's channel.
+        let deleted = reducer.apply_batch(vec![
+            SyncEvent::MessagesDeleted {
+                event_id: 3,
+                message_ids: vec![1],
+                stream_id: None,
+            },
+            SyncEvent::MessagesDeleted {
+                event_id: 4,
+                message_ids: vec![99],
+                stream_id: Some(8),
+            },
+        ]);
+        assert_eq!(deleted.topic_changed_streams, vec![5, 8]);
+        assert!(
+            reducer
+                .apply_batch(vec![SyncEvent::Heartbeat { event_id: 5 }])
+                .topic_changed_streams
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn channel_moves_prefer_the_new_channel_and_apply_to_every_message() {
         let mut reducer = SyncReducer::new(
             0,
@@ -2687,8 +2979,10 @@ mod tests {
                 content_html: None,
                 topic: Some("moved".to_owned()),
                 stream_id: Some(9),
+                origin_stream_id: Some(5),
             },
         }]);
+        assert_eq!(outcome.topic_changed_streams, vec![5, 9]);
         let snapshot = outcome.snapshot.expect("changed");
         assert!(snapshot.messages.iter().all(|message| {
             message.stream_id == Some(9) && message.topic.as_deref() == Some("moved")
@@ -2781,6 +3075,88 @@ mod tests {
         assert!(outcome.snapshot.is_none());
         assert_eq!(session.queue().last_event_id, 43);
         assert_eq!(session.snapshot().channels, initial.channels);
+    }
+
+    #[tokio::test]
+    async fn typing_events_and_settings_are_reported_without_a_snapshot() {
+        let register = r#"{
+            "result":"success",
+            "queue_id":"queue-fixture",
+            "last_event_id":40,
+            "realm_users":[],
+            "subscriptions":[],
+            "user_settings":{
+                "send_private_message_typing_notifications":false,
+                "send_stream_typing_notifications":true
+            }
+        }"#;
+        let (server, requests) = spawn_mock(vec![
+            (StatusCode::OK, register.to_owned()),
+            (
+                StatusCode::OK,
+                r#"{
+                    "result":"success",
+                    "queue_id":"queue-fixture",
+                    "events":[
+                        {"id":41,"type":"typing","op":"start","message_type":"direct",
+                         "sender":{"user_id":22,"email":"theo@example.com"},
+                         "recipients":[{"user_id":9,"email":"maya@example.com"},
+                                       {"user_id":22,"email":"theo@example.com"}]},
+                        {"id":42,"type":"typing","op":"start","message_type":"stream",
+                         "sender":{"user_id":22,"email":"theo@example.com"},
+                         "stream_id":5,"topic":"macOS"},
+                        {"id":43,"type":"typing","op":"stop","message_type":"stream",
+                         "sender":{"user_id":22,"email":"theo@example.com"},
+                         "stream_id":5,"topic":"macOS"},
+                        {"id":44,"type":"typing","op":"start","message_type":"mystery"},
+                        {"id":45,"type":"user_settings","op":"update",
+                         "property":"send_private_message_typing_notifications","value":true}
+                    ]
+                }"#
+                .to_owned(),
+            ),
+        ]);
+        let client = EventQueueClient::new(&server, "maya@example.com", SecretString::new(API_KEY))
+            .expect("sync client");
+        let (mut session, _) = SyncSession::start(client, RecoveryPolicy::default(), 3)
+            .await
+            .expect("initial registration");
+        assert_eq!(
+            session.typing_preferences(),
+            TypingPreferences {
+                direct: false,
+                channel: true
+            }
+        );
+
+        let SyncCycle::Events(outcome) = session.advance().await else {
+            panic!("typing events are ordinary events");
+        };
+        assert!(outcome.snapshot.is_none(), "typing is not domain state");
+        assert_eq!(outcome.typing.len(), 3);
+        assert_eq!(
+            outcome.typing[0],
+            TypingNotice {
+                started: true,
+                sender_id: 22,
+                scope: TypingScope::Direct {
+                    user_ids: vec![9, 22]
+                },
+            }
+        );
+        assert_eq!(
+            outcome.typing[1].scope,
+            TypingScope::Topic {
+                stream_id: 5,
+                topic: "macOS".to_owned()
+            }
+        );
+        assert!(!outcome.typing[2].started);
+        assert!(session.typing_preferences().direct);
+
+        let register_request = requests.recv().expect("register request");
+        assert!(register_request.contains("stream_typing_notifications"));
+        assert!(register_request.contains("typing"));
     }
 
     #[tokio::test]
