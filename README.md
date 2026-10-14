@@ -92,6 +92,10 @@ roadmap lives in [`PLAN.md`](PLAN.md).
   example after the Mac sleeps) still notify once it is back. The app keeps
   macOS from napping it while signed in so notifications are not delayed; if
   the system refuses a notification, the Dock icon bounces instead.
+- The app asks macOS for permission to notify as soon as it opens, so a new
+  install or an update shows the Allow prompt right away. Settings ›
+  Notifications shows whether notifications are allowed and can ask again,
+  open the app's page in System Settings, or send a test notification.
 
 **Keyboard and appearance**
 
