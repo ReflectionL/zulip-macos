@@ -1460,6 +1460,71 @@ struct LiveSessionTests {
         #expect(core.commands.filter { if case .uploadAttachment = $0 { true } else { false } }.count == 3)
     }
 
+    @Test("Dropped files upload one at a time and a failure clears the queue")
+    func droppedFilesQueue() async throws {
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(
+            client: core,
+            credentialStore: MemoryCredentialStore()
+        )
+        model.startObserving()
+        let accountID = "account-drop"
+        let key = ConversationKey.topic(accountID: accountID, streamID: 5, topic: "macOS")
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: accountID),
+                credential: StoredAPICredential(accountID: accountID, apiKey: "key"),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.connectionState == .connected }
+        model.openConversation(key)
+
+        func uploadCount() -> Int {
+            core.commands.filter { if case .uploadAttachment = $0 { true } else { false } }.count
+        }
+
+        model.uploadDroppedFiles([URL(string: "https://example.com/a.png")!], to: key)
+        #expect(uploadCount() == 0)
+        #expect(model.notice != nil)
+
+        let first = URL(fileURLWithPath: "/tmp/drop-one.png")
+        let second = URL(fileURLWithPath: "/tmp/drop-two.png")
+        let third = URL(fileURLWithPath: "/tmp/drop-three.png")
+        model.uploadDroppedFiles([first, second, third], to: key)
+        #expect(uploadCount() == 1)
+        guard case let .uploadAttachment(firstID, _, _, firstName) = core.commands.last else {
+            Issue.record("Expected first upload command")
+            return
+        }
+        #expect(firstName == "drop-one.png")
+
+        core.emit(
+            .attachmentUploaded(
+                requestID: firstID,
+                attachment: LiveUploadedAttachment(
+                    accountID: accountID,
+                    filename: firstName,
+                    url: "/user_uploads/1/ab/one.png",
+                    markdown: "[drop-one.png](/user_uploads/1/ab/one.png)"
+                )
+            )
+        )
+        await eventually { uploadCount() == 2 }
+        guard case let .uploadAttachment(secondID, _, _, secondName) = core.commands.last else {
+            Issue.record("Expected second upload command")
+            return
+        }
+        #expect(secondName == "drop-two.png")
+
+        core.emit(.failed(requestID: secondID, message: "too large"))
+        await eventually {
+            model.attachmentUploadState == .failed(filename: secondName, message: "too large")
+        }
+        #expect(uploadCount() == 2)
+    }
+
     @Test("Media requests deduplicate, cache local URLs, and retry failures")
     func mediaState() async throws {
         let core = RecordingCoreClient()

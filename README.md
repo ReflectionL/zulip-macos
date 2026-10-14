@@ -57,7 +57,8 @@ roadmap lives in [`PLAN.md`](PLAN.md).
   forward, each with visible pending, rollback and retry states. Edited
   messages carry a gray "(edited)" label.
 - `@` mention suggestions in the composer, Shift/Option+Return for a line
-  break, file upload up to 25 MiB with authenticated media caching.
+  break, file upload up to 25 MiB (attach button or drag files from Finder
+  onto the conversation) with authenticated media caching.
 - Topic workflows: start a topic, rename a topic, move a message. Channels can
   be created and renamed.
 

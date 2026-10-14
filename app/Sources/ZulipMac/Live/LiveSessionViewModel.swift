@@ -297,6 +297,7 @@ final class LiveSessionViewModel {
     private var confirmedEchoes: [Int64: Int64] = [:]
     private var attachmentUploadsByRequestID: [UInt64: PendingAttachmentUpload] = [:]
     private var failedAttachmentUpload: PendingAttachmentUpload?
+    private var queuedAttachmentUploads: [(URL, ConversationKey)] = []
     private var mediaRequestsByRequestID: [UInt64: String] = [:]
     private var pendingMediaURLs = Set<String>()
     /// Media wanted while only cached data is shown; the core has no account
@@ -1444,6 +1445,37 @@ final class LiveSessionViewModel {
         )
     }
 
+    /// Entry point for files dropped on the conversation. The first file uploads
+    /// now and the rest follow one at a time, because the composer tracks a
+    /// single upload; a failure drops whatever is still queued.
+    func uploadDroppedFiles(_ urls: [URL], to key: ConversationKey) {
+        let files = urls.filter { url in
+            guard url.isFileURL else { return false }
+            let values = try? url.resourceValues(forKeys: [.isDirectoryKey])
+            return values?.isDirectory != true
+        }
+        guard let first = files.first else {
+            notice = "Only files can be uploaded. Drag a file from Finder onto the conversation."
+            return
+        }
+        guard !attachmentUploadState.isUploading else {
+            notice = "Wait for the current upload to finish before adding more files."
+            return
+        }
+        queuedAttachmentUploads = files.dropFirst().map { ($0, key) }
+        uploadAttachment(first, to: key)
+    }
+
+    private func startNextQueuedUpload() {
+        guard !queuedAttachmentUploads.isEmpty else { return }
+        let next = queuedAttachmentUploads.removeFirst()
+        guard activeSelection == next.1 else {
+            queuedAttachmentUploads = []
+            return
+        }
+        uploadAttachment(next.0, to: next.1)
+    }
+
     func retryAttachmentUpload() {
         guard let failedAttachmentUpload else { return }
         uploadAttachment(failedAttachmentUpload.fileURL, to: failedAttachmentUpload.key)
@@ -1668,6 +1700,7 @@ final class LiveSessionViewModel {
                 filename: attachment.filename,
                 markdown: attachment.markdown
             )
+            startNextQueuedUpload()
 
         case let .mediaReady(requestID, media):
             guard let requestedURL = mediaRequestsByRequestID.removeValue(forKey: requestID) else {
@@ -1824,6 +1857,7 @@ final class LiveSessionViewModel {
                let pending = attachmentUploadsByRequestID.removeValue(forKey: requestID)
             {
                 stopSecurityScope(for: pending)
+                queuedAttachmentUploads = []
                 failedAttachmentUpload = pending.withoutSecurityScope()
                 attachmentUploadState = .failed(filename: pending.filename, message: message)
                 notice = "Attachment upload failed. You can retry it."
@@ -1998,6 +2032,7 @@ final class LiveSessionViewModel {
         confirmedEchoes = [:]
         attachmentUploadsByRequestID = [:]
         failedAttachmentUpload = nil
+        queuedAttachmentUploads = []
         attachmentUploadState = .idle
         attachmentInsertion = nil
         mediaRequestsByRequestID = [:]

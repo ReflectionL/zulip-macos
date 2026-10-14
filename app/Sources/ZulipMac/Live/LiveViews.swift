@@ -447,6 +447,9 @@ private struct LiveWindowView: View {
                 uploadAttachment: { url in
                     session.uploadAttachment(url, to: page.key)
                 },
+                uploadDroppedFiles: { urls in
+                    session.uploadDroppedFiles(urls, to: page.key)
+                },
                 retryAttachmentUpload: session.retryAttachmentUpload,
                 consumeAttachmentInsertion: session.consumeAttachmentInsertion,
                 mediaLocalURLs: session.mediaLocalURLs,

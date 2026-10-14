@@ -31,6 +31,8 @@ struct ConversationSurface: View {
     var attachmentUploadState = AttachmentUploadState.idle
     var attachmentInsertion: ComposerAttachmentInsertion?
     var uploadAttachment: ((URL) -> Void)?
+    /// Files dropped onto the conversation; the first uploads now, the rest queue.
+    var uploadDroppedFiles: (([URL]) -> Void)?
     var retryAttachmentUpload: (() -> Void)?
     var consumeAttachmentInsertion: ((UInt64) -> Void)?
     var mediaLocalURLs: [String: String] = [:]
@@ -55,6 +57,7 @@ struct ConversationSurface: View {
     @State private var forwardingMessage: MessageViewData?
     @State private var pendingQuote: ComposerQuote?
     @State private var isChoosingAttachment = false
+    @State private var isDropTargeted = false
     @FocusState private var isComposerFocused: Bool
 
     init(
@@ -85,6 +88,7 @@ struct ConversationSurface: View {
         attachmentUploadState: AttachmentUploadState = .idle,
         attachmentInsertion: ComposerAttachmentInsertion? = nil,
         uploadAttachment: ((URL) -> Void)? = nil,
+        uploadDroppedFiles: (([URL]) -> Void)? = nil,
         retryAttachmentUpload: (() -> Void)? = nil,
         consumeAttachmentInsertion: ((UInt64) -> Void)? = nil,
         mediaLocalURLs: [String: String] = [:],
@@ -125,6 +129,7 @@ struct ConversationSurface: View {
         self.attachmentUploadState = attachmentUploadState
         self.attachmentInsertion = attachmentInsertion
         self.uploadAttachment = uploadAttachment
+        self.uploadDroppedFiles = uploadDroppedFiles
         self.retryAttachmentUpload = retryAttachmentUpload
         self.consumeAttachmentInsertion = consumeAttachmentInsertion
         self.mediaLocalURLs = mediaLocalURLs
@@ -330,6 +335,32 @@ struct ConversationSurface: View {
             .animation(.easeOut(duration: 0.15), value: typingDescription)
         }
         .background(AppTheme.Colors.canvas)
+        .dropDestination(for: URL.self) { urls, _ in
+            guard let uploadDroppedFiles, !isOffline, !urls.isEmpty else {
+                return false
+            }
+            uploadDroppedFiles(urls)
+            return true
+        } isTargeted: { targeted in
+            isDropTargeted = targeted && uploadDroppedFiles != nil && !isOffline
+        }
+        .overlay {
+            if isDropTargeted {
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 3, dash: [8]))
+                    .background(Color.accentColor.opacity(0.08))
+                    .overlay {
+                        Label("Drop to upload", systemImage: "arrow.up.doc")
+                            .font(.headline)
+                            .padding(AppTheme.Spacing.large)
+                            .background(.regularMaterial, in: Capsule())
+                    }
+                    .padding(AppTheme.Spacing.small)
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.12), value: isDropTargeted)
         .conversationToolbar(
             title: page.title,
             subtitle: page.subtitle,
