@@ -23,6 +23,22 @@ enum MessageGrouping {
         return ids
     }
 
+    /// Identifiers of messages that open a new calendar day, the first loaded
+    /// message included. A date separator is drawn above each of them.
+    static func dayStartIDs(
+        in messages: [MessageViewData],
+        calendar: Calendar = .current
+    ) -> Set<Int64> {
+        var ids = Set<Int64>()
+        for (index, message) in messages.enumerated()
+            where index == 0
+            || !calendar.isDate(message.timestamp, inSameDayAs: messages[index - 1].timestamp)
+        {
+            ids.insert(message.id)
+        }
+        return ids
+    }
+
     static func continues(
         _ current: MessageViewData,
         after previous: MessageViewData,

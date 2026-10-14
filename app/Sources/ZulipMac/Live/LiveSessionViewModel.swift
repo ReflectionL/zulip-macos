@@ -211,6 +211,17 @@ final class LiveSessionViewModel {
 
     @ObservationIgnored private let client: any CoreClientProtocol
     @ObservationIgnored private let credentialStore: any CredentialStore
+    /// The key last read from or written to the Keychain, so a session started from
+    /// it does not write the same key back.
+    @ObservationIgnored private var storedCredential: StoredAPICredential?
+    @ObservationIgnored private var credentialSave: Task<Void, Never>?
+    /// The newest live snapshot not yet applied, and the task that applies it.
+    @ObservationIgnored private var pendingSnapshot: LiveSnapshot?
+    @ObservationIgnored private var snapshotApply: Task<Void, Never>?
+    /// The user list the mention candidates were last built from.
+    @ObservationIgnored private var candidateUsers: (ownUserID: Int64, users: [LiveUserSnapshot])?
+    /// Keeps App Nap from throttling the app while it waits for new messages.
+    @ObservationIgnored private var listeningActivity: NSObjectProtocol?
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let notifier: (any MessageNotifier)?
     @ObservationIgnored private var notificationPlanner = NotificationPlanner()
@@ -679,6 +690,7 @@ final class LiveSessionViewModel {
         let accountID = Self.accountID(serverURL: trimmedServer, email: trimmedEmail)
         do {
             let credential = try await credentialStore.load(accountID: accountID)
+            storedCredential = credential
             authenticationMethod = .apiKey
             connectionState = .connecting
             notice = nil
@@ -1600,6 +1612,8 @@ final class LiveSessionViewModel {
 
         case let .sessionStarted(_, identity, credential, snapshot):
             cancelReconnect()
+            // A snapshot of the session this one replaces must not land on top.
+            pendingSnapshot = nil
             hasLiveSession = true
             self.identity = identity
             serverURL = identity.serverURL
@@ -1611,11 +1625,8 @@ final class LiveSessionViewModel {
             notifier?.requestAuthorization()
             loadDrafts(for: identity.accountID)
             startPresenceUpdates(accountID: identity.accountID)
-            do {
-                try await credentialStore.save(credential)
-            } catch {
-                notice = "Connected, but the API key could not be saved in Keychain."
-            }
+            saveCredential(credential)
+            keepListeningInBackground()
             connectionState = .connected
             if let activeSelection, activeSelection.accountID == identity.accountID {
                 // Keep the user's place when a cached session went live.
@@ -1628,14 +1639,16 @@ final class LiveSessionViewModel {
             guard identity?.accountID == accountID else {
                 return
             }
-            let shouldRefresh = activeSelection.map {
-                conversationAffected(by: snapshot, key: $0)
-            } ?? false
-            apply(snapshot)
-            notifyAboutNewMessages(in: snapshot)
             connectionState = .connected
-            if shouldRefresh, let activeSelection {
-                refreshConversation(activeSelection)
+            // Every snapshot is complete, so in a burst only the newest needs
+            // applying, and the pages and events queued behind it must not wait
+            // while each older one is applied in turn.
+            pendingSnapshot = snapshot
+            if snapshotApply == nil {
+                snapshotApply = Task { [weak self] in
+                    await Task.yield()
+                    self?.applyPendingSnapshot()
+                }
             }
 
         case let .conversationOpened(requestID, page):
@@ -2023,6 +2036,8 @@ final class LiveSessionViewModel {
                 cancelReconnect()
                 resetSessionState()
                 if let rejectedAccountID {
+                    await credentialSave?.value
+                    storedCredential = nil
                     try? await credentialStore.delete(accountID: rejectedAccountID)
                 }
                 forgetLastAccount()
@@ -2033,8 +2048,63 @@ final class LiveSessionViewModel {
         }
     }
 
+    private func applyPendingSnapshot() {
+        snapshotApply = nil
+        guard let snapshot = pendingSnapshot else {
+            return
+        }
+        pendingSnapshot = nil
+        let shouldRefresh = activeSelection.map {
+            conversationAffected(by: snapshot, key: $0)
+        } ?? false
+        apply(snapshot)
+        notifyAboutNewMessages(in: snapshot)
+        if shouldRefresh, let activeSelection {
+            refreshConversation(activeSelection)
+        }
+    }
+
+    /// Writes a newly issued key to the Keychain beside the event loop. A Keychain
+    /// call can stall (an ad-hoc signed build may wait on a file-keychain access
+    /// prompt), and every later core event, including opened conversations and new
+    /// messages, used to queue behind it.
+    private func saveCredential(_ credential: StoredAPICredential) {
+        guard credential != storedCredential else {
+            return
+        }
+        storedCredential = credential
+        let store = credentialStore
+        let previous = credentialSave
+        credentialSave = Task { [weak self] in
+            await previous?.value
+            do {
+                try await store.save(credential)
+            } catch {
+                self?.storedCredential = nil
+                self?.notice = "Connected, but the API key could not be saved in Keychain."
+            }
+        }
+    }
+
+    /// A hidden window lets macOS put the app to sleep (App Nap), which can hold
+    /// up the event queue for minutes so a message notifies late or, once the
+    /// server drops the stalled queue, not at all. Idle system sleep stays allowed.
+    private func keepListeningInBackground() {
+        guard listeningActivity == nil else {
+            return
+        }
+        listeningActivity = ProcessInfo.processInfo.beginActivity(
+            options: .userInitiatedAllowingIdleSystemSleep,
+            reason: "Waiting for new Zulip messages"
+        )
+    }
+
     private func resetSessionState() {
         hasLiveSession = false
+        if let listeningActivity {
+            ProcessInfo.processInfo.endActivity(listeningActivity)
+            self.listeningActivity = nil
+        }
         snapshotMessages = [:]
         avatarURLs = [:]
         presenceTask?.cancel()
@@ -2099,6 +2169,8 @@ final class LiveSessionViewModel {
         channelCreationState = .idle
         mentionPeople = []
         channelMemberCandidates = []
+        candidateUsers = nil
+        pendingSnapshot = nil
         isLoadingOlderMessages = false
         messageSearchState = .idle
         topicActionState = .idle
@@ -2226,17 +2298,43 @@ final class LiveSessionViewModel {
             snapshot.messages.map { ($0.messageID, $0) },
             uniquingKeysWith: { _, latest in latest }
         )
+        // Most snapshots only change messages; rebuilding (and sorting) every user
+        // of a large organization for each of them kept the main thread busy.
+        if candidateUsers?.ownUserID != identity.userID || candidateUsers?.users != snapshot.users {
+            candidateUsers = (identity.userID, snapshot.users)
+            rebuildUserIndexes(snapshot.users, identity: identity)
+        }
+        replaceKnownTopics(from: snapshot)
+        channelNotificationsDefault = snapshot.channelNotificationsDefault
+        unreadSummary = UnreadSummary(
+            buckets: snapshot.unread,
+            selfUserID: identity.userID,
+            mutedChannels: Set(snapshot.channels.filter(\.isMuted).map(\.streamID)),
+            settings: ChannelNotificationSettings(snapshot: snapshot)
+        )
+        notifier?.setBadge(unreadSummary.badge)
+        sidebarSnapshot = Self.makeSidebar(
+            snapshot: snapshot,
+            identity: identity,
+            topics: Array(knownTopics.values),
+            presence: presenceStates,
+            unread: unreadSummary
+        )
+        rebuildPresentation()
+    }
+
+    private func rebuildUserIndexes(_ users: [LiveUserSnapshot], identity: LiveSessionIdentity) {
         avatarURLs = Dictionary(
-            snapshot.users.compactMap { user in
+            users.compactMap { user in
                 user.avatarURL.map { (user.userID, $0) }
             },
             uniquingKeysWith: { _, latest in latest }
         )
         userNames = Dictionary(
-            snapshot.users.map { ($0.userID, $0.fullName) },
+            users.map { ($0.userID, $0.fullName) },
             uniquingKeysWith: { _, latest in latest }
         )
-        let others = snapshot.users
+        let others = users
             .filter { $0.isActive && $0.userID != identity.userID }
             .sorted { $0.fullName.localizedCaseInsensitiveCompare($1.fullName) == .orderedAscending }
         mentionPeople = others.map {
@@ -2255,23 +2353,6 @@ final class LiveSessionViewModel {
                     detail: $0.email ?? ""
                 )
             }
-        replaceKnownTopics(from: snapshot)
-        channelNotificationsDefault = snapshot.channelNotificationsDefault
-        unreadSummary = UnreadSummary(
-            buckets: snapshot.unread,
-            selfUserID: identity.userID,
-            mutedChannels: Set(snapshot.channels.filter(\.isMuted).map(\.streamID)),
-            settings: ChannelNotificationSettings(snapshot: snapshot)
-        )
-        notifier?.setBadge(unreadSummary.badge)
-        sidebarSnapshot = Self.makeSidebar(
-            snapshot: snapshot,
-            identity: identity,
-            topics: Array(knownTopics.values),
-            presence: presenceStates,
-            unread: unreadSummary
-        )
-        rebuildPresentation()
     }
 
     private func makeConversationPage(

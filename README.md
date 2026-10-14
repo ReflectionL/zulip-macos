@@ -38,14 +38,19 @@ roadmap lives in [`PLAN.md`](PLAN.md).
 - Unread counts on channels, topics, direct messages and Mentions (muted
   channels show none). Opening a collection, or a conversation while the app is
   in the background, does not mark messages read.
-- Conversations load 50 messages at a time with older-history paging, grouped
-  consecutive messages, readable timestamps, and a header showing the sender's
-  last activity in one-to-one chats.
+- Conversations load 50 messages at a time with older-history paging and a
+  header showing the sender's last activity in one-to-one chats. The layout
+  follows Element: consecutive messages from one person share a block that
+  opens with the avatar and the sender's name (colored per person) beside it;
+  pointing at a message highlights it and shows its time in small gray text on
+  the left (the tooltip has the full date); a centered date line separates
+  days.
 - Server-side message search and a quick switcher.
 - Native rendering of Zulip content: Markdown, links, mentions, emoji, quotes,
   lists, code and images. Images keep their real aspect ratio (height capped),
-  pictures from other sites go through the server's preview, and clicking opens
-  the default viewer. Untrusted HTML is parsed in Rust and never shown in a web
+  pictures from other sites go through the server's preview, an uploaded
+  picture that was only linked (no server preview) is still shown, and
+  clicking opens the default viewer. Untrusted HTML is parsed in Rust and never shown in a web
   view.
 - Read receipts: small overlapping avatars under your newest sent message show
   who has read it (needs Zulip 6.0 and read receipts enabled by the
@@ -80,8 +85,13 @@ roadmap lives in [`PLAN.md`](PLAN.md).
   behaves like its channel) or **Mute Topic** (dimmed, no notifications or
   unread counts); inside a muted channel there is also **Unmute Topic**. All
   of this is saved to Zulip (per-topic levels need Zulip 7.0), so the web app
-  agrees. Clicking a notification opens the message. The Dock badge shows
-  unread direct messages plus unread mentions in unmuted channels and topics.
+  agrees; this includes each channel's **general chat** topic. Clicking a
+  notification opens the message. The Dock badge shows unread direct messages
+  plus unread mentions in unmuted channels and topics.
+- Messages that arrive while the connection is being re-established (for
+  example after the Mac sleeps) still notify once it is back. The app keeps
+  macOS from napping it while signed in so notifications are not delayed; if
+  the system refuses a notification, the Dock icon bounces instead.
 
 **Keyboard and appearance**
 
@@ -122,8 +132,7 @@ file. Do not disable Gatekeeper globally.
   an edited one.
 - Custom (image) emoji appear as `:name:`; complex formulas and tables are not
   rendered.
-- The live snapshot keeps every message received since launch and the media
-  cache has no aggregate size limit yet (`REL-001`).
+- The media cache has no aggregate size limit yet (`REL-001`).
 - Read receipts rely on polling because Zulip sends no event when a message is
   read.
 - Releases are not notarized and the self-hosted live smoke is still pending

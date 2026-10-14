@@ -127,6 +127,7 @@ pub fn parse_zulip_html(html: &str) -> Vec<ContentBlock> {
         }
     }
     blocks.retain(|block| !block_is_empty(block));
+    add_missing_upload_previews(&mut blocks);
     if blocks.is_empty() {
         vec![ContentBlock::Paragraph(vec![InlineContent::Text(
             readable_text_fallback(html),
@@ -537,6 +538,86 @@ fn safe_url(value: &str) -> Option<String> {
     matches!(parsed.scheme(), "https" | "http" | "mailto").then(|| value.to_owned())
 }
 
+/// Most previews an earlier client's message gets from [`add_missing_upload_previews`].
+const MAX_ADDED_PREVIEWS: usize = 8;
+const PREVIEWED_EXTENSIONS: [&str; 8] = [
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".bmp", ".tiff",
+];
+
+/// Shows a picture for every uploaded image a message links to but the server
+/// rendered without a preview. Earlier versions of this app wrote screenshot
+/// links with a re-encoded file name (for example `%E6%88%AA%E5%B1%8F` for
+/// "截屏"), and Zulip only previews links that match the upload exactly.
+fn add_missing_upload_previews(blocks: &mut Vec<ContentBlock>) {
+    let mut previewed: Vec<String> = blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Image { url, .. } => upload_key(url),
+            _ => None,
+        })
+        .collect();
+    let mut links = Vec::new();
+    for block in blocks.iter() {
+        if let ContentBlock::Paragraph(inline) = block {
+            collect_links(inline, &mut links);
+        }
+    }
+    let mut added = 0;
+    for (label, url) in links {
+        if added == MAX_ADDED_PREVIEWS || blocks.len() >= MAX_BLOCKS {
+            break;
+        }
+        let Some(key) = upload_key(&url) else {
+            continue;
+        };
+        let lower = key.to_ascii_lowercase();
+        if url.contains("/user_uploads/thumbnail/")
+            || !PREVIEWED_EXTENSIONS
+                .iter()
+                .any(|extension| lower.ends_with(extension))
+            || previewed.contains(&key)
+        {
+            continue;
+        }
+        previewed.push(key);
+        added += 1;
+        blocks.push(ContentBlock::Image {
+            url,
+            alt: label,
+            width: None,
+            height: None,
+        });
+    }
+}
+
+fn collect_links(inline: &[InlineContent], links: &mut Vec<(String, String)>) {
+    for item in inline {
+        match item {
+            InlineContent::Link { label, url } => links.push((label.clone(), url.clone())),
+            InlineContent::Styled { content, .. } => collect_links(content, links),
+            _ => {}
+        }
+    }
+}
+
+/// The encoded path of an upload route, so that a raw and a percent-encoded
+/// spelling of the same file compare equal.
+fn upload_key(url: &str) -> Option<String> {
+    let base = Url::parse("https://zulip.invalid/").ok()?;
+    let parsed = base.join(url).ok()?;
+    let local = url.starts_with('/') && !url.starts_with("//");
+    if !(local || parsed.scheme() == "https" || parsed.scheme() == "http") {
+        return None;
+    }
+    let path = parsed.path();
+    if let Some(rest) = path.strip_prefix("/user_uploads/thumbnail/") {
+        // A preview is named after its upload plus a size: `…/name.png/840x560.webp`.
+        let (original, _size) = rest.rsplit_once('/')?;
+        return Some(format!("/user_uploads/{original}"));
+    }
+    path.starts_with("/user_uploads/").then(|| path.to_owned())
+}
+
 /// Whether `url` points at a file uploaded to a Zulip server.
 fn is_uploaded_file(url: &str) -> bool {
     const PREFIX: &str = "/user_uploads/";
@@ -891,6 +972,41 @@ mod tests {
                 height: Some(1080),
             } if url == "/user_uploads/original.png" && alt == "Preview"
         ));
+    }
+
+    #[test]
+    fn uploaded_pictures_linked_without_a_preview_get_one() {
+        // How Zulip renders a link whose file name was re-encoded by the sender.
+        let blocks = parse_zulip_html(
+            r#"<p><a href="/user_uploads/1/ab/%E6%88%AA%E5%B1%8F.png">截屏.png</a>
+                and <a href="/user_uploads/1/cd/notes.pdf">notes.pdf</a></p>"#,
+        );
+        let images = blocks
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Image { url, alt, .. } => Some((url.as_str(), alt.as_str())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            images,
+            vec![("/user_uploads/1/ab/%E6%88%AA%E5%B1%8F.png", "截屏.png")]
+        );
+
+        // A picture the server previewed is not shown twice, whatever the spelling.
+        let blocks = parse_zulip_html(
+            r#"<p><a href="/user_uploads/1/ab/截屏.png">截屏.png</a></p>
+                <div class="message_inline_image">
+                    <a href="/user_uploads/1/ab/%E6%88%AA%E5%B1%8F.png">
+                        <img src="/user_uploads/thumbnail/1/ab/%E6%88%AA%E5%B1%8F.png/840x560.webp">
+                    </a>
+                </div>"#,
+        );
+        let count = blocks
+            .iter()
+            .filter(|block| matches!(block, ContentBlock::Image { .. }))
+            .count();
+        assert_eq!(count, 1);
     }
 
     #[test]

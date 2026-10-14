@@ -396,6 +396,35 @@ impl MessageClient {
         Ok(page.messages.into_iter().rev().collect())
     }
 
+    /// Fetches unread messages newer than `after_message_id`, oldest first and at
+    /// most `limit` of them: what arrived while the event queue was lost.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageApiError`] for invalid identifiers/limits, transport,
+    /// status, size, or message normalization failures.
+    pub async fn fetch_unread_after(
+        &self,
+        after_message_id: i64,
+        limit: u16,
+    ) -> Result<Vec<MessageSummary>, MessageApiError> {
+        if after_message_id <= 0 || limit == 0 || limit > MAX_FETCH_MESSAGES {
+            return Err(MessageApiError::InvalidInput);
+        }
+        let narrow = serde_json::json!([
+            {"operator": "is", "operand": "unread"}
+        ])
+        .to_string();
+        let page = self
+            .fetch_narrow_page(narrow, after_message_id.to_string(), false, 0, limit)
+            .await?;
+        Ok(page
+            .messages
+            .into_iter()
+            .filter(|message| message.id > after_message_id)
+            .collect())
+    }
+
     /// Fetches conversation context centered on one visible server message.
     ///
     /// # Errors
@@ -824,6 +853,8 @@ impl MessageClient {
 
     /// Mutes, unmutes or follows one topic, or returns it to its channel's
     /// behavior (`POST /user_topics`, Zulip 7.0 / feature level 134 and later).
+    /// An empty `topic` is the channel's "general chat" (Zulip 10.0 / feature
+    /// level 334 and later), which Zulip may follow automatically.
     ///
     /// # Errors
     ///
@@ -837,7 +868,7 @@ impl MessageClient {
         choice: TopicVisibilityChoice,
     ) -> Result<(), MessageApiError> {
         if stream_id <= 0
-            || topic.trim().is_empty()
+            || (!topic.is_empty() && topic.trim().is_empty())
             || topic.len() > MAX_TOPIC_NAME_BYTES
             || topic.chars().any(char::is_control)
         {
@@ -1803,6 +1834,10 @@ mod tests {
                 r#"{"result":"success","msg":""}"#.to_owned(),
             ),
             (
+                StatusCode::OK,
+                r#"{"result":"success","msg":""}"#.to_owned(),
+            ),
+            (
                 StatusCode::BAD_REQUEST,
                 r#"{"result":"error","code":"BAD_REQUEST","msg":"Invalid channel ID"}"#.to_owned(),
             ),
@@ -1827,6 +1862,15 @@ mod tests {
             .await
             .expect("reset topic");
         let request = requests.recv().expect("reset request");
+        assert!(request.contains("visibility_policy=0"));
+
+        // The channel's "general chat" is the empty topic name.
+        client
+            .set_topic_visibility(5, "", TopicVisibilityChoice::Inherit)
+            .await
+            .expect("reset general chat");
+        let request = requests.recv().expect("general chat request");
+        assert!(request.contains("topic=&") || request.ends_with("topic="));
         assert!(request.contains("visibility_policy=0"));
 
         assert!(
@@ -2197,6 +2241,51 @@ mod tests {
         assert!(context.contains("num_before=10"));
         assert!(context.contains("num_after=10"));
         assert!(context.contains("%22operator%22%3A%22topic%22"));
+    }
+
+    #[tokio::test]
+    async fn unread_messages_after_a_lost_queue_are_fetched_oldest_first() {
+        let responses = vec![(
+            StatusCode::OK,
+            r#"{
+                "result":"success",
+                "found_oldest":false,
+                "found_newest":true,
+                "messages":[
+                    {
+                        "id":44,
+                        "sender_id":9,
+                        "sender_full_name":"Hua Hai",
+                        "timestamp":1770000002,
+                        "content":"<p>Are you there?</p>",
+                        "type":"private",
+                        "flags":[],
+                        "display_recipient":[{"id":7},{"id":9}]
+                    }
+                ]
+            }"#
+            .to_owned(),
+        )];
+        let (server, requests) = spawn_mock(responses);
+        let client = MessageClient::new(&server, "maya@example.com", SecretString::new(API_KEY))
+            .expect("message client");
+
+        let missed = client
+            .fetch_unread_after(43, 50)
+            .await
+            .expect("unread messages");
+        assert_eq!(
+            missed.iter().map(|message| message.id).collect::<Vec<_>>(),
+            vec![44]
+        );
+
+        let request = requests.recv().expect("unread request");
+        assert!(request.contains("anchor=43"));
+        assert!(request.contains("include_anchor=false"));
+        assert!(request.contains("num_before=0"));
+        assert!(request.contains("num_after=50"));
+        assert!(request.contains("%22operand%22%3A%22unread%22"));
+        assert!(client.fetch_unread_after(0, 50).await.is_err());
     }
 
     #[test]

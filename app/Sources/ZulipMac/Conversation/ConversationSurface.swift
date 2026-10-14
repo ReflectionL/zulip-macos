@@ -192,57 +192,63 @@ struct ConversationSurface: View {
                             }
 
                             let continuations = MessageGrouping.continuationIDs(in: messages)
+                            let dayStarts = MessageGrouping.dayStartIDs(in: messages)
                             ForEach(messages, id: \.rowID) { message in
-                                MessageRow(
-                                    message: message,
-                                    isContinuation: continuations.contains(message.id),
-                                    isFocusedSearchResult: page.focusedMessageID == message.id,
-                                    react: { target in
-                                        if let reactToMessage {
-                                            _ = reactToMessage(message, target)
-                                        } else {
-                                            toggleReaction(target, for: message.id)
-                                        }
-                                    },
-                                    toggleStar: {
-                                        if let starMessage {
-                                            _ = starMessage(message)
-                                        } else {
-                                            toggleStar(for: message.id)
-                                        }
-                                    },
-                                    moveToTopic: message.sourceStreamID == nil
-                                        ? nil
-                                        : { moveMessage?(message) },
-                                    edit: message.isOwnMessage && editMessage != nil
-                                        ? { editingMessage = message }
-                                        : nil,
-                                    delete: message.isOwnMessage && deleteMessage != nil
-                                        ? { deletingMessage = message }
-                                        : nil,
-                                    quote: quoteMessage == nil
-                                        ? nil
-                                        : { quoteMessage?(message) },
-                                    forward: forwardMessage == nil || forwardDestinations == nil
-                                        ? nil
-                                        : { forwardingMessage = message },
-                                    toggleRead: setMessageRead == nil
-                                        ? nil
-                                        : { _ = setMessageRead?(message, !message.isRead) },
-                                    retryAction: {
-                                        retryMessageAction?(message)
-                                    },
-                                    retrySend: {
-                                        retrySend?(message)
-                                    },
-                                    mediaLocalURLs: mediaLocalURLs,
-                                    mediaFailures: mediaFailures,
-                                    requestMedia: requestMedia,
-                                    retryMedia: retryMedia,
-                                    readers: readReceipts?.messageID == message.id
-                                        ? readReceipts?.readers ?? []
-                                        : []
-                                )
+                                VStack(spacing: 0) {
+                                    if dayStarts.contains(message.id) {
+                                        DateSeparator(date: message.timestamp)
+                                    }
+                                    MessageRow(
+                                        message: message,
+                                        isContinuation: continuations.contains(message.id),
+                                        isFocusedSearchResult: page.focusedMessageID == message.id,
+                                        react: { target in
+                                            if let reactToMessage {
+                                                _ = reactToMessage(message, target)
+                                            } else {
+                                                toggleReaction(target, for: message.id)
+                                            }
+                                        },
+                                        toggleStar: {
+                                            if let starMessage {
+                                                _ = starMessage(message)
+                                            } else {
+                                                toggleStar(for: message.id)
+                                            }
+                                        },
+                                        moveToTopic: message.sourceStreamID == nil
+                                            ? nil
+                                            : { moveMessage?(message) },
+                                        edit: message.isOwnMessage && editMessage != nil
+                                            ? { editingMessage = message }
+                                            : nil,
+                                        delete: message.isOwnMessage && deleteMessage != nil
+                                            ? { deletingMessage = message }
+                                            : nil,
+                                        quote: quoteMessage == nil
+                                            ? nil
+                                            : { quoteMessage?(message) },
+                                        forward: forwardMessage == nil || forwardDestinations == nil
+                                            ? nil
+                                            : { forwardingMessage = message },
+                                        toggleRead: setMessageRead == nil
+                                            ? nil
+                                            : { _ = setMessageRead?(message, !message.isRead) },
+                                        retryAction: {
+                                            retryMessageAction?(message)
+                                        },
+                                        retrySend: {
+                                            retrySend?(message)
+                                        },
+                                        mediaLocalURLs: mediaLocalURLs,
+                                        mediaFailures: mediaFailures,
+                                        requestMedia: requestMedia,
+                                        retryMedia: retryMedia,
+                                        readers: readReceipts?.messageID == message.id
+                                            ? readReceipts?.readers ?? []
+                                            : []
+                                    )
+                                }
                                 .id(message.rowID)
                             }
 
@@ -683,6 +689,44 @@ private struct ConversationToolbarModifier: ViewModifier {
     }
 }
 
+/// A centered date between two hairlines above the first message of each day.
+private struct DateSeparator: View {
+    let date: Date
+
+    var body: some View {
+        HStack(spacing: AppTheme.Spacing.medium) {
+            hairline
+            Text(label)
+                .font(AppTheme.Typography.metadata.weight(.semibold))
+                .foregroundStyle(AppTheme.Colors.secondaryText)
+                .fixedSize()
+            hairline
+        }
+        .padding(.horizontal, AppTheme.Spacing.medium)
+        .padding(.top, AppTheme.Spacing.large)
+        .padding(.bottom, AppTheme.Spacing.extraSmall)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isHeader)
+    }
+
+    private var label: String {
+        let calendar = Calendar.current
+        if calendar.isDateInToday(date) {
+            return "Today"
+        }
+        if calendar.isDateInYesterday(date) {
+            return "Yesterday"
+        }
+        return date.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day().year())
+    }
+
+    private var hairline: some View {
+        Rectangle()
+            .fill(AppTheme.Colors.subtleStroke)
+            .frame(height: AppTheme.Metrics.hairline)
+    }
+}
+
 /// Restarts read-receipt polling when the conversation or its newest sent message changes.
 private struct ReadReceiptPolling: Hashable {
     let key: ConversationKey
@@ -713,104 +757,44 @@ private struct MessageRow: View {
     @State private var isPickingReaction = false
 
     var body: some View {
-        HStack(alignment: .top, spacing: AppTheme.Spacing.medium) {
-            if isContinuation {
+        // Element-style: the first message of a block opens with the avatar and the
+        // sender's name beside it; every message's own lines sit below, with its
+        // time in the avatar column while the pointer is over it.
+        VStack(alignment: .leading, spacing: AppTheme.Spacing.extraSmall) {
+            if !isContinuation {
+                HStack(alignment: .center, spacing: AppTheme.Spacing.medium) {
+                    AvatarImage(
+                        initials: message.senderInitials,
+                        remoteURL: message.senderAvatarURL,
+                        size: Self.avatarSize,
+                        mediaLocalURLs: mediaLocalURLs,
+                        requestMedia: requestMedia
+                    )
+                    Text(message.senderName)
+                        .font(AppTheme.Typography.bodyEmphasized)
+                        .foregroundStyle(SenderColor.color(for: message.senderID))
+                        .lineLimit(1)
+                    statusLabels
+                    Spacer(minLength: 0)
+                }
+            }
+
+            HStack(alignment: .top, spacing: AppTheme.Spacing.medium) {
                 Text(message.timestamp, format: .dateTime.hour(.twoDigits(amPM: .omitted)).minute())
-                    .font(AppTheme.Typography.scaled(9).monospacedDigit())
+                    .font(AppTheme.Typography.scaled(10).monospacedDigit())
                     .foregroundStyle(AppTheme.Colors.tertiaryText)
                     .lineLimit(1)
                     .minimumScaleFactor(0.5)
                     .frame(width: Self.avatarSize, alignment: .center)
-                    .padding(.top, 3)
+                    .padding(.top, 2)
                     .opacity(isHovered ? 1 : 0)
+                    .help(message.timestamp.formatted(date: .complete, time: .standard))
                     .accessibilityHidden(true)
-            } else {
-                AvatarImage(
-                    initials: message.senderInitials,
-                    remoteURL: message.senderAvatarURL,
-                    size: Self.avatarSize,
-                    mediaLocalURLs: mediaLocalURLs,
-                    requestMedia: requestMedia
-                )
+
+                messageBody
+
+                Spacer(minLength: 0)
             }
-
-            VStack(alignment: .leading, spacing: AppTheme.Spacing.extraSmall) {
-                if isContinuation {
-                    if hasStatus {
-                        HStack(spacing: AppTheme.Spacing.small) {
-                            statusLabels
-                        }
-                    }
-                } else {
-                    HStack(alignment: .firstTextBaseline, spacing: AppTheme.Spacing.small) {
-                        Text(message.senderName)
-                            .font(AppTheme.Typography.bodyEmphasized)
-
-                        Text(MessageTimestamp.format(message.timestamp))
-                            .font(AppTheme.Typography.metadata)
-                            .foregroundStyle(AppTheme.Colors.tertiaryText)
-                            .help(message.timestamp.formatted(date: .complete, time: .standard))
-
-                        statusLabels
-                    }
-                }
-
-                if !showsPlaceholder {
-                    MessageContentView(
-                        blocks: message.content,
-                        mediaLocalURLs: mediaLocalURLs,
-                        mediaFailures: mediaFailures,
-                        requestMedia: requestMedia,
-                        retryMedia: retryMedia,
-                        trailingNote: editedContinuesText ? "(edited)" : nil
-                    )
-                }
-
-                // Content that does not end in a paragraph (a picture, code, a list)
-                // has no line to continue, so the label gets a line of its own.
-                if let editedAt = message.editedAt, !showsPlaceholder, !editedContinuesText {
-                    Text("(edited)")
-                        .font(AppTheme.Typography.metadata)
-                        .foregroundStyle(AppTheme.Colors.tertiaryText)
-                        .help("Edited \(editedAt.formatted(date: .abbreviated, time: .shortened))")
-                }
-
-                if !message.reactions.isEmpty {
-                    ReactionChips(
-                        reactions: message.reactions,
-                        isDisabled: message.actionState.isPending || message.deliveryState != .sent,
-                        react: react
-                    )
-                }
-
-                if message.deliveryState == .failed {
-                    Button("Retry send", action: retrySend)
-                        .buttonStyle(.borderless)
-                        .font(AppTheme.Typography.metadata)
-                } else if case let .failed(_, failure) = message.actionState {
-                    HStack(spacing: AppTheme.Spacing.small) {
-                        Text(failure)
-                            .lineLimit(1)
-                            .foregroundStyle(AppTheme.Colors.destructive)
-                        Button("Retry", action: retryAction)
-                            .buttonStyle(.borderless)
-                    }
-                    .font(AppTheme.Typography.metadata)
-                }
-
-                if !readers.isEmpty {
-                    ReadReceiptStack(
-                        readers: readers,
-                        mediaLocalURLs: mediaLocalURLs,
-                        requestMedia: requestMedia
-                    )
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-                    .transition(.opacity)
-                }
-            }
-            .animation(.snappy, value: readers)
-
-            Spacer(minLength: 0)
         }
         .padding(.horizontal, AppTheme.Spacing.medium)
         .padding(
@@ -898,7 +882,72 @@ private struct MessageRow: View {
         }
     }
 
-    private static let avatarSize: CGFloat = 32
+    private static let avatarSize: CGFloat = 30
+
+    /// The message's own lines: status, content, reactions and read receipts.
+    private var messageBody: some View {
+        VStack(alignment: .leading, spacing: AppTheme.Spacing.extraSmall) {
+            if isContinuation, hasStatus {
+                HStack(spacing: AppTheme.Spacing.small) {
+                    statusLabels
+                }
+            }
+
+            if !showsPlaceholder {
+                MessageContentView(
+                    blocks: message.content,
+                    mediaLocalURLs: mediaLocalURLs,
+                    mediaFailures: mediaFailures,
+                    requestMedia: requestMedia,
+                    retryMedia: retryMedia,
+                    trailingNote: editedContinuesText ? "(edited)" : nil
+                )
+            }
+
+            // Content that does not end in a paragraph (a picture, code, a list)
+            // has no line to continue, so the label gets a line of its own.
+            if let editedAt = message.editedAt, !showsPlaceholder, !editedContinuesText {
+                Text("(edited)")
+                    .font(AppTheme.Typography.metadata)
+                    .foregroundStyle(AppTheme.Colors.tertiaryText)
+                    .help("Edited \(editedAt.formatted(date: .abbreviated, time: .shortened))")
+            }
+
+            if !message.reactions.isEmpty {
+                ReactionChips(
+                    reactions: message.reactions,
+                    isDisabled: message.actionState.isPending || message.deliveryState != .sent,
+                    react: react
+                )
+            }
+
+            if message.deliveryState == .failed {
+                Button("Retry send", action: retrySend)
+                    .buttonStyle(.borderless)
+                    .font(AppTheme.Typography.metadata)
+            } else if case let .failed(_, failure) = message.actionState {
+                HStack(spacing: AppTheme.Spacing.small) {
+                    Text(failure)
+                        .lineLimit(1)
+                        .foregroundStyle(AppTheme.Colors.destructive)
+                    Button("Retry", action: retryAction)
+                        .buttonStyle(.borderless)
+                }
+                .font(AppTheme.Typography.metadata)
+            }
+
+            if !readers.isEmpty {
+                ReadReceiptStack(
+                    readers: readers,
+                    mediaLocalURLs: mediaLocalURLs,
+                    requestMedia: requestMedia
+                )
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .transition(.opacity)
+            }
+        }
+        .animation(.snappy, value: readers)
+    }
 
     /// A just-sent Markdown message waits for its server rendering instead of showing
     /// its raw source, which would flash when the rendered copy replaces it.
