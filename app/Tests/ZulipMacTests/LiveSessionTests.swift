@@ -1233,6 +1233,73 @@ struct LiveSessionTests {
         #expect(!LiveSessionViewModel.marksMessagesRead(in: .starred(accountID: accountID)))
     }
 
+    @Test("A locked screen counts as away even though the app stays frontmost")
+    func doesNotReadWhileScreenLocked() async {
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(
+            client: core,
+            credentialStore: MemoryCredentialStore()
+        )
+        model.isApplicationActive = { true }
+        model.startObserving()
+        let accountID = "account-1"
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: accountID),
+                credential: StoredAPICredential(accountID: accountID, apiKey: "key"),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.connectionState == .connected }
+
+        let key = ConversationKey.topic(accountID: accountID, streamID: 5, topic: "macOS")
+        model.openConversation(key)
+        model.userAttention.isScreenLocked = true
+        core.emit(
+            .conversationOpened(
+                requestID: 3,
+                page: LiveConversationPage(
+                    key: key,
+                    messages: [
+                        LiveMessageSnapshot(
+                            messageID: 44,
+                            senderID: 22,
+                            senderFullName: "Theo Martin",
+                            timestamp: Date(timeIntervalSince1970: 1_700_000_000),
+                            content: [.paragraph([.text("Hello")])],
+                            streamID: 5,
+                            topic: "macOS",
+                            recipientIDs: []
+                        ),
+                    ],
+                    foundOldest: true,
+                    foundNewest: true
+                )
+            )
+        )
+        await eventually {
+            if case .loaded = model.conversationState { return true }
+            return false
+        }
+        func markReadCount() -> Int {
+            core.commands.filter {
+                if case .markRead = $0 { return true }
+                return false
+            }.count
+        }
+        #expect(markReadCount() == 0)
+
+        // Unlocking does not reactivate the app, so the open chat is refreshed
+        // (and read) when the screen unlocks.
+        let before = core.commands.count
+        model.userAttention.isScreenLocked = false
+        #expect(core.commands.dropFirst(before).contains {
+            if case .openConversation = $0 { return true }
+            return false
+        })
+    }
+
     @Test("A loaded conversation is mapped safely and marked read")
     func openConversation() async {
         let core = RecordingCoreClient()

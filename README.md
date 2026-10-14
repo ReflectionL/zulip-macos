@@ -91,6 +91,9 @@ roadmap lives in [`PLAN.md`](PLAN.md).
   agrees; this includes each channel's **general chat** topic. Clicking a
   notification opens the message. The Dock badge shows unread direct messages
   plus unread mentions in unmuted channels and topics.
+  A locked screen, a sleeping display or another user's login session counts
+  as not reading, so messages that arrive meanwhile stay unread, show on the
+  badge and notify even for the conversation left open.
 - Messages that arrive while the connection is being re-established (for
   example after the Mac sleeps) still notify once it is back. The app keeps
   macOS from napping it while signed in so notifications are not delayed; if

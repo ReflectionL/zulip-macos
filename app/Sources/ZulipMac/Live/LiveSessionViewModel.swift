@@ -228,6 +228,9 @@ final class LiveSessionViewModel {
     @ObservationIgnored private let notifier: (any MessageNotifier)?
     @ObservationIgnored private var notificationPlanner = NotificationPlanner()
     @ObservationIgnored var isApplicationActive: () -> Bool = { NSApplication.shared.isActive }
+    /// Locked screen, sleeping display or switched-out login session: the app can
+    /// still be frontmost, but nobody is reading.
+    @ObservationIgnored let userAttention = UserAttention()
     @ObservationIgnored private var unreadSummary = UnreadSummary()
     @ObservationIgnored private var eventTask: Task<Void, Never>?
     @ObservationIgnored private var wakeObserver: NSObjectProtocol?
@@ -339,6 +342,9 @@ final class LiveSessionViewModel {
         notifier?.onApplicationActivated = { [weak self] in
             self?.applicationBecameActive()
         }
+        userAttention.onReturn = { [weak self] in
+            self?.userReturned()
+        }
         notifier?.onNotificationsDisabled = { [weak self] in
             self?.notice = "Notifications are turned off for Zulip Mac. "
                 + "Turn them on in System Settings › Notifications."
@@ -352,6 +358,21 @@ final class LiveSessionViewModel {
             return
         }
         refreshConversation(activeSelection)
+    }
+
+    /// Whether the user can be reading right now: the app is frontmost and the
+    /// screen is neither locked nor asleep.
+    private func isUserPresent() -> Bool {
+        isApplicationActive() && !userAttention.isAway
+    }
+
+    /// Unlocking or waking the display does not reactivate an app that stayed
+    /// frontmost, so what arrived meanwhile is read here.
+    private func userReturned() {
+        guard isApplicationActive() else {
+            return
+        }
+        applicationBecameActive()
     }
 
     /// Takes the user to the conversation a notification was about.
@@ -372,7 +393,7 @@ final class LiveSessionViewModel {
         }
         for notification in notifications {
             // Do not interrupt the conversation the user is already reading.
-            if isApplicationActive(), activeSelection == notification.route.key {
+            if isUserPresent(), activeSelection == notification.route.key {
                 continue
             }
             notifier.post(notification)
@@ -1381,7 +1402,7 @@ final class LiveSessionViewModel {
         }
         let now = Date()
         if connectionState == .connected,
-           isApplicationActive(),
+           isUserPresent(),
            now.timeIntervalSince(readReceiptRequestDates[messageID] ?? .distantPast)
                >= ReadReceiptPolicy.minimumRequestInterval
         {
@@ -1687,10 +1708,11 @@ final class LiveSessionViewModel {
                 return
             }
             conversationState = .loaded(conversationPage)
-            // While the app is in the background the user cannot be reading these;
-            // `applicationBecameActive` marks them read once they return.
+            // While the app is in the background or the screen is locked the user
+            // cannot be reading these; `applicationBecameActive` marks them read
+            // once they return.
             let messageIDs = page.messages.map(\.messageID)
-            if !messageIDs.isEmpty, let identity, isApplicationActive(),
+            if !messageIDs.isEmpty, let identity, isUserPresent(),
                Self.marksMessagesRead(in: page.key)
             {
                 submitMarkRead(accountID: identity.accountID, messageIDs: messageIDs)
@@ -2260,7 +2282,7 @@ final class LiveSessionViewModel {
             .refreshPresence(
                 requestID: nextRequestID(),
                 accountID: accountID,
-                isActive: isApplicationActive()
+                isActive: isUserPresent()
             )
         )
     }
