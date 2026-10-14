@@ -154,9 +154,10 @@ input (for example `v0.1.0-beta.1`); pushing a `v*` tag also triggers it, but
 automation sessions cannot push tags. The workflow runs `./scripts/check.sh`,
 packages the DMG with `package-dmg.sh`, and publishes a GitHub release with the
 DMG and SHA-256 file; tags containing `-` are prereleases.
-The release body is `docs/release-notes/<tag>.md` (Chinese, two sections:
-"修复（Fixes）" and "新功能（New features）", itemized for the batch, saying
-whether anything still needs the owner's feedback) followed by the standard
+The release body is `docs/release-notes/<tag>.md` (two sections:
+"修复（Fixes）" and "新功能（New features）", one short, professional line per
+change in Chinese followed by its English line, then what still needs the
+owner's feedback in both languages) followed by the standard
 install note; write that file in the pull request that lands the batch's last
 change, or in a small follow-up before dispatching. The in-app updater
 reads these releases and compares the stamped `ZulipReleaseTag`, so tags must
