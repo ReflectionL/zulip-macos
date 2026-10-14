@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import UniformTypeIdentifiers
 import ZulipCoreBindings
@@ -49,6 +50,11 @@ struct ConversationSurface: View {
     var readReceipts: ReadReceiptDisplay?
     /// Asks the core who has read the given message; returns whether to keep asking.
     var pollReadReceipts: ((Int64) -> Bool)?
+    /// A sender's status, shown as an emoji after their name.
+    var userStatus: ((Int64) -> UserStatusDisplay?)?
+    /// Where a message was posted ("#channel › topic"), shown on hover in
+    /// timelines that mix topics; nil where the header already names it.
+    var sourceLabel: ((MessageViewData) -> String?)?
 
     @State private var messages: [MessageViewData]
     @State private var draft = ""
@@ -59,6 +65,10 @@ struct ConversationSurface: View {
     @State private var pendingQuote: ComposerQuote?
     @State private var isChoosingAttachment = false
     @State private var isDropTargeted = false
+    /// What "Today" and "Yesterday" are measured from. Refreshed when the day or
+    /// the time zone changes and when the app comes back, so an open chat that
+    /// stays on screen past midnight does not keep yesterday's labels.
+    @State private var labelsReferenceDate = Date.now
     @FocusState private var isComposerFocused: Bool
 
     init(
@@ -102,7 +112,9 @@ struct ConversationSurface: View {
         typingDescription: String? = nil,
         typingChanged: ((Bool) -> Void)? = nil,
         readReceipts: ReadReceiptDisplay? = nil,
-        pollReadReceipts: ((Int64) -> Bool)? = nil
+        pollReadReceipts: ((Int64) -> Bool)? = nil,
+        userStatus: ((Int64) -> UserStatusDisplay?)? = nil,
+        sourceLabel: ((MessageViewData) -> String?)? = nil
     ) {
         self.page = page
         self.isOffline = isOffline
@@ -145,6 +157,8 @@ struct ConversationSurface: View {
         self.typingChanged = typingChanged
         self.readReceipts = readReceipts
         self.pollReadReceipts = pollReadReceipts
+        self.userStatus = userStatus
+        self.sourceLabel = sourceLabel
         _messages = State(initialValue: page.messages)
         _draft = State(initialValue: initialDraft)
     }
@@ -199,7 +213,7 @@ struct ConversationSurface: View {
                             ForEach(messages, id: \.rowID) { message in
                                 VStack(spacing: 0) {
                                     if dayStarts.contains(message.id) {
-                                        DateSeparator(date: message.timestamp)
+                                        DateSeparator(date: message.timestamp, now: labelsReferenceDate)
                                     }
                                     MessageRow(
                                         message: message,
@@ -249,7 +263,13 @@ struct ConversationSurface: View {
                                         retryMedia: retryMedia,
                                         readers: readReceipts?.messageID == message.id
                                             ? readReceipts?.readers ?? []
-                                            : []
+                                            : [],
+                                        senderStatus: continuations.contains(message.id)
+                                            ? nil
+                                            : userStatus?(message.senderID),
+                                        sourceLabel: continuations.contains(message.id)
+                                            ? nil
+                                            : sourceLabel?(message)
                                     )
                                 }
                                 .id(message.rowID)
@@ -345,6 +365,9 @@ struct ConversationSurface: View {
             .animation(.easeOut(duration: 0.15), value: typingDescription)
         }
         .background(AppTheme.Colors.canvas)
+        .onReceive(Self.dayLabelRefreshes) { _ in
+            labelsReferenceDate = .now
+        }
         .dropDestination(for: URL.self) { urls, _ in
             guard let uploadDroppedFiles, !isOffline, !urls.isEmpty else {
                 return false
@@ -693,9 +716,28 @@ private struct ConversationToolbarModifier: ViewModifier {
     }
 }
 
+extension ConversationSurface {
+    /// The moments after which "Today" and "Yesterday" may name other days.
+    /// Built once and shared, so redrawing the surface does not resubscribe.
+    @MainActor private static let dayLabelRefreshes: AnyPublisher<Void, Never> = {
+        let center = NotificationCenter.default
+        return Publishers.MergeMany(
+            center.publisher(for: .NSCalendarDayChanged),
+            center.publisher(for: .NSSystemTimeZoneDidChange),
+            center.publisher(for: NSApplication.didBecomeActiveNotification),
+            NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didWakeNotification)
+        )
+        .map { _ in () }
+        .receive(on: RunLoop.main)
+        .eraseToAnyPublisher()
+    }()
+}
+
 /// A centered date between two hairlines above the first message of each day.
 private struct DateSeparator: View {
     let date: Date
+    /// The moment "Today" means; passed in so the label redraws when it changes.
+    let now: Date
 
     var body: some View {
         HStack(spacing: AppTheme.Spacing.medium) {
@@ -714,14 +756,7 @@ private struct DateSeparator: View {
     }
 
     private var label: String {
-        let calendar = Calendar.current
-        if calendar.isDateInToday(date) {
-            return "Today"
-        }
-        if calendar.isDateInYesterday(date) {
-            return "Yesterday"
-        }
-        return date.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day().year())
+        MessageTimestamp.dayLabel(for: date, now: now)
     }
 
     private var hairline: some View {
@@ -756,9 +791,18 @@ private struct MessageRow: View {
     let requestMedia: ((String) -> Void)?
     let retryMedia: ((String) -> Void)?
     var readers: [ReadReceiptReader] = []
+    var senderStatus: UserStatusDisplay?
+    var sourceLabel: String?
 
     @State private var isHovered = false
+    @State private var isHoveringActions = false
     @State private var isPickingReaction = false
+
+    /// The pointer is over the message or its action bar, which floats above the
+    /// row's top edge and so partly outside the row's own hover area.
+    private var isActive: Bool {
+        isHovered || isHoveringActions
+    }
 
     var body: some View {
         // Element-style: the first message of a block opens with the avatar and the
@@ -778,20 +822,34 @@ private struct MessageRow: View {
                         .font(AppTheme.Typography.bodyEmphasized)
                         .foregroundStyle(SenderColor.color(for: message.senderID))
                         .lineLimit(1)
+                    UserStatusEmoji(status: senderStatus, size: 13)
+                    if let sourceLabel {
+                        // Like the time beside the message, it appears on hover.
+                        Text(sourceLabel)
+                            .font(AppTheme.Typography.metadata)
+                            .foregroundStyle(AppTheme.Colors.tertiaryText)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            // The sender's name keeps its room first.
+                            .layoutPriority(-1)
+                            .opacity(isActive ? 1 : 0)
+                            .help(sourceLabel)
+                            .accessibilityLabel("In \(sourceLabel)")
+                    }
                     statusLabels
                     Spacer(minLength: 0)
                 }
             }
 
             HStack(alignment: .top, spacing: AppTheme.Spacing.medium) {
-                Text(message.timestamp, format: .dateTime.hour(.twoDigits(amPM: .omitted)).minute())
+                Text(message.timestamp, format: .dateTime.hour(.twoDigits(amPM: .narrow)).minute())
                     .font(AppTheme.Typography.scaled(10).monospacedDigit())
                     .foregroundStyle(AppTheme.Colors.tertiaryText)
                     .lineLimit(1)
                     .minimumScaleFactor(0.5)
                     .frame(width: Self.avatarSize, alignment: .center)
                     .padding(.top, 2)
-                    .opacity(isHovered ? 1 : 0)
+                    .opacity(isActive ? 1 : 0)
                     .help(message.timestamp.formatted(date: .complete, time: .standard))
                     .accessibilityHidden(true)
 
@@ -822,7 +880,7 @@ private struct MessageRow: View {
             .fill(
                 isFocusedSearchResult
                     ? AppTheme.Colors.accent.opacity(0.12)
-                    : isHovered
+                    : isActive
                         ? AppTheme.Colors.hover.opacity(0.45)
                         : .clear
             )
@@ -852,10 +910,15 @@ private struct MessageRow: View {
                 isRead: message.isRead,
                 isDisabled: message.actionState.isPending || message.deliveryState != .sent
             )
-            .padding(.top, 4)
+            .onHover { isHoveringActions = $0 }
+            // Straddles the top edge, above the row's right corner, so it never
+            // covers the read receipts at the bottom of a one-line message.
+            .alignmentGuide(.top) { $0[.bottom] - Self.actionBarOverlap }
             .padding(.trailing, AppTheme.Spacing.small)
-            .opacity(isHovered || isPickingReaction ? 1 : 0)
-            .accessibilityHidden(!isHovered && !isPickingReaction)
+            .opacity(isActive || isPickingReaction ? 1 : 0)
+            // While hidden it must not catch the pointer over the row above.
+            .allowsHitTesting(isActive || isPickingReaction)
+            .accessibilityHidden(!isActive && !isPickingReaction)
         }
         .onHover { isHovered = $0 }
         .accessibilityElement(children: .contain)
@@ -887,6 +950,8 @@ private struct MessageRow: View {
     }
 
     private static let avatarSize: CGFloat = 30
+    /// How far the floating action bar reaches down into its own row.
+    private static let actionBarOverlap: CGFloat = 10
 
     /// The message's own lines: status, content, reactions and read receipts.
     private var messageBody: some View {
@@ -1449,55 +1514,16 @@ private struct ComposerView: View {
                 mentionList(match)
             }
 
-            TextField(
-                LocalizedStringKey(placeholder),
-                text: $draft,
-                selection: $selection,
-                axis: .vertical
-            )
-            .textFieldStyle(.plain)
-            .font(AppTheme.Typography.body)
-            .lineLimit(1...6)
-            .focused(isFocused)
-            .disabled(isDisabled)
-            .onKeyPress(.upArrow) { moveMentionSelection(by: -1) }
-            .onKeyPress(.downArrow) { moveMentionSelection(by: 1) }
-            .onKeyPress(.tab) { acceptHighlightedMention() }
-            .onKeyPress(.return, phases: .down) { press in
-                if press.modifiers.isEmpty, mentionMatch != nil {
-                    return acceptHighlightedMention()
-                }
-                guard press.modifiers.contains(.shift) || press.modifiers.contains(.option) else {
-                    return .ignored
-                }
-                insertLineBreak()
-                return .handled
-            }
-            .onSubmit(send)
-            .onChange(of: draft) {
-                mentionIndex = 0
-                placePendingCaret()
-            }
-            .onExitCommand {
-                if mentionMatch != nil {
-                    dismissedMentionDraft = draft
-                } else {
-                    isFocused.wrappedValue = false
-                }
-            }
-            .accessibilityLabel("Message \(conversationTitle)")
-            .accessibilityHint(
-                isDisabled
-                    ? "Reconnect to send messages"
-                    : "Type a message and press Return to send"
-            )
-
-            HStack(spacing: AppTheme.Spacing.small) {
+            // One row: attach, the text (growing upward to six lines) and send.
+            HStack(alignment: .bottom, spacing: AppTheme.Spacing.small) {
                 Button {
                     chooseAttachment?()
                 } label: {
                     Image(systemName: "plus")
+                        .font(AppTheme.Typography.scaled(14, weight: .medium))
                 }
+                .buttonStyle(CircleHoverButtonStyle())
+                .foregroundStyle(AppTheme.Colors.secondaryText)
                 .disabled(
                     isDisabled
                         || chooseAttachment == nil
@@ -1506,7 +1532,50 @@ private struct ComposerView: View {
                 .help("Add attachment")
                 .accessibilityLabel("Add attachment")
 
-                Spacer()
+                TextField(
+                    LocalizedStringKey(placeholder),
+                    text: $draft,
+                    selection: $selection,
+                    axis: .vertical
+                )
+                .textFieldStyle(.plain)
+                .font(AppTheme.Typography.body)
+                .lineLimit(1...6)
+                .focused(isFocused)
+                .disabled(isDisabled)
+                .onKeyPress(.upArrow) { moveMentionSelection(by: -1) }
+                .onKeyPress(.downArrow) { moveMentionSelection(by: 1) }
+                .onKeyPress(.tab) { acceptHighlightedMention() }
+                .onKeyPress(.return, phases: .down) { press in
+                    if press.modifiers.isEmpty, mentionMatch != nil {
+                        return acceptHighlightedMention()
+                    }
+                    guard press.modifiers.contains(.shift) || press.modifiers.contains(.option) else {
+                        return .ignored
+                    }
+                    insertLineBreak()
+                    return .handled
+                }
+                .onSubmit(send)
+                .onChange(of: draft) {
+                    mentionIndex = 0
+                    placePendingCaret()
+                }
+                .onExitCommand {
+                    if mentionMatch != nil {
+                        dismissedMentionDraft = draft
+                    } else {
+                        isFocused.wrappedValue = false
+                    }
+                }
+                .accessibilityLabel("Message \(conversationTitle)")
+                .accessibilityHint(
+                    isDisabled
+                        ? "Reconnect to send messages"
+                        : "Type a message and press Return to send"
+                )
+                // As tall as the buttons, so a single line sits centered beside them.
+                .frame(minHeight: 28)
 
                 Button(action: send) {
                     Image(systemName: "arrow.up")
@@ -1521,8 +1590,6 @@ private struct ComposerView: View {
                 .help("Send message")
                 .accessibilityLabel("Send message")
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(AppTheme.Colors.secondaryText)
         }
         .padding(AppTheme.Spacing.medium)
         .frame(maxWidth: AppTheme.Metrics.composerMaximumWidth)
@@ -1541,6 +1608,36 @@ private struct ComposerView: View {
         )
     )
     .frame(width: 800, height: 720)
+}
+
+/// A round 28 pt hit area that lights up under the pointer, for the
+/// composer's icon buttons.
+private struct CircleHoverButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        CircleHoverButton(configuration: configuration)
+    }
+
+    private struct CircleHoverButton: View {
+        let configuration: ButtonStyleConfiguration
+        @Environment(\.isEnabled) private var isEnabled
+        @State private var isHovered = false
+
+        private var fillOpacity: Double {
+            guard isEnabled else { return 0 }
+            if configuration.isPressed { return 0.16 }
+            return isHovered ? 0.09 : 0
+        }
+
+        var body: some View {
+            configuration.label
+                .frame(width: 28, height: 28)
+                .background(Circle().fill(Color.primary.opacity(fillOpacity)))
+                .contentShape(Circle())
+                .opacity(isEnabled ? 1 : 0.45)
+                .onHover { isHovered = $0 }
+                .animation(.easeOut(duration: 0.12), value: isHovered)
+        }
+    }
 }
 
 /// A small note floating above the composer while someone else is typing.

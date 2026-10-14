@@ -55,6 +55,14 @@ roadmap lives in [`PLAN.md`](PLAN.md).
   description, site), from the server's preview or, when there is none, from
   the page itself (Settings › Link Previews turns that off). Untrusted HTML is parsed in Rust and never shown in a web
   view.
+- Status and invisible mode: click your avatar at the bottom of the sidebar to
+  set a status (an emoji and up to 60 characters, or one of Zulip's
+  suggestions such as "In a meeting"), clear it, or turn on invisible mode so
+  others see you as offline. Everyone's status emoji follows their name in
+  messages and the direct-message list; the text shows on hover and in a
+  direct message's header.
+- In Mentions, Starred and a whole channel, hovering a message shows where it
+  was posted ("#channel › topic") in grey after the sender's name.
 - Read receipts: small overlapping avatars under your newest sent message show
   who has read it (needs Zulip 6.0 and read receipts enabled by the
   organization).
@@ -91,6 +99,9 @@ roadmap lives in [`PLAN.md`](PLAN.md).
   agrees; this includes each channel's **general chat** topic. Clicking a
   notification opens the message. The Dock badge shows unread direct messages
   plus unread mentions in unmuted channels and topics.
+  A locked screen, a sleeping display or another user's login session counts
+  as not reading, so messages that arrive meanwhile stay unread, show on the
+  badge and notify even for the conversation left open.
 - Messages that arrive while the connection is being re-established (for
   example after the Mac sleeps) still notify once it is back. The app keeps
   macOS from napping it while signed in so notifications are not delayed; if
@@ -137,7 +148,7 @@ file. Do not disable Gatekeeper globally.
 - Offline use is read-only; failed writes are retried by hand, not replayed.
 - A message that was moved to another topic or channel shows "(edited)", like
   an edited one.
-- Custom (image) emoji appear as `:name:`; complex formulas and tables are not
+- Custom (image) emoji appear as `:name:` (and are left out of status emoji); complex formulas and tables are not
   rendered.
 - The media cache has no aggregate size limit yet (`REL-001`).
 - Read receipts rely on polling because Zulip sends no event when a message is

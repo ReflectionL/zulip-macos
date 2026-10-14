@@ -34,6 +34,30 @@ enum MessageTimestamp {
         return "\(date.formatted(dateStyle)) \(time)"
     }
 
+    /// The date separator's label: "Today", "Yesterday", or the weekday and date.
+    /// Days follow `calendar`, which is the system's calendar and time zone.
+    static func dayLabel(
+        for date: Date,
+        now: Date = .now,
+        calendar: Calendar = .autoupdatingCurrent,
+        locale: Locale = .autoupdatingCurrent
+    ) -> String {
+        if calendar.isDate(date, inSameDayAs: now) {
+            return "Today"
+        }
+        if let yesterday = calendar.date(byAdding: .day, value: -1, to: calendar.startOfDay(for: now)),
+           calendar.isDate(date, inSameDayAs: yesterday)
+        {
+            return "Yesterday"
+        }
+        let style = Date.FormatStyle(locale: locale, calendar: calendar, timeZone: calendar.timeZone)
+            .weekday(.abbreviated)
+            .month(.abbreviated)
+            .day()
+            .year()
+        return date.formatted(style)
+    }
+
     /// "Yesterday" in the user's language.
     private static func yesterdayWord(calendar: Calendar, locale: Locale) -> String {
         let formatter = RelativeDateTimeFormatter()

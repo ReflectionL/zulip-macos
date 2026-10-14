@@ -50,10 +50,15 @@ struct SidebarView: View {
     var notifiesForAllChannels = false
     var setNotifiesForAllChannels: ((Bool) -> Void)?
     var presenceDescription: ((Int64) -> String?)?
+    /// Someone's status, shown as an emoji after their name.
+    var userStatus: ((Int64) -> UserStatusDisplay?)?
+    /// The user's own status and invisible mode, behind their avatar.
+    var profileStatus: ProfileStatusControl?
     var sessionControl: SidebarSessionControl?
     var mediaLocalURLs: [String: String] = [:]
     var requestMedia: ((String) -> Void)?
     @Environment(UpdateController.self) private var updates: UpdateController?
+    @State private var isProfilePopoverShown = false
 
     /// Zulip's three levels for a topic. Inside a muted channel a topic is
     /// either left muted with its channel or unmuted.
@@ -254,10 +259,12 @@ struct SidebarView: View {
                     if model.areDirectMessagesExpanded {
                         ForEach(model.snapshot.directMessages) { directMessage in
                             let key = model.key(for: directMessage)
+                            let status = userStatus?(directMessage.userID)
                             SidebarRow(
                                 title: directMessage.displayName,
                                 unreadCount: directMessage.unreadCount,
                                 isSelected: selection == key,
+                                status: status,
                                 leading: {
                                     AvatarView(
                                         initials: directMessage.initials,
@@ -270,7 +277,14 @@ struct SidebarView: View {
                             ) {
                                 selection = key
                             }
-                            .help(presenceDescription?(directMessage.userID) ?? "")
+                            .help(
+                                [
+                                    status.flatMap { $0.text.isEmpty ? nil : $0.text },
+                                    presenceDescription?(directMessage.userID),
+                                ]
+                                .compactMap { $0 }
+                                .joined(separator: " · ")
+                            )
                         }
                     }
                 }
@@ -314,23 +328,64 @@ struct SidebarView: View {
         .frame(minHeight: 36)
     }
 
+    private func ownAvatar(size: CGFloat) -> some View {
+        AvatarImage(
+            initials: model.snapshot.currentUserInitials,
+            remoteURL: model.snapshot.currentUserAvatarURL,
+            size: size,
+            mediaLocalURLs: mediaLocalURLs,
+            requestMedia: requestMedia
+        )
+    }
+
+    private var profileIdentity: some View {
+        HStack(spacing: AppTheme.Spacing.small) {
+            ownAvatar(size: 24)
+
+            Text(model.snapshot.currentUserName)
+                .font(AppTheme.Typography.sidebar)
+                .lineLimit(1)
+
+            if let profileStatus {
+                UserStatusEmoji(status: profileStatus.status, size: 12)
+                if profileStatus.isInvisible {
+                    Image(systemName: "eye.slash")
+                        .font(AppTheme.Typography.scaled(10))
+                        .foregroundStyle(AppTheme.Colors.tertiaryText)
+                        .help("Invisible mode is on")
+                }
+            }
+        }
+    }
+
     private var profileRow: some View {
         HStack(spacing: AppTheme.Spacing.small) {
-            HStack(spacing: AppTheme.Spacing.small) {
-                AvatarImage(
-                    initials: model.snapshot.currentUserInitials,
-                    remoteURL: model.snapshot.currentUserAvatarURL,
-                    size: 24,
-                    mediaLocalURLs: mediaLocalURLs,
-                    requestMedia: requestMedia
-                )
-
-                Text(model.snapshot.currentUserName)
-                    .font(AppTheme.Typography.sidebar)
-                    .lineLimit(1)
+            if let profileStatus {
+                Button {
+                    isProfilePopoverShown.toggle()
+                } label: {
+                    profileIdentity
+                        .padding(.vertical, 2)
+                        .padding(.trailing, AppTheme.Spacing.small)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Set your status")
+                .accessibilityLabel("Profile, \(model.snapshot.currentUserName)")
+                .accessibilityHint("Shows your status and invisible mode")
+                .popover(isPresented: $isProfilePopoverShown, arrowEdge: .top) {
+                    ProfileStatusPopover(
+                        name: model.snapshot.currentUserName,
+                        avatar: AnyView(ownAvatar(size: 40)),
+                        control: profileStatus,
+                        close: { isProfilePopoverShown = false }
+                    )
+                }
+            } else {
+                profileIdentity
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("Profile, \(model.snapshot.currentUserName)")
             }
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel("Profile, \(model.snapshot.currentUserName)")
 
             Spacer()
 
@@ -449,6 +504,7 @@ private struct SidebarRow<Leading: View>: View {
     let isSelected: Bool
     var isMuted = false
     var isFollowed = false
+    var status: UserStatusDisplay?
     @ViewBuilder var leading: () -> Leading
     let action: () -> Void
 
@@ -461,6 +517,7 @@ private struct SidebarRow<Leading: View>: View {
         isSelected: Bool,
         isMuted: Bool = false,
         isFollowed: Bool = false,
+        status: UserStatusDisplay? = nil,
         @ViewBuilder leading: @escaping () -> Leading,
         action: @escaping () -> Void
     ) {
@@ -470,6 +527,7 @@ private struct SidebarRow<Leading: View>: View {
         self.isSelected = isSelected
         self.isMuted = isMuted
         self.isFollowed = isFollowed
+        self.status = status
         self.leading = leading
         self.action = action
     }
@@ -493,6 +551,8 @@ private struct SidebarRow<Leading: View>: View {
                             : AppTheme.Typography.sidebar
                     )
                     .lineLimit(1)
+
+                UserStatusEmoji(status: status, size: 11)
 
                 Spacer(minLength: AppTheme.Spacing.extraSmall)
 

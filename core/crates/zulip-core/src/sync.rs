@@ -34,14 +34,14 @@ const MAX_SNAPSHOT_MESSAGES: usize = 1_000;
 const EVENT_TYPES_JSON: &str = concat!(
     r#"["message","subscription","realm_user","update_message","#,
     r#""delete_message","reaction","update_message_flags","typing","user_settings","#,
-    r#""user_topic","heartbeat","restart"]"#
+    r#""user_topic","user_status","heartbeat","restart"]"#
 );
 /// Initial state additionally includes organization settings (for the icon);
 /// realm change events are not consumed, so they are not subscribed to.
 const FETCH_EVENT_TYPES_JSON: &str = concat!(
     r#"["message","recent_private_conversations","subscription","realm_user","realm","update_message","#,
     r#""delete_message","reaction","update_message_flags","user_settings","user_topic","#,
-    r#""heartbeat","restart"]"#
+    r#""user_status","heartbeat","restart"]"#
 );
 
 /// A server-allocated queue and its current acknowledgement cursor.
@@ -73,6 +73,45 @@ pub struct UserSummary {
     /// Avatar image location, absolute or relative to the server, when known.
     #[serde(default)]
     pub avatar_url: Option<String>,
+}
+
+/// What a user says about themselves: Zulip's "user status", a short text and
+/// an emoji, either of which may be empty.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UserStatus {
+    /// Zulip user identifier.
+    pub user_id: i64,
+    /// Free text such as "In a meeting"; empty when none.
+    #[serde(default)]
+    pub status_text: String,
+    /// Emoji name; empty when the status has no emoji.
+    #[serde(default)]
+    pub emoji_name: String,
+    /// Zulip's emoji code (dash-joined code points for Unicode emoji).
+    #[serde(default)]
+    pub emoji_code: String,
+    /// `unicode_emoji`, `realm_emoji` or `zulip_extra_emoji`.
+    #[serde(default)]
+    pub reaction_type: String,
+}
+
+impl UserStatus {
+    /// Whether the status says nothing, which is how Zulip clears one.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.status_text.is_empty() && self.emoji_name.is_empty()
+    }
+}
+
+/// A change to one user's status; absent fields are unchanged.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct UserStatusUpdate {
+    /// User whose status changed.
+    pub user_id: i64,
+    /// Replacement text, when present (empty clears it).
+    pub status_text: Option<String>,
+    /// Replacement emoji name, code and type, when present (an empty name clears it).
+    pub emoji: Option<(String, String, String)>,
 }
 
 /// A normalized subscribed channel.
@@ -268,6 +307,10 @@ pub struct BootstrapState {
     /// `enable_stream_desktop_notifications`: whether channels without their own
     /// choice notify for every message.
     pub channel_notifications_default: bool,
+    /// Every user's status that says something.
+    pub user_statuses: Vec<UserStatus>,
+    /// Whether the account hides its presence (`presence_enabled` turned off).
+    pub invisible: bool,
 }
 
 /// Result of registering a live event queue.
@@ -392,6 +435,20 @@ pub enum SyncEvent {
         /// The new setting.
         enabled: bool,
     },
+    /// Someone set, changed or cleared their status.
+    UserStatusChanged {
+        /// Monotonic queue-local event identifier.
+        event_id: i64,
+        /// The fields that changed.
+        update: UserStatusUpdate,
+    },
+    /// The account turned invisible mode on or off.
+    InvisibleChanged {
+        /// Monotonic queue-local event identifier.
+        event_id: i64,
+        /// Whether the account now hides its presence.
+        invisible: bool,
+    },
     /// The account muted, unmuted, followed or reset one topic.
     TopicPolicyChanged {
         /// Monotonic queue-local event identifier.
@@ -494,6 +551,8 @@ impl SyncEvent {
             | Self::Typing { event_id, .. }
             | Self::TypingPreferenceChanged { event_id, .. }
             | Self::ChannelNotificationDefaultChanged { event_id, .. }
+            | Self::UserStatusChanged { event_id, .. }
+            | Self::InvisibleChanged { event_id, .. }
             | Self::TopicPolicyChanged { event_id, .. }
             | Self::MessageFlagsUpdated { event_id, .. }
             | Self::ReactionChanged { event_id, .. }
@@ -531,6 +590,10 @@ pub struct SyncSnapshot {
     pub topic_policies: Vec<TopicPolicy>,
     /// Whether channels without their own choice notify for every message.
     pub channel_notifications_default: bool,
+    /// Statuses that say something, sorted by user.
+    pub user_statuses: Vec<UserStatus>,
+    /// Whether the account hides its presence.
+    pub invisible: bool,
 }
 
 /// Reduction statistics and at most one snapshot for a complete poll batch.
@@ -1063,6 +1126,8 @@ pub struct SyncReducer {
     typing_notices: Vec<TypingNotice>,
     topic_policies: BTreeMap<(i64, String), TopicPolicy>,
     channel_notifications_default: bool,
+    user_statuses: BTreeMap<i64, UserStatus>,
+    invisible: bool,
 }
 
 /// Zulip compares topic names case-insensitively.
@@ -1112,6 +1177,13 @@ impl SyncReducer {
                 .map(|policy| (topic_policy_key(policy.stream_id, &policy.topic), policy))
                 .collect(),
             channel_notifications_default: bootstrap.channel_notifications_default,
+            user_statuses: bootstrap
+                .user_statuses
+                .into_iter()
+                .filter(|status| !status.is_empty())
+                .map(|status| (status.user_id, status))
+                .collect(),
+            invisible: bootstrap.invisible,
         }
     }
 
@@ -1129,7 +1201,38 @@ impl SyncReducer {
             unread: self.unread_buckets(),
             topic_policies: self.topic_policies.values().cloned().collect(),
             channel_notifications_default: self.channel_notifications_default,
+            user_statuses: self.user_statuses.values().cloned().collect(),
+            invisible: self.invisible,
         }
+    }
+
+    /// Applies a status change; a status left saying nothing is dropped.
+    fn apply_user_status(&mut self, update: UserStatusUpdate) -> bool {
+        let previous = self.user_statuses.get(&update.user_id).cloned();
+        let mut status = previous.clone().unwrap_or_else(|| UserStatus {
+            user_id: update.user_id,
+            ..UserStatus::default()
+        });
+        if let Some(text) = update.status_text {
+            status.status_text = text;
+        }
+        if let Some((name, code, reaction_type)) = update.emoji {
+            if name.is_empty() {
+                status.emoji_name = String::new();
+                status.emoji_code = String::new();
+                status.reaction_type = String::new();
+            } else {
+                status.emoji_name = name;
+                status.emoji_code = code;
+                status.reaction_type = reaction_type;
+            }
+        }
+        if status.is_empty() {
+            return self.user_statuses.remove(&update.user_id).is_some();
+        }
+        let changed = previous.as_ref() != Some(&status);
+        self.user_statuses.insert(update.user_id, status);
+        changed
     }
 
     /// Counts the unread messages per conversation.
@@ -1507,6 +1610,12 @@ impl SyncReducer {
                 self.channel_notifications_default = enabled;
                 changed
             }
+            SyncEvent::UserStatusChanged { update, .. } => self.apply_user_status(update),
+            SyncEvent::InvisibleChanged { invisible, .. } => {
+                let changed = self.invisible != invisible;
+                self.invisible = invisible;
+                changed
+            }
             SyncEvent::TopicPolicyChanged {
                 stream_id,
                 topic,
@@ -1810,6 +1919,9 @@ struct RegisterDocument {
     user_settings: Option<Value>,
     #[serde(default)]
     user_topics: Vec<UserTopicDocument>,
+    /// Statuses keyed by user identifier (as a string).
+    #[serde(default)]
+    user_status: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1906,6 +2018,14 @@ impl RegisterDocument {
             .into_iter()
             .filter_map(UserTopicDocument::normalize)
             .collect();
+        let user_statuses = parse_user_statuses(self.user_status.as_ref());
+        // Servers before `presence_enabled` existed had no invisible mode.
+        let invisible = self
+            .user_settings
+            .as_ref()
+            .and_then(|settings| settings.get("presence_enabled"))
+            .and_then(Value::as_bool)
+            .is_some_and(|enabled| !enabled);
 
         Ok(RegisteredQueue {
             queue: EventQueue {
@@ -1936,6 +2056,8 @@ impl RegisterDocument {
                 typing_preferences,
                 topic_policies,
                 channel_notifications_default,
+                user_statuses,
+                invisible,
             },
             zulip_feature_level: self.zulip_feature_level,
         })
@@ -2050,6 +2172,7 @@ impl EventDocument {
             "typing" => Ok(self.normalize_typing()),
             "user_settings" => Ok(self.normalize_user_setting()),
             "user_topic" => Ok(self.normalize_user_topic()),
+            "user_status" => Ok(self.normalize_user_status()),
             _ => Ok(SyncEvent::Unknown {
                 event_id: self.id,
                 event_type: self.event_type,
@@ -2123,7 +2246,45 @@ impl EventDocument {
         }
     }
 
+    fn normalize_user_status(self) -> SyncEvent {
+        let Some(user_id) = optional_integer_field(&self.payload, "user_id") else {
+            return SyncEvent::Unknown {
+                event_id: self.id,
+                event_type: self.event_type,
+            };
+        };
+        // Only the fields that changed are present.
+        let emoji = string_field(&self.payload, "emoji_name").map(|name| {
+            (
+                name,
+                string_field(&self.payload, "emoji_code").unwrap_or_default(),
+                string_field(&self.payload, "reaction_type")
+                    .unwrap_or_else(|| "unicode_emoji".to_owned()),
+            )
+        });
+        SyncEvent::UserStatusChanged {
+            event_id: self.id,
+            update: UserStatusUpdate {
+                user_id,
+                status_text: string_field(&self.payload, "status_text"),
+                emoji,
+            },
+        }
+    }
+
     fn normalize_user_setting(self) -> SyncEvent {
+        if string_field(&self.payload, "property").as_deref() == Some("presence_enabled") {
+            return match self.payload.get("value").and_then(Value::as_bool) {
+                Some(enabled) => SyncEvent::InvisibleChanged {
+                    event_id: self.id,
+                    invisible: !enabled,
+                },
+                None => SyncEvent::Unknown {
+                    event_id: self.id,
+                    event_type: self.event_type,
+                },
+            };
+        }
         if string_field(&self.payload, "property").as_deref()
             == Some("enable_stream_desktop_notifications")
         {
@@ -2464,6 +2625,50 @@ fn default_true() -> bool {
 
 fn default_channel_color() -> String {
     "#888888".to_owned()
+}
+
+/// Reads a `register` response's `user_status` map. Entries that are not
+/// objects or say nothing are skipped.
+fn parse_user_statuses(value: Option<&Value>) -> Vec<UserStatus> {
+    let Some(entries) = value.and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let text = |entry: &Value, name: &str| {
+        entry
+            .get(name)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let mut statuses = entries
+        .iter()
+        .filter_map(|(key, entry)| {
+            let user_id = key.parse().ok()?;
+            entry.as_object()?;
+            let emoji_name = text(entry, "emoji_name");
+            let reaction_type = if emoji_name.is_empty() {
+                String::new()
+            } else {
+                Some(text(entry, "reaction_type"))
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_else(|| "unicode_emoji".to_owned())
+            };
+            Some(UserStatus {
+                user_id,
+                status_text: text(entry, "status_text"),
+                emoji_code: if emoji_name.is_empty() {
+                    String::new()
+                } else {
+                    text(entry, "emoji_code")
+                },
+                emoji_name,
+                reaction_type,
+            })
+        })
+        .filter(|status| !status.is_empty())
+        .collect::<Vec<_>>();
+    statuses.sort_by_key(|status| status.user_id);
+    statuses
 }
 
 /// Reads the typing privacy settings from a `register` response's `user_settings`.
@@ -3617,6 +3822,91 @@ mod tests {
 
         let register_request = requests.recv().expect("register request");
         assert!(register_request.contains("user_topic"));
+    }
+
+    #[tokio::test]
+    async fn user_statuses_and_invisible_mode_follow_the_server() {
+        let register = r#"{
+            "result":"success",
+            "queue_id":"queue-fixture",
+            "last_event_id":50,
+            "realm_users":[],
+            "subscriptions":[],
+            "user_settings":{"presence_enabled":false},
+            "user_status":{
+                "7":{"status_text":"In a meeting","emoji_name":"calendar",
+                     "emoji_code":"1f4c6","reaction_type":"unicode_emoji"},
+                "8":{"away":true},
+                "9":{"status_text":"Lunch"},
+                "x":{"status_text":"ignored"}
+            }
+        }"#;
+        let (server, requests) = spawn_mock(vec![
+            (StatusCode::OK, register.to_owned()),
+            (
+                StatusCode::OK,
+                r#"{
+                    "result":"success",
+                    "queue_id":"queue-fixture",
+                    "events":[
+                        {"id":51,"type":"user_status","user_id":7,"emoji_name":"",
+                         "emoji_code":"","reaction_type":""},
+                        {"id":52,"type":"user_status","user_id":9,"status_text":""},
+                        {"id":53,"type":"user_status","user_id":10,"status_text":"Commuting",
+                         "emoji_name":"bus","emoji_code":"1f68c","reaction_type":"unicode_emoji"},
+                        {"id":54,"type":"user_settings","op":"update",
+                         "property":"presence_enabled","value":true}
+                    ]
+                }"#
+                .to_owned(),
+            ),
+        ]);
+        let client = EventQueueClient::new(&server, "maya@example.com", SecretString::new(API_KEY))
+            .expect("sync client");
+        let (mut session, initial) = SyncSession::start(client, RecoveryPolicy::default(), 3)
+            .await
+            .expect("initial registration");
+
+        assert!(initial.invisible);
+        assert_eq!(
+            initial
+                .user_statuses
+                .iter()
+                .map(|status| (
+                    status.user_id,
+                    status.status_text.as_str(),
+                    status.emoji_name.as_str(),
+                    status.emoji_code.as_str(),
+                    status.reaction_type.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (7, "In a meeting", "calendar", "1f4c6", "unicode_emoji"),
+                (9, "Lunch", "", "", ""),
+            ]
+        );
+
+        let SyncCycle::Events(outcome) = session.advance().await else {
+            panic!("status events are ordinary events");
+        };
+        let snapshot = outcome.snapshot.expect("changed");
+        assert!(!snapshot.invisible);
+        // 7 keeps only the text, 9 said nothing any more, 10 is new.
+        assert_eq!(
+            snapshot
+                .user_statuses
+                .iter()
+                .map(|status| (
+                    status.user_id,
+                    status.status_text.as_str(),
+                    status.emoji_name.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            vec![(7, "In a meeting", ""), (10, "Commuting", "bus")]
+        );
+
+        let register_request = requests.recv().expect("register request");
+        assert!(register_request.contains("user_status"));
     }
 
     #[tokio::test]

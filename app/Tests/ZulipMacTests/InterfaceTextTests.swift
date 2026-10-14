@@ -47,6 +47,32 @@ struct MessageTimestampTests {
         #expect(text.hasSuffix(" 23:45"))
     }
 
+    @Test("Date separators name today and yesterday from the given moment")
+    func dayLabels() throws {
+        let calendar = try calendar()
+        let sent = try date(2026, 10, 13, 22, 0, in: calendar)
+        let sameEvening = try date(2026, 10, 13, 23, 30, in: calendar)
+        let nextMorning = try date(2026, 10, 14, 0, 10, in: calendar)
+        let twoDaysLater = try date(2026, 10, 15, 9, 0, in: calendar)
+        func label(at now: Date) -> String {
+            MessageTimestamp.dayLabel(for: sent, now: now, calendar: calendar, locale: locale)
+        }
+        #expect(label(at: sameEvening) == "Today")
+        #expect(label(at: nextMorning) == "Yesterday")
+        #expect(label(at: twoDaysLater).contains("13"))
+    }
+
+    @Test("Days follow the calendar's time zone, not UTC")
+    func dayLabelsUseTheTimeZone() throws {
+        var shanghai = Calendar(identifier: .gregorian)
+        shanghai.timeZone = try #require(TimeZone(identifier: "Asia/Shanghai"))
+        shanghai.locale = locale
+        // 01:00 on 14 October in Shanghai is still 13 October in UTC.
+        let sent = try date(2026, 10, 14, 1, 0, in: shanghai)
+        let now = try date(2026, 10, 14, 20, 0, in: shanghai)
+        #expect(MessageTimestamp.dayLabel(for: sent, now: now, calendar: shanghai, locale: locale) == "Today")
+    }
+
     @Test("Earlier days show the date, the weekday and the time")
     func earlier() throws {
         let calendar = try calendar()

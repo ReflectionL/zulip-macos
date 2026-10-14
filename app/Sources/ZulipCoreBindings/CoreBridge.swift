@@ -205,6 +205,10 @@ public struct LiveSnapshot: Equatable, Sendable {
     public let topicPolicies: [LiveTopicPolicy]
     /// Whether channels without their own choice notify for every message.
     public let channelNotificationsDefault: Bool
+    /// Statuses that say something, sorted by user.
+    public let userStatuses: [LiveUserStatus]
+    /// Whether the account hides its presence (invisible mode).
+    public let isInvisible: Bool
 
     public init(
         revision: UInt64,
@@ -217,7 +221,9 @@ public struct LiveSnapshot: Equatable, Sendable {
         recentDirectConversations: [LiveRecentDirectConversation] = [],
         unread: [LiveUnreadBucket] = [],
         topicPolicies: [LiveTopicPolicy] = [],
-        channelNotificationsDefault: Bool = false
+        channelNotificationsDefault: Bool = false,
+        userStatuses: [LiveUserStatus] = [],
+        isInvisible: Bool = false
     ) {
         self.revision = revision
         self.lastEventID = lastEventID
@@ -230,6 +236,34 @@ public struct LiveSnapshot: Equatable, Sendable {
         self.unread = unread
         self.topicPolicies = topicPolicies
         self.channelNotificationsDefault = channelNotificationsDefault
+        self.userStatuses = userStatuses
+        self.isInvisible = isInvisible
+    }
+}
+
+/// What a user says about themselves (Zulip's user status): a short text and
+/// an emoji, either of which may be empty.
+public struct LiveUserStatus: Equatable, Sendable {
+    public let userID: Int64
+    public let text: String
+    public let emojiName: String
+    /// Dash-joined code points for Unicode emoji.
+    public let emojiCode: String
+    /// `unicode_emoji`, `realm_emoji` or `zulip_extra_emoji`.
+    public let reactionType: String
+
+    public init(
+        userID: Int64,
+        text: String,
+        emojiName: String = "",
+        emojiCode: String = "",
+        reactionType: String = ""
+    ) {
+        self.userID = userID
+        self.text = text
+        self.emojiName = emojiName
+        self.emojiCode = emojiCode
+        self.reactionType = reactionType
     }
 }
 
@@ -514,6 +548,17 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
         topic: String,
         level: TopicNotificationLevel
     )
+    /// Sets the account's status; empty text and emoji clear it.
+    case setUserStatus(
+        requestID: UInt64,
+        accountID: String,
+        text: String,
+        emojiName: String,
+        emojiCode: String,
+        reactionType: String
+    )
+    /// Turns invisible mode (others see the account as offline) on or off.
+    case setInvisible(requestID: UInt64, accountID: String, invisible: Bool)
     case disconnect(requestID: UInt64)
     case loadCachedSession(requestID: UInt64, accountID: String)
     case saveDraft(requestID: UInt64, key: ConversationKey, content: String)
@@ -553,6 +598,8 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
              let .renameChannel(requestID, _, _, _),
              let .setNotificationSetting(requestID, _, _, _),
              let .setTopicNotification(requestID, _, _, _, _),
+             let .setUserStatus(requestID, _, _, _, _, _),
+             let .setInvisible(requestID, _, _),
              let .disconnect(requestID),
              let .loadCachedSession(requestID, _),
              let .saveDraft(requestID, _, _),
@@ -617,6 +664,10 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
             "BridgeCommand.setNotificationSetting"
         case .setTopicNotification:
             "BridgeCommand.setTopicNotification"
+        case .setUserStatus:
+            "BridgeCommand.setUserStatus"
+        case .setInvisible:
+            "BridgeCommand.setInvisible"
         case .disconnect:
             "BridgeCommand.disconnect"
         case .loadCachedSession:
@@ -809,6 +860,17 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
                 topic: topic,
                 visibility: CoreTopicVisibilityChoice(level)
             )
+        case let .setUserStatus(requestID, accountID, text, emojiName, emojiCode, reactionType):
+            .setUserStatus(
+                requestId: requestID,
+                accountId: accountID,
+                statusText: text,
+                emojiName: emojiName,
+                emojiCode: emojiCode,
+                reactionType: reactionType
+            )
+        case let .setInvisible(requestID, accountID, invisible):
+            .setInvisible(requestId: requestID, accountId: accountID, invisible: invisible)
         case let .fetchMessageSource(requestID, accountID, messageID):
             .fetchMessageSource(
                 requestId: requestID,
@@ -1154,6 +1216,16 @@ private extension LiveSnapshot {
             )
         }
         channelNotificationsDefault = snapshot.channelNotificationsDefault
+        userStatuses = snapshot.userStatuses.map {
+            LiveUserStatus(
+                userID: $0.userId,
+                text: $0.statusText,
+                emojiName: $0.emojiName,
+                emojiCode: $0.emojiCode,
+                reactionType: $0.reactionType
+            )
+        }
+        isInvisible = snapshot.invisible
     }
 }
 

@@ -315,6 +315,57 @@ struct NotificationTests {
         await eventually { notifier.badge == 0 }
     }
 
+    @Test("A message in the open chat still notifies while the screen is locked")
+    func notifiesWhileScreenLocked() async {
+        let core = NotifyingCoreClient()
+        let notifier = RecordingNotifier()
+        let model = LiveSessionViewModel(
+            client: core,
+            credentialStore: NullCredentialStore(),
+            defaults: UserDefaults(suiteName: "notify-\(UUID().uuidString)") ?? .standard,
+            notifier: notifier
+        )
+        model.isApplicationActive = { true }
+        model.startObserving()
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity,
+                credential: StoredAPICredential(accountID: identity.accountID, apiKey: "k"),
+                snapshot: snapshot([])
+            )
+        )
+        await eventually { model.connectionState == .connected }
+
+        let incoming = message(id: 2, direct: true, text: "Ping")
+        let unread = [LiveUnreadBucket(userIDs: [9, 22], count: 1)]
+        model.openConversation(.directMessage(accountID: identity.accountID, recipientIDs: [22]))
+
+        // Frontmost and unlocked: the user is reading this chat, so no banner.
+        core.emit(
+            .snapshotUpdated(
+                accountID: identity.accountID,
+                snapshot: snapshot([incoming], unread: unread)
+            )
+        )
+        await eventually { notifier.badge == 1 }
+        #expect(notifier.posted.isEmpty)
+
+        // Locked: the same chat is not being read, so a new message notifies.
+        model.userAttention.isScreenLocked = true
+        core.emit(
+            .snapshotUpdated(
+                accountID: identity.accountID,
+                snapshot: snapshot(
+                    [incoming, message(id: 3, direct: true, text: "Again")],
+                    unread: [LiveUnreadBucket(userIDs: [9, 22], count: 2)]
+                )
+            )
+        )
+        await eventually { notifier.posted.count == 1 }
+        #expect(notifier.posted.first?.body == "Again")
+    }
+
     @Test("Muted channels do not count toward the badge, mentions in others do")
     func badgeCountsDirectMessagesAndMentions() {
         let summary = UnreadSummary(

@@ -193,6 +193,10 @@ final class LiveSessionViewModel {
     /// Zulip's account-wide default: whether channels without a setting of their
     /// own notify for every message.
     private(set) var channelNotificationsDefault = false
+    /// Everyone's status that says something, by user.
+    private(set) var userStatuses: [Int64: UserStatusDisplay] = [:]
+    /// Whether the account hides its presence (Zulip's invisible mode).
+    private(set) var isInvisible = false
     private(set) var identity: LiveSessionIdentity?
     private(set) var sidebarSnapshot: SidebarSnapshot?
     private(set) var navigationDirectory = NavigationDirectory(destinations: [])
@@ -228,6 +232,9 @@ final class LiveSessionViewModel {
     @ObservationIgnored private let notifier: (any MessageNotifier)?
     @ObservationIgnored private var notificationPlanner = NotificationPlanner()
     @ObservationIgnored var isApplicationActive: () -> Bool = { NSApplication.shared.isActive }
+    /// Locked screen, sleeping display or switched-out login session: the app can
+    /// still be frontmost, but nobody is reading.
+    @ObservationIgnored let userAttention = UserAttention()
     @ObservationIgnored private var unreadSummary = UnreadSummary()
     @ObservationIgnored private var eventTask: Task<Void, Never>?
     @ObservationIgnored private var wakeObserver: NSObjectProtocol?
@@ -286,6 +293,8 @@ final class LiveSessionViewModel {
     private var openRequests: [UInt64: ConversationKey] = [:]
     /// Notification setting writes awaiting the server's answer.
     private var notificationSettingRequests = Set<UInt64>()
+    /// Status and invisible-mode changes waiting for the server.
+    @ObservationIgnored private var statusRequests = Set<UInt64>()
     /// Refreshes and mark-read requests: when one fails the screen stays as it
     /// is and the connection is not reported as failed.
     private var quietRequestIDs = Set<UInt64>()
@@ -339,6 +348,9 @@ final class LiveSessionViewModel {
         notifier?.onApplicationActivated = { [weak self] in
             self?.applicationBecameActive()
         }
+        userAttention.onReturn = { [weak self] in
+            self?.userReturned()
+        }
         notifier?.onNotificationsDisabled = { [weak self] in
             self?.notice = "Notifications are turned off for Zulip Mac. "
                 + "Turn them on in System Settings › Notifications."
@@ -352,6 +364,21 @@ final class LiveSessionViewModel {
             return
         }
         refreshConversation(activeSelection)
+    }
+
+    /// Whether the user can be reading right now: the app is frontmost and the
+    /// screen is neither locked nor asleep.
+    private func isUserPresent() -> Bool {
+        isApplicationActive() && !userAttention.isAway
+    }
+
+    /// Unlocking or waking the display does not reactivate an app that stayed
+    /// frontmost, so what arrived meanwhile is read here.
+    private func userReturned() {
+        guard isApplicationActive() else {
+            return
+        }
+        applicationBecameActive()
     }
 
     /// Takes the user to the conversation a notification was about.
@@ -372,7 +399,7 @@ final class LiveSessionViewModel {
         }
         for notification in notifications {
             // Do not interrupt the conversation the user is already reading.
-            if isApplicationActive(), activeSelection == notification.route.key {
+            if isUserPresent(), activeSelection == notification.route.key {
                 continue
             }
             notifier.post(notification)
@@ -1289,6 +1316,55 @@ final class LiveSessionViewModel {
         )
     }
 
+    /// The user's own status, if they set one.
+    var ownStatus: UserStatusDisplay? {
+        identity.flatMap { userStatuses[$0.userID] }
+    }
+
+    func userStatus(forUserID userID: Int64) -> UserStatusDisplay? {
+        userStatuses[userID]
+    }
+
+    /// Sets the user's status; an empty one clears it. The new status shows once
+    /// the server reports it back.
+    func setStatus(_ status: UserStatusDisplay) {
+        submitStatusCommand { id, accountID in
+            .setUserStatus(
+                requestID: id,
+                accountID: accountID,
+                text: String(
+                    status.text
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                        .prefix(UserStatusDisplay.maximumTextLength)
+                ),
+                emojiName: status.emojiName,
+                emojiCode: status.emojiCode,
+                reactionType: status.emojiName.isEmpty ? "" : status.reactionType
+            )
+        }
+    }
+
+    func clearStatus() {
+        setStatus(UserStatusDisplay())
+    }
+
+    /// Turns invisible mode on or off: others then see the user as offline.
+    func setInvisible(_ invisible: Bool) {
+        submitStatusCommand { id, accountID in
+            .setInvisible(requestID: id, accountID: accountID, invisible: invisible)
+        }
+    }
+
+    private func submitStatusCommand(_ command: (UInt64, String) -> BridgeCommand) {
+        guard let identity, hasLiveSession else {
+            notice = "Your status can be changed once you are connected."
+            return
+        }
+        let id = nextRequestID()
+        statusRequests.insert(id)
+        client.submit(command(id, identity.accountID))
+    }
+
     private func submitNotificationSetting(streamID: Int64?, enabled: Bool) {
         guard let identity, hasLiveSession else {
             notice = "Notification settings can be changed once you are connected."
@@ -1321,6 +1397,45 @@ final class LiveSessionViewModel {
             state: presenceStates[userID] ?? .offline,
             lastActive: lastActiveDates[userID]
         )
+    }
+
+    /// The header line of a one-to-one conversation: the other person's status,
+    /// then whether they are online.
+    func conversationHeaderStatus(for key: ConversationKey) -> String? {
+        let presence = presenceDescription(for: key)
+        guard case let .directMessage(_, recipientIDs) = key,
+              recipientIDs.count == 1,
+              let userID = recipientIDs.first,
+              userID != identity?.userID,
+              let status = userStatuses[userID],
+              !status.summary.isEmpty
+        else {
+            return presence
+        }
+        return [status.summary, presence].compactMap { $0 }.joined(separator: " · ")
+    }
+
+    /// Where a message was posted, for timelines that mix topics: "› topic" in a
+    /// whole channel and "#channel › topic" in Mentions or Starred. Nil in
+    /// a topic or a direct message, whose header already says it.
+    func messageSourceLabel(for message: MessageViewData, in key: ConversationKey) -> String? {
+        guard let topic = message.sourceTopic else {
+            return nil
+        }
+        let topicLabel = "› \(TopicName.display(topic))"
+        switch key {
+        case .topic, .directMessage:
+            return nil
+        case let .channel(_, streamID) where message.sourceStreamID == streamID:
+            return topicLabel
+        default:
+            let channel = message.sourceStreamID.flatMap {
+                navigationDirectory.destination(
+                    for: .channel(accountID: message.accountID, streamID: $0)
+                )?.title
+            }
+            return channel.map { "#\($0) \(topicLabel)" } ?? topicLabel
+        }
     }
 
     /// The header status of a one-to-one conversation.
@@ -1381,7 +1496,7 @@ final class LiveSessionViewModel {
         }
         let now = Date()
         if connectionState == .connected,
-           isApplicationActive(),
+           isUserPresent(),
            now.timeIntervalSince(readReceiptRequestDates[messageID] ?? .distantPast)
                >= ReadReceiptPolicy.minimumRequestInterval
         {
@@ -1687,10 +1802,11 @@ final class LiveSessionViewModel {
                 return
             }
             conversationState = .loaded(conversationPage)
-            // While the app is in the background the user cannot be reading these;
-            // `applicationBecameActive` marks them read once they return.
+            // While the app is in the background or the screen is locked the user
+            // cannot be reading these; `applicationBecameActive` marks them read
+            // once they return.
             let messageIDs = page.messages.map(\.messageID)
-            if !messageIDs.isEmpty, let identity, isApplicationActive(),
+            if !messageIDs.isEmpty, let identity, isUserPresent(),
                Self.marksMessagesRead(in: page.key)
             {
                 submitMarkRead(accountID: identity.accountID, messageIDs: messageIDs)
@@ -1850,6 +1966,7 @@ final class LiveSessionViewModel {
 
         case let .notificationSettingSaved(requestID):
             notificationSettingRequests.remove(requestID)
+            statusRequests.remove(requestID)
 
         case let .messageSourceLoaded(requestID, _, source):
             guard let pending = messageSourceRequests.removeValue(forKey: requestID),
@@ -1933,6 +2050,8 @@ final class LiveSessionViewModel {
                 sessionLog.error("background request failed: \(message, privacy: .public)")
             } else if let requestID, notificationSettingRequests.remove(requestID) != nil {
                 notice = "The notification setting could not be saved: \(message)"
+            } else if let requestID, statusRequests.remove(requestID) != nil {
+                notice = "Your status could not be saved: \(message)"
             } else if let requestID, requestID == cachedSessionRequestID {
                 // No cached data yet (first run); the live connection continues.
                 cachedSessionRequestID = nil
@@ -2145,6 +2264,9 @@ final class LiveSessionViewModel {
         notificationPlanner.reset()
         unreadSummary = UnreadSummary()
         notifier?.setBadge(0)
+        userStatuses = [:]
+        isInvisible = false
+        statusRequests = []
         draftSaveTasks.values.forEach { $0.cancel() }
         draftSaveTasks = [:]
         drafts = [:]
@@ -2260,7 +2382,7 @@ final class LiveSessionViewModel {
             .refreshPresence(
                 requestID: nextRequestID(),
                 accountID: accountID,
-                isActive: isApplicationActive()
+                isActive: isUserPresent()
             )
         )
     }
@@ -2323,6 +2445,16 @@ final class LiveSessionViewModel {
         }
         replaceKnownTopics(from: snapshot)
         channelNotificationsDefault = snapshot.channelNotificationsDefault
+        let statuses = Dictionary(
+            snapshot.userStatuses.map { ($0.userID, UserStatusDisplay($0)) },
+            uniquingKeysWith: { _, latest in latest }
+        )
+        if statuses != userStatuses {
+            userStatuses = statuses
+        }
+        if snapshot.isInvisible != isInvisible {
+            isInvisible = snapshot.isInvisible
+        }
         unreadSummary = UnreadSummary(
             buckets: snapshot.unread,
             selfUserID: identity.userID,
