@@ -1061,9 +1061,13 @@ struct LiveSessionTests {
         await eventually { model.connectionState == .connected }
 
         model.openConversation(.channel(accountID: accountID, streamID: 5))
-        await eventually {
-            if case .failure = model.conversationState { return true }
-            return false
+        // `eventually` only yields; the watchdog needs real time to elapse.
+        for _ in 0..<100 {
+            if case .failure = model.conversationState { break }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        if case .failure = model.conversationState {} else {
+            Issue.record("A silent first page must become a failure")
         }
         #expect(model.connectionState == .connected)
     }
