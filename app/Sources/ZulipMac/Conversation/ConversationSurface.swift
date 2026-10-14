@@ -786,7 +786,14 @@ private struct MessageRow: View {
     var senderStatus: UserStatusDisplay?
 
     @State private var isHovered = false
+    @State private var isHoveringActions = false
     @State private var isPickingReaction = false
+
+    /// The pointer is over the message or its action bar, which floats above the
+    /// row's top edge and so partly outside the row's own hover area.
+    private var isActive: Bool {
+        isHovered || isHoveringActions
+    }
 
     var body: some View {
         // Element-style: the first message of a block opens with the avatar and the
@@ -820,7 +827,7 @@ private struct MessageRow: View {
                     .minimumScaleFactor(0.5)
                     .frame(width: Self.avatarSize, alignment: .center)
                     .padding(.top, 2)
-                    .opacity(isHovered ? 1 : 0)
+                    .opacity(isActive ? 1 : 0)
                     .help(message.timestamp.formatted(date: .complete, time: .standard))
                     .accessibilityHidden(true)
 
@@ -851,7 +858,7 @@ private struct MessageRow: View {
             .fill(
                 isFocusedSearchResult
                     ? AppTheme.Colors.accent.opacity(0.12)
-                    : isHovered
+                    : isActive
                         ? AppTheme.Colors.hover.opacity(0.45)
                         : .clear
             )
@@ -881,10 +888,13 @@ private struct MessageRow: View {
                 isRead: message.isRead,
                 isDisabled: message.actionState.isPending || message.deliveryState != .sent
             )
-            .padding(.top, 4)
+            .onHover { isHoveringActions = $0 }
+            // Straddles the top edge, above the row's right corner, so it never
+            // covers the read receipts at the bottom of a one-line message.
+            .alignmentGuide(.top) { $0[.bottom] - Self.actionBarOverlap }
             .padding(.trailing, AppTheme.Spacing.small)
-            .opacity(isHovered || isPickingReaction ? 1 : 0)
-            .accessibilityHidden(!isHovered && !isPickingReaction)
+            .opacity(isActive || isPickingReaction ? 1 : 0)
+            .accessibilityHidden(!isActive && !isPickingReaction)
         }
         .onHover { isHovered = $0 }
         .accessibilityElement(children: .contain)
@@ -916,6 +926,8 @@ private struct MessageRow: View {
     }
 
     private static let avatarSize: CGFloat = 30
+    /// How far the floating action bar reaches down into its own row.
+    private static let actionBarOverlap: CGFloat = 10
 
     /// The message's own lines: status, content, reactions and read receipts.
     private var messageBody: some View {
