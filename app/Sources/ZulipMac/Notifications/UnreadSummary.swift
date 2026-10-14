@@ -20,8 +20,15 @@ struct UnreadSummary: Equatable {
     /// What the Dock badge shows: every unread direct message, group ones too,
     /// plus unread mentions in channels that are not muted.
     private(set) var badge = 0
+    /// What the account chose for channels and topics, when the summary knows it.
+    private(set) var settings: ChannelNotificationSettings?
 
     init() {}
+
+    /// The topic's own notification choice.
+    func topicLevel(streamID: Int64, topic: String) -> TopicNotificationLevel {
+        settings?.level(streamID: streamID, topic: topic) ?? .standard
+    }
 
     /// `settings`, when given, decides what is muted (topics included);
     /// otherwise only `mutedChannels` are.
@@ -31,6 +38,7 @@ struct UnreadSummary: Equatable {
         mutedChannels: Set<Int64>,
         settings: ChannelNotificationSettings? = nil
     ) {
+        self.settings = settings
         for bucket in buckets where bucket.count > 0 {
             if let streamID = bucket.streamID {
                 mentions += bucket.mentionCount

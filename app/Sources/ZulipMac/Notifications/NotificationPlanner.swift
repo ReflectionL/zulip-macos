@@ -95,8 +95,9 @@ struct MessageNotification: Equatable, Sendable {
 ///
 /// Direct messages and @-mentions notify, as do all messages in channels the
 /// user asked Zulip to notify about (their own channel setting, or the
-/// account-wide default) and in followed topics. Muted channels and topics,
-/// the user's own messages and already-read messages do not. The first
+/// account-wide default) and in followed topics. Muted channels and topics
+/// stay silent except for a mention of the user by name, as in Zulip; the
+/// user's own messages and already-read messages never notify. The first
 /// snapshot only records what already exists.
 struct NotificationPlanner {
     static let maximumPerBatch = 5
@@ -145,7 +146,8 @@ struct NotificationPlanner {
                     return settings.notifies(
                         streamID: streamID,
                         topic: message.topic,
-                        isMention: Self.isMention(message)
+                        isPersonalMention: message.flags.contains("mentioned"),
+                        isWildcardMention: message.flags.contains("wildcard_mentioned")
                     )
                 }
                 return true

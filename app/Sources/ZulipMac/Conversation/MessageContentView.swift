@@ -13,6 +13,15 @@ struct MessageContentView: View {
     var mediaFailures: [String: String] = [:]
     var requestMedia: ((String) -> Void)?
     var retryMedia: ((String) -> Void)?
+    /// Small gray text that continues the last paragraph on its line, such as
+    /// "(edited)". Only shown when [`canInlineTrailingNote`] is true.
+    var trailingNote: String?
+
+    /// Whether the content ends in a paragraph that can carry a trailing note.
+    static func canInlineTrailingNote(_ blocks: [ContentBlock]) -> Bool {
+        if case .paragraph? = blocks.last { return true }
+        return false
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppTheme.Spacing.small) {
@@ -41,7 +50,8 @@ struct MessageContentView: View {
                         mediaLocalURLs: mediaLocalURLs,
                         mediaFailures: mediaFailures,
                         requestMedia: requestMedia,
-                        retryMedia: retryMedia
+                        retryMedia: retryMedia,
+                        trailingNote: index == blocks.count - 1 ? trailingNote : nil
                     )
                 }
             }
@@ -118,12 +128,13 @@ private struct ContentBlockView: View {
     let mediaFailures: [String: String]
     let requestMedia: ((String) -> Void)?
     let retryMedia: ((String) -> Void)?
+    var trailingNote: String?
 
     @ViewBuilder
     var body: some View {
         switch block {
         case let .paragraph(content):
-            InlineContentText(content: content)
+            InlineContentText(content: content, trailingNote: trailingNote)
 
         case let .heading(level, content):
             InlineContentText(content: content, font: Self.headingFont(level: level))
@@ -252,6 +263,7 @@ extension ContentBlockView {
 private struct InlineContentText: View {
     let content: [InlineContent]
     var font: Font = AppTheme.Typography.body
+    var trailingNote: String?
 
     var body: some View {
         Text(attributedContent)
@@ -263,7 +275,14 @@ private struct InlineContentText: View {
     }
 
     private var attributedContent: AttributedString {
-        Self.attributed(content, inherited: [])
+        var result = Self.attributed(content, inherited: [])
+        if let trailingNote {
+            var note = AttributedString(" " + trailingNote)
+            note.font = AppTheme.Typography.metadata
+            note.foregroundColor = AppTheme.Colors.tertiaryText
+            result.append(note)
+        }
+        return result
     }
 
     private static func attributed(

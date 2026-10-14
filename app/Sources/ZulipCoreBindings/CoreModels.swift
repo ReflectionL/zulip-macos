@@ -47,6 +47,19 @@ public struct QuickLinkSnapshot: Identifiable, Equatable, Sendable {
     }
 }
 
+/// How one topic is treated for notifications and unread counts, as Zulip lets
+/// the account choose per topic.
+public enum TopicNotificationLevel: Equatable, Sendable {
+    /// Every new message notifies, whatever the channel's setting.
+    case followed
+    /// No choice of its own: the topic behaves as its channel does.
+    case standard
+    /// Hidden from unread counts and silent (an @-mention of you still notifies).
+    case muted
+    /// Counted and notifying like any topic although its channel is muted.
+    case unmuted
+}
+
 public struct TopicSnapshot: Identifiable, Equatable, Sendable {
     public struct ID: Hashable, Sendable {
         public let streamID: Int64
@@ -62,14 +75,22 @@ public struct TopicSnapshot: Identifiable, Equatable, Sendable {
     public let name: String
     public let maxMessageID: Int64
     public let unreadCount: Int
+    public let notification: TopicNotificationLevel
 
     public var id: ID { ID(streamID: streamID, name: name) }
 
-    public init(streamID: Int64, name: String, maxMessageID: Int64, unreadCount: Int = 0) {
+    public init(
+        streamID: Int64,
+        name: String,
+        maxMessageID: Int64,
+        unreadCount: Int = 0,
+        notification: TopicNotificationLevel = .standard
+    ) {
         self.streamID = streamID
         self.name = name
         self.maxMessageID = maxMessageID
         self.unreadCount = unreadCount
+        self.notification = notification
     }
 }
 

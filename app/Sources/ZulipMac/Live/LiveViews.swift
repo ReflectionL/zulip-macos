@@ -233,6 +233,13 @@ private struct LiveWindowView: View {
                             enabled: enabled
                         )
                     },
+                    setTopicNotification: { channel, topic, level in
+                        session.setTopicNotification(
+                            streamID: channel.streamID,
+                            topic: topic.name,
+                            level: level
+                        )
+                    },
                     notifiesForAllChannels: session.channelNotificationsDefault,
                     setNotifiesForAllChannels: session.setChannelNotificationsDefault,
                     presenceDescription: { userID in

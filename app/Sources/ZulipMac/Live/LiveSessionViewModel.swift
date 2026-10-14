@@ -230,6 +230,11 @@ final class LiveSessionViewModel {
     /// Pages already shown this session, newest use last, so reopening a chat,
     /// topic or thread paints at once instead of passing through a loading state.
     @ObservationIgnored private var recentPages: [ConversationKey: ConversationPage] = [:]
+    /// How long a conversation may stay in its loading state before the screen
+    /// offers Try Again, whatever the core is doing. The core has its own request
+    /// deadlines; this only guarantees the screen can never wait forever.
+    @ObservationIgnored var openTimeout = Duration.seconds(25)
+    @ObservationIgnored private var openWatchdog: Task<Void, Never>?
     @ObservationIgnored private var recentPageOrder: [ConversationKey] = []
     private static let recentPageLimit = 24
     @ObservationIgnored private var presenceStates: [Int64: PresenceState] = [:]
@@ -738,6 +743,29 @@ final class LiveSessionViewModel {
                 limit: Self.conversationPageSize
             )
         )
+        openWatchdog?.cancel()
+        openWatchdog = Task { [weak self, openTimeout] in
+            try? await Task.sleep(for: openTimeout)
+            guard !Task.isCancelled else { return }
+            self?.openRequestTimedOut(openID, key: key)
+        }
+    }
+
+    /// Replaces a loading state that has outlived its welcome by a failure with a
+    /// Try Again button. A late page still replaces the failure when it arrives.
+    private func openRequestTimedOut(_ requestID: UInt64, key: ConversationKey) {
+        guard openRequests[requestID] == key,
+              activeSelection == key,
+              case .loading = conversationState
+        else {
+            return
+        }
+        let destination = navigationDirectory.destination(for: key)
+        conversationState = .failure(
+            title: destination?.title ?? "Conversation",
+            subtitle: destination?.subtitle ?? organizationName,
+            message: "The server did not answer in time. Check the connection and try again."
+        )
     }
 
     /// Asks for the open conversation's first page again after a failure.
@@ -1224,6 +1252,27 @@ final class LiveSessionViewModel {
     /// Sets Zulip's account-wide default for channels without a setting of their own.
     func setChannelNotificationsDefault(_ enabled: Bool) {
         submitNotificationSetting(streamID: nil, enabled: enabled)
+    }
+
+    /// Sets one topic to Followed, Default or Muted in Zulip itself (`.unmuted`
+    /// is for topics inside a muted channel). The sidebar follows once the
+    /// server's `user_topic` update arrives with the next snapshot.
+    func setTopicNotification(streamID: Int64, topic: String, level: TopicNotificationLevel) {
+        guard let identity, hasLiveSession else {
+            notice = "Notification settings can be changed once you are connected."
+            return
+        }
+        let id = nextRequestID()
+        notificationSettingRequests.insert(id)
+        client.submit(
+            .setTopicNotification(
+                requestID: id,
+                accountID: identity.accountID,
+                streamID: streamID,
+                topic: topic,
+                level: level
+            )
+        )
     }
 
     private func submitNotificationSetting(streamID: Int64?, enabled: Bool) {
@@ -2861,6 +2910,10 @@ final class LiveSessionViewModel {
                             unreadCount: unreadSummary.unreadCount(
                                 streamID: $0.streamID,
                                 topic: $0.name
+                            ),
+                            notification: unreadSummary.topicLevel(
+                                streamID: $0.streamID,
+                                topic: $0.name
                             )
                         )
                     }
@@ -3077,6 +3130,10 @@ final class LiveSessionViewModel {
                                 name: $0.name,
                                 maxMessageID: $0.maxMessageID,
                                 unreadCount: unread.unreadCount(
+                                    streamID: $0.streamID,
+                                    topic: $0.name
+                                ),
+                                notification: unread.topicLevel(
                                     streamID: $0.streamID,
                                     topic: $0.name
                                 )

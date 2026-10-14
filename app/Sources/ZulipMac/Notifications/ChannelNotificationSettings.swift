@@ -51,17 +51,34 @@ struct ChannelNotificationSettings: Equatable, Sendable {
         }
     }
 
-    /// Whether a new channel message should raise a notification: followed
-    /// topics always do, muted ones never, and otherwise a mention does, or
-    /// every message when the channel (or the account default) asks for it.
-    func notifies(streamID: Int64, topic: String?, isMention: Bool) -> Bool {
-        if visibility(streamID: streamID, topic: topic) == .followed {
+    /// The topic's own choice, or `.standard` when it follows its channel.
+    func level(streamID: Int64, topic: String?) -> TopicNotificationLevel {
+        switch visibility(streamID: streamID, topic: topic) {
+        case .muted: .muted
+        case .unmuted: .unmuted
+        case .followed: .followed
+        case nil: .standard
+        }
+    }
+
+    /// Whether a new channel message should raise a notification, as Zulip decides:
+    /// a followed topic notifies about everything; an @-mention of the user
+    /// notifies even in a muted channel or topic; muted channels and topics are
+    /// otherwise silent (an @all/@topic mention included); anything else
+    /// notifies when the channel (or the account default) asks for every message.
+    func notifies(
+        streamID: Int64,
+        topic: String?,
+        isPersonalMention: Bool,
+        isWildcardMention: Bool = false
+    ) -> Bool {
+        if visibility(streamID: streamID, topic: topic) == .followed || isPersonalMention {
             return true
         }
         if isMuted(streamID: streamID, topic: topic) {
             return false
         }
-        return isMention || (channelChoices[streamID] ?? notifiesByDefault)
+        return isWildcardMention || (channelChoices[streamID] ?? notifiesByDefault)
     }
 
     private func visibility(streamID: Int64, topic: String?) -> LiveTopicVisibility? {
