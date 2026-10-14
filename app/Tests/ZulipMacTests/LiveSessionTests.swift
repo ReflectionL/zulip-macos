@@ -1068,6 +1068,57 @@ struct LiveSessionTests {
         #expect(model.connectionState == .connected)
     }
 
+    @Test("Mixed timelines label each message with its topic")
+    func messageSourceLabel() async {
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(client: core, credentialStore: MemoryCredentialStore())
+        model.startObserving()
+        let accountID = "account-1"
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: accountID),
+                credential: StoredAPICredential(accountID: accountID, apiKey: "key"),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.connectionState == .connected }
+
+        let message = MessageViewData(
+            id: 1,
+            accountID: accountID,
+            conversationKey: .mentions(accountID: accountID),
+            senderID: 22,
+            senderName: "Ari",
+            senderInitials: "A",
+            timestamp: Date(),
+            content: [],
+            isOwnMessage: false,
+            sourceStreamID: 5,
+            sourceTopic: ""
+        )
+        await eventually {
+            model.messageSourceLabel(for: message, in: .mentions(accountID: accountID))
+                == "#engineering › general chat"
+        }
+        #expect(
+            model.messageSourceLabel(for: message, in: .starred(accountID: accountID))
+                == "#engineering › general chat"
+        )
+        #expect(
+            model.messageSourceLabel(
+                for: message,
+                in: .channel(accountID: accountID, streamID: 5)
+            ) == "› general chat"
+        )
+        #expect(
+            model.messageSourceLabel(
+                for: message,
+                in: .topic(accountID: accountID, streamID: 5, topic: "")
+            ) == nil
+        )
+    }
+
     @Test("A topic's notification level is sent to Zulip")
     func topicNotificationLevel() async {
         let core = RecordingCoreClient()

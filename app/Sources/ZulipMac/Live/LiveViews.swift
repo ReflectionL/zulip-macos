@@ -488,7 +488,8 @@ private struct LiveWindowView: View {
                 typingChanged: { session.composerTyping($0, in: page.key) },
                 readReceipts: session.readReceiptDisplay(for: page),
                 pollReadReceipts: { session.pollReadReceipts(messageID: $0, key: page.key) },
-                userStatus: { session.userStatus(forUserID: $0) }
+                userStatus: { session.userStatus(forUserID: $0) },
+                sourceLabel: { session.messageSourceLabel(for: $0, in: page.key) }
             )
             // A fresh surface per conversation: switching straight from one loaded
             // chat to another used to reuse the old scroll view (which could stay

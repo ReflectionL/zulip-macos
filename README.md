@@ -61,6 +61,8 @@ roadmap lives in [`PLAN.md`](PLAN.md).
   others see you as offline. Everyone's status emoji follows their name in
   messages and the direct-message list; the text shows on hover and in a
   direct message's header.
+- In Mentions, Starred and a whole channel, hovering a message shows where it
+  was posted ("#channel › topic") in grey after the sender's name.
 - Read receipts: small overlapping avatars under your newest sent message show
   who has read it (needs Zulip 6.0 and read receipts enabled by the
   organization).

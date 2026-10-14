@@ -52,6 +52,9 @@ struct ConversationSurface: View {
     var pollReadReceipts: ((Int64) -> Bool)?
     /// A sender's status, shown as an emoji after their name.
     var userStatus: ((Int64) -> UserStatusDisplay?)?
+    /// Where a message was posted ("#channel › topic"), shown on hover in
+    /// timelines that mix topics; nil where the header already names it.
+    var sourceLabel: ((MessageViewData) -> String?)?
 
     @State private var messages: [MessageViewData]
     @State private var draft = ""
@@ -110,7 +113,8 @@ struct ConversationSurface: View {
         typingChanged: ((Bool) -> Void)? = nil,
         readReceipts: ReadReceiptDisplay? = nil,
         pollReadReceipts: ((Int64) -> Bool)? = nil,
-        userStatus: ((Int64) -> UserStatusDisplay?)? = nil
+        userStatus: ((Int64) -> UserStatusDisplay?)? = nil,
+        sourceLabel: ((MessageViewData) -> String?)? = nil
     ) {
         self.page = page
         self.isOffline = isOffline
@@ -154,6 +158,7 @@ struct ConversationSurface: View {
         self.readReceipts = readReceipts
         self.pollReadReceipts = pollReadReceipts
         self.userStatus = userStatus
+        self.sourceLabel = sourceLabel
         _messages = State(initialValue: page.messages)
         _draft = State(initialValue: initialDraft)
     }
@@ -261,7 +266,10 @@ struct ConversationSurface: View {
                                             : [],
                                         senderStatus: continuations.contains(message.id)
                                             ? nil
-                                            : userStatus?(message.senderID)
+                                            : userStatus?(message.senderID),
+                                        sourceLabel: continuations.contains(message.id)
+                                            ? nil
+                                            : sourceLabel?(message)
                                     )
                                 }
                                 .id(message.rowID)
@@ -784,6 +792,7 @@ private struct MessageRow: View {
     let retryMedia: ((String) -> Void)?
     var readers: [ReadReceiptReader] = []
     var senderStatus: UserStatusDisplay?
+    var sourceLabel: String?
 
     @State private var isHovered = false
     @State private var isHoveringActions = false
@@ -814,6 +823,19 @@ private struct MessageRow: View {
                         .foregroundStyle(SenderColor.color(for: message.senderID))
                         .lineLimit(1)
                     UserStatusEmoji(status: senderStatus, size: 13)
+                    if let sourceLabel {
+                        // Like the time beside the message, it appears on hover.
+                        Text(sourceLabel)
+                            .font(AppTheme.Typography.metadata)
+                            .foregroundStyle(AppTheme.Colors.tertiaryText)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            // The sender's name keeps its room first.
+                            .layoutPriority(-1)
+                            .opacity(isActive ? 1 : 0)
+                            .help(sourceLabel)
+                            .accessibilityLabel("In \(sourceLabel)")
+                    }
                     statusLabels
                     Spacer(minLength: 0)
                 }

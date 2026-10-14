@@ -1415,6 +1415,29 @@ final class LiveSessionViewModel {
         return [status.summary, presence].compactMap { $0 }.joined(separator: " · ")
     }
 
+    /// Where a message was posted, for timelines that mix topics: "› topic" in a
+    /// whole channel and "#channel › topic" in Mentions or Starred. Nil in
+    /// a topic or a direct message, whose header already says it.
+    func messageSourceLabel(for message: MessageViewData, in key: ConversationKey) -> String? {
+        guard let topic = message.sourceTopic else {
+            return nil
+        }
+        let topicLabel = "› \(TopicName.display(topic))"
+        switch key {
+        case .topic, .directMessage:
+            return nil
+        case let .channel(_, streamID) where message.sourceStreamID == streamID:
+            return topicLabel
+        default:
+            let channel = message.sourceStreamID.flatMap {
+                navigationDirectory.destination(
+                    for: .channel(accountID: message.accountID, streamID: $0)
+                )?.title
+            }
+            return channel.map { "#\($0) \(topicLabel)" } ?? topicLabel
+        }
+    }
+
     /// The header status of a one-to-one conversation.
     func presenceDescription(for key: ConversationKey) -> String? {
         guard case let .directMessage(_, recipientIDs) = key,
