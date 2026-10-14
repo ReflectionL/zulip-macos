@@ -12,6 +12,9 @@ const MAX_DEPTH: usize = 32;
 const MAX_URL_BYTES: usize = 4_096;
 const MAX_EMOJI_NAME_BYTES: usize = 128;
 const MAX_IMAGE_DIMENSION: u32 = 4_096;
+/// Most link cards one message shows; further links stay plain links.
+const MAX_LINK_PREVIEWS: usize = 4;
+const MAX_PREVIEW_TEXT_CHARS: usize = 300;
 
 /// Emphasis applied to a run of inline content.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -100,6 +103,20 @@ pub enum ContentBlock {
         /// Bounded server height hint.
         height: Option<u32>,
     },
+    /// A card for a web page: the server's preview of a linked site, or a link
+    /// sent on its own, which the app may describe itself.
+    LinkPreview {
+        /// The `http` or `https` page the card opens.
+        url: String,
+        /// Page title, or the link's own label when it is not the bare URL.
+        title: Option<String>,
+        /// Short page description.
+        description: Option<String>,
+        /// Sanitized preview picture (normally a server `/external_content/` route).
+        image_url: Option<String>,
+        /// Whether the server built this preview; otherwise the app may fetch one.
+        from_server: bool,
+    },
     /// Readable fallback for unsupported or unsafe block markup.
     Unsupported {
         /// Sanitized human-readable summary.
@@ -129,6 +146,7 @@ pub fn parse_zulip_html(html: &str) -> Vec<ContentBlock> {
     blocks.retain(|block| !block_is_empty(block));
     add_missing_upload_previews(&mut blocks);
     hide_previewed_upload_links(&mut blocks);
+    promote_standalone_links(&mut blocks, &parser.previewed_links);
     if blocks.is_empty() {
         vec![ContentBlock::Paragraph(vec![InlineContent::Text(
             readable_text_fallback(html),
@@ -144,6 +162,8 @@ struct ContentParser {
     output_text_bytes: usize,
     blocks: usize,
     limit_exceeded: bool,
+    /// Links the server already shows as a picture (an image or video preview).
+    previewed_links: Vec<String>,
 }
 
 impl ContentParser {
@@ -222,6 +242,8 @@ impl ContentParser {
                         self.parse_code(node, element, depth + 1)
                     } else if has_class(element, "message_inline_image") {
                         self.parse_inline_image(node)
+                    } else if has_class(element, "message_embed") {
+                        self.parse_embed(node, depth + 1)
                     } else {
                         self.parse_block_children(node, depth + 1)
                     }
@@ -351,6 +373,9 @@ impl ContentParser {
         let original_url = anchor
             .and_then(|element| element.attr("href"))
             .and_then(safe_url);
+        if let Some(original) = &original_url {
+            self.previewed_links.push(original.clone());
+        }
         let preview_url = image.attr("src").and_then(safe_url);
         // Uploads show their original. Anything else (a picture linked from another
         // site, a video thumbnail) shows the server's preview, because the link
@@ -368,6 +393,54 @@ impl ContentParser {
             .trim()
             .to_owned();
         self.image_block(image, url, alt)
+    }
+
+    /// The server's preview of a linked web page:
+    /// `div.message_embed` with an optional `a.message_embed_image` (picture in
+    /// its `background-image` style), `.message_embed_title a` and
+    /// `.message_embed_description`.
+    fn parse_embed(&mut self, node: NodeRef<'_, Node>, depth: usize) -> Vec<ContentBlock> {
+        let mut url = None;
+        let mut title = None;
+        let mut description = None;
+        let mut image_url = None;
+        for descendant in node.descendants() {
+            let Some(element) = descendant.value().as_element() else {
+                continue;
+            };
+            if element.name() == "a" && has_class(element, "message_embed_image") {
+                url = url.or_else(|| element.attr("href").and_then(web_url));
+                image_url = element.attr("style").and_then(background_image_url);
+            } else if has_class(element, "message_embed_title") {
+                let anchor = descendant.descendants().find_map(|item| {
+                    let element = item.value().as_element()?;
+                    (element.name() == "a").then_some(element)
+                });
+                if let Some(href) = anchor.and_then(|element| element.attr("href")) {
+                    url = web_url(href).or(url);
+                }
+                let text = self.descendant_text(descendant, depth + 1);
+                title = preview_text(anchor.and_then(|element| element.attr("title")))
+                    .or_else(|| preview_text(Some(&text)));
+            } else if has_class(element, "message_embed_description") {
+                let text = self.descendant_text(descendant, depth + 1);
+                description = preview_text(Some(&text));
+            }
+        }
+        let Some(url) = url else {
+            // Not a usable card; keep whatever text it has.
+            return self.parse_block_children(node, depth);
+        };
+        for text in [&title, &description].into_iter().flatten() {
+            self.record_text(text);
+        }
+        self.block(ContentBlock::LinkPreview {
+            url,
+            title,
+            description,
+            image_url,
+            from_server: true,
+        })
     }
 
     fn parse_inline_children(
@@ -635,6 +708,106 @@ fn hide_previewed_upload_links(blocks: &mut Vec<ContentBlock>) {
     }
 }
 
+/// A link sent on its own (the only thing in its paragraph) becomes a card,
+/// like a link in Messages. When the server already previewed the page the
+/// paragraph simply goes, since the server's card says more; a link the server
+/// shows as a picture (an image or video) stays a link.
+fn promote_standalone_links(blocks: &mut Vec<ContentBlock>, previewed_links: &[String]) {
+    let embedded: Vec<String> = blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::LinkPreview { url, .. } => Some(url.clone()),
+            _ => None,
+        })
+        .collect();
+    let mut cards = embedded.len();
+    let mut promoted = Vec::with_capacity(blocks.len());
+    for block in std::mem::take(blocks) {
+        let Some((label, url)) = standalone_link(&block) else {
+            promoted.push(block);
+            continue;
+        };
+        if embedded.contains(&url) {
+            continue;
+        }
+        if cards == MAX_LINK_PREVIEWS || previewed_links.contains(&url) {
+            promoted.push(block);
+            continue;
+        }
+        cards += 1;
+        let title = (label.trim() != url)
+            .then(|| preview_text(Some(&label)))
+            .flatten();
+        promoted.push(ContentBlock::LinkPreview {
+            url,
+            title,
+            description: None,
+            image_url: None,
+            from_server: false,
+        });
+    }
+    *blocks = promoted;
+}
+
+/// The label and URL of a paragraph that holds one web link and nothing else.
+fn standalone_link(block: &ContentBlock) -> Option<(String, String)> {
+    let ContentBlock::Paragraph(inline) = block else {
+        return None;
+    };
+    let mut link = None;
+    for item in inline {
+        match item {
+            InlineContent::Text(value) if value.trim().is_empty() => {}
+            InlineContent::Link { label, url } if link.is_none() => {
+                link = Some((label.clone(), url.clone()));
+            }
+            _ => return None,
+        }
+    }
+    let (label, url) = link?;
+    let url = web_url(&url)?;
+    // A link to a Zulip conversation is not a web page worth a card.
+    let narrow = Url::parse(&url)
+        .ok()
+        .and_then(|parsed| {
+            parsed
+                .fragment()
+                .map(|fragment| fragment.starts_with("narrow/"))
+        })
+        .unwrap_or(false);
+    (!is_uploaded_file(&url) && !narrow).then_some((label, url))
+}
+
+/// `value` when it is an absolute `http` or `https` URL.
+fn web_url(value: &str) -> Option<String> {
+    let value = safe_url(value)?;
+    let parsed = Url::parse(&value).ok()?;
+    (matches!(parsed.scheme(), "https" | "http") && parsed.host().is_some()).then_some(value)
+}
+
+/// The picture in a `background-image: url("…")` style.
+fn background_image_url(style: &str) -> Option<String> {
+    let start = style.find("url(")? + "url(".len();
+    let rest = &style[start..];
+    let end = rest.find(')')?;
+    let inner = rest[..end].trim().trim_matches(|c| c == '"' || c == '\'');
+    safe_url(inner).filter(|url| !url.starts_with('#') && !url.starts_with("mailto:"))
+}
+
+/// Trimmed, bounded preview text; `None` when empty.
+fn preview_text(value: Option<&str>) -> Option<String> {
+    let collapsed = value?.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return None;
+    }
+    if collapsed.chars().count() <= MAX_PREVIEW_TEXT_CHARS {
+        return Some(collapsed);
+    }
+    let mut cut: String = collapsed.chars().take(MAX_PREVIEW_TEXT_CHARS).collect();
+    cut.push('…');
+    Some(cut)
+}
+
 fn collect_links(inline: &[InlineContent], links: &mut Vec<(String, String)>) {
     for item in inline {
         match item {
@@ -781,7 +954,9 @@ fn block_is_empty(block: &ContentBlock) -> bool {
         ContentBlock::Quote(blocks) => blocks.is_empty(),
         ContentBlock::List { items, .. } => items.is_empty(),
         ContentBlock::Code { value, .. } => value.is_empty(),
-        ContentBlock::Image { .. } | ContentBlock::Unsupported { .. } => false,
+        ContentBlock::Image { .. }
+        | ContentBlock::LinkPreview { .. }
+        | ContentBlock::Unsupported { .. } => false,
     }
 }
 
@@ -818,7 +993,10 @@ fn readable_text_fallback(html: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ContentBlock, InlineContent, InlineStyle, MAX_INPUT_BYTES, parse_zulip_html};
+    use super::{
+        ContentBlock, InlineContent, InlineStyle, MAX_INPUT_BYTES, MAX_LINK_PREVIEWS,
+        parse_zulip_html,
+    };
 
     #[test]
     fn parses_zulip_blocks_and_inline_semantics() {
@@ -1099,6 +1277,112 @@ mod tests {
         assert!(
             matches!(blocks.as_slice(), [ContentBlock::Image { alt, .. }] if alt == "截屏.png")
         );
+    }
+
+    #[test]
+    fn standalone_links_become_cards_and_server_previews_are_parsed() {
+        // A link on its own becomes a card the app describes itself.
+        let blocks = parse_zulip_html(
+            r#"<p><a href="https://example.com/post">https://example.com/post</a></p>"#,
+        );
+        assert_eq!(
+            blocks,
+            vec![ContentBlock::LinkPreview {
+                url: "https://example.com/post".to_owned(),
+                title: None,
+                description: None,
+                image_url: None,
+                from_server: false,
+            }]
+        );
+
+        // With the server's preview, the link goes and the server's card stays.
+        let blocks = parse_zulip_html(
+            r#"<p><a href="https://example.com/post">Read this</a></p>
+                <div class="message_embed">
+                    <a class="message_embed_image" href="https://example.com/post"
+                        style="background-image: url(&quot;/external_content/ab12/cover&quot;)"></a>
+                    <div class="data-container">
+                        <div class="message_embed_title">
+                            <a href="https://example.com/post" title="A   long
+                                title">A long title</a>
+                        </div>
+                        <div class="message_embed_description">What the page is about.</div>
+                    </div>
+                </div>"#,
+        );
+        assert_eq!(
+            blocks,
+            vec![ContentBlock::LinkPreview {
+                url: "https://example.com/post".to_owned(),
+                title: Some("A long title".to_owned()),
+                description: Some("What the page is about.".to_owned()),
+                image_url: Some("/external_content/ab12/cover".to_owned()),
+                from_server: true,
+            }]
+        );
+
+        // Links inside a sentence, links the server shows as a picture, uploads
+        // and links to Zulip conversations stay links.
+        let blocks = parse_zulip_html(
+            r#"<p>See <a href="https://example.com/a">this</a> page</p>
+                <p><a href="https://www.youtube.com/watch?v=abc">https://www.youtube.com/watch?v=abc</a></p>
+                <div class="youtube-video message_inline_image">
+                    <a href="https://www.youtube.com/watch?v=abc">
+                        <img src="/external_content/cd34/thumb">
+                    </a>
+                </div>
+                <p><a href="/user_uploads/1/ab/notes.pdf">notes.pdf</a></p>
+                <p><a href="https://chat.example.com/#narrow/channel/5-macOS">#macOS</a></p>"#,
+        );
+        assert!(
+            !blocks
+                .iter()
+                .any(|block| matches!(block, ContentBlock::LinkPreview { .. })),
+            "{blocks:?}"
+        );
+
+        // The label is a fallback title when it is not the bare URL; the number
+        // of cards is bounded.
+        let html = ["0", "1", "2", "3", "4", "5"]
+            .map(|index| {
+                [
+                    r#"<p><a href="https://example.com/"#,
+                    index,
+                    r#"">Page "#,
+                    index,
+                    "</a></p>",
+                ]
+                .concat()
+            })
+            .concat();
+        let blocks = parse_zulip_html(&html);
+        let cards = blocks
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::LinkPreview { title, .. } => Some(title.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(cards.len(), MAX_LINK_PREVIEWS);
+        assert_eq!(cards[0].as_deref(), Some("Page 0"));
+        assert_eq!(blocks.len(), 6);
+
+        // Unsafe preview pictures are dropped.
+        let blocks = parse_zulip_html(
+            r#"<div class="message_embed">
+                    <a class="message_embed_image" href="https://example.com/x"
+                        style="background-image: url('javascript:alert(1)')"></a>
+                </div>"#,
+        );
+        assert!(matches!(
+            blocks.as_slice(),
+            [ContentBlock::LinkPreview {
+                image_url: None,
+                title: None,
+                ..
+            }]
+        ));
     }
 
     #[test]

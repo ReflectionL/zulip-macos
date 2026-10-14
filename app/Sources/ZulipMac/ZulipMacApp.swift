@@ -34,6 +34,7 @@ struct ZulipMacApp: App {
                 LabeledContent("Minimum system", value: AppIdentity.minimumSystem)
                 TextSizeSettingsSection()
                 NotificationSettingsSection(notifier: notifier)
+                LinkPreviewSettingsSection()
                 UpdateSettingsSection(updates: updates)
                 Section("Keyboard") {
                     LabeledContent("Quick switcher", value: "⌘K")
