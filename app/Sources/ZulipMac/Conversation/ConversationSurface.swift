@@ -50,6 +50,8 @@ struct ConversationSurface: View {
     var readReceipts: ReadReceiptDisplay?
     /// Asks the core who has read the given message; returns whether to keep asking.
     var pollReadReceipts: ((Int64) -> Bool)?
+    /// A sender's status, shown as an emoji after their name.
+    var userStatus: ((Int64) -> UserStatusDisplay?)?
 
     @State private var messages: [MessageViewData]
     @State private var draft = ""
@@ -107,7 +109,8 @@ struct ConversationSurface: View {
         typingDescription: String? = nil,
         typingChanged: ((Bool) -> Void)? = nil,
         readReceipts: ReadReceiptDisplay? = nil,
-        pollReadReceipts: ((Int64) -> Bool)? = nil
+        pollReadReceipts: ((Int64) -> Bool)? = nil,
+        userStatus: ((Int64) -> UserStatusDisplay?)? = nil
     ) {
         self.page = page
         self.isOffline = isOffline
@@ -150,6 +153,7 @@ struct ConversationSurface: View {
         self.typingChanged = typingChanged
         self.readReceipts = readReceipts
         self.pollReadReceipts = pollReadReceipts
+        self.userStatus = userStatus
         _messages = State(initialValue: page.messages)
         _draft = State(initialValue: initialDraft)
     }
@@ -254,7 +258,10 @@ struct ConversationSurface: View {
                                         retryMedia: retryMedia,
                                         readers: readReceipts?.messageID == message.id
                                             ? readReceipts?.readers ?? []
-                                            : []
+                                            : [],
+                                        senderStatus: continuations.contains(message.id)
+                                            ? nil
+                                            : userStatus?(message.senderID)
                                     )
                                 }
                                 .id(message.rowID)
@@ -776,6 +783,7 @@ private struct MessageRow: View {
     let requestMedia: ((String) -> Void)?
     let retryMedia: ((String) -> Void)?
     var readers: [ReadReceiptReader] = []
+    var senderStatus: UserStatusDisplay?
 
     @State private var isHovered = false
     @State private var isPickingReaction = false
@@ -798,6 +806,7 @@ private struct MessageRow: View {
                         .font(AppTheme.Typography.bodyEmphasized)
                         .foregroundStyle(SenderColor.color(for: message.senderID))
                         .lineLimit(1)
+                    UserStatusEmoji(status: senderStatus, size: 13)
                     statusLabels
                     Spacer(minLength: 0)
                 }

@@ -21,6 +21,9 @@ const STREAMS_PATH_PREFIX: &str = "api/v1/streams";
 const SUBSCRIPTIONS_PATH: &str = "api/v1/users/me/subscriptions";
 const SUBSCRIPTION_PROPERTIES_PATH: &str = "api/v1/users/me/subscriptions/properties";
 const SETTINGS_PATH: &str = "api/v1/settings";
+const USER_STATUS_PATH: &str = "api/v1/users/me/status";
+/// Zulip rejects longer status texts.
+const MAX_STATUS_TEXT_CHARS: usize = 60;
 const USER_TOPICS_PATH: &str = "api/v1/user_topics";
 const MAX_CHANNEL_NAME_CHARS: usize = 60;
 const MAX_CHANNEL_DESCRIPTION_CHARS: usize = 1_024;
@@ -908,6 +911,77 @@ impl MessageClient {
             .patch(self.base_url.endpoint(SETTINGS_PATH))
             .basic_auth(&self.email, Some(self.api_key.expose_secret()))
             .form(&[("enable_stream_desktop_notifications", enabled.to_string())])
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let document: ApiResultDocument =
+            decode_response(response, MAX_WRITE_RESPONSE_BYTES).await?;
+        document.validate_result()
+    }
+
+    /// Sets the account's status. An empty `status_text` and `emoji_name`
+    /// together clear it; an empty `emoji_name` alone removes only the emoji.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageApiError`] for text that is too long or unsafe, and for
+    /// transport, rejection, size, or response failures.
+    pub async fn set_user_status(
+        &self,
+        status_text: &str,
+        emoji_name: &str,
+        emoji_code: &str,
+        reaction_type: &str,
+    ) -> Result<(), MessageApiError> {
+        let status_text = status_text.trim();
+        if status_text.chars().count() > MAX_STATUS_TEXT_CHARS
+            || status_text.chars().any(char::is_control)
+            || emoji_name.len() > MAX_EMOJI_NAME_BYTES
+            || emoji_code.len() > MAX_EMOJI_NAME_BYTES
+        {
+            return Err(MessageApiError::InvalidInput);
+        }
+        let mut form = vec![
+            ("status_text", status_text.to_owned()),
+            ("emoji_name", emoji_name.to_owned()),
+        ];
+        if !emoji_name.is_empty() {
+            form.push(("emoji_code", emoji_code.to_owned()));
+            form.push((
+                "reaction_type",
+                if reaction_type.is_empty() {
+                    "unicode_emoji".to_owned()
+                } else {
+                    reaction_type.to_owned()
+                },
+            ));
+        }
+        let response = self
+            .http
+            .post(self.base_url.endpoint(USER_STATUS_PATH))
+            .basic_auth(&self.email, Some(self.api_key.expose_secret()))
+            .form(&form)
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let document: ApiResultDocument =
+            decode_response(response, MAX_WRITE_RESPONSE_BYTES).await?;
+        document.validate_result()
+    }
+
+    /// Turns invisible mode on or off: while it is on, others see the account
+    /// as offline (Zulip's `presence_enabled` setting, inverted).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageApiError`] for transport, rejection, size, or response
+    /// failures.
+    pub async fn set_invisible(&self, invisible: bool) -> Result<(), MessageApiError> {
+        let response = self
+            .http
+            .patch(self.base_url.endpoint(SETTINGS_PATH))
+            .basic_auth(&self.email, Some(self.api_key.expose_secret()))
+            .form(&[("presence_enabled", (!invisible).to_string())])
             .send()
             .await
             .map_err(transport_error)?;
@@ -1818,6 +1892,49 @@ mod tests {
         );
         assert!(matches!(
             client.set_channel_desktop_notifications(0, true).await,
+            Err(MessageApiError::InvalidInput)
+        ));
+    }
+
+    #[tokio::test]
+    async fn status_and_invisible_mode_are_written_to_the_server() {
+        let ok = || {
+            (
+                StatusCode::OK,
+                r#"{"result":"success","msg":""}"#.to_owned(),
+            )
+        };
+        let (server, requests) = spawn_mock(vec![ok(), ok(), ok()]);
+        let client = MessageClient::new(&server, "maya@example.com", SecretString::new(API_KEY))
+            .expect("message client");
+
+        client
+            .set_user_status(" In a meeting ", "calendar", "1f4c6", "")
+            .await
+            .expect("status");
+        let request = requests.recv().expect("status request");
+        assert!(request.starts_with("POST /api/v1/users/me/status HTTP/1.1"));
+        assert!(request.contains("status_text=In+a+meeting"));
+        assert!(request.contains("emoji_name=calendar"));
+        assert!(request.contains("emoji_code=1f4c6"));
+        assert!(request.contains("reaction_type=unicode_emoji"));
+        assert!(!request.contains(API_KEY));
+
+        client
+            .set_user_status("", "", "", "")
+            .await
+            .expect("cleared");
+        let request = requests.recv().expect("clear request");
+        assert!(request.contains("status_text=&emoji_name="));
+        assert!(!request.contains("emoji_code"));
+
+        client.set_invisible(true).await.expect("invisible");
+        let request = requests.recv().expect("invisible request");
+        assert!(request.starts_with("PATCH /api/v1/settings HTTP/1.1"));
+        assert!(request.contains("presence_enabled=false"));
+
+        assert!(matches!(
+            client.set_user_status(&"x".repeat(61), "", "", "").await,
             Err(MessageApiError::InvalidInput)
         ));
     }

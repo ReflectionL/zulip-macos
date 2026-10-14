@@ -193,6 +193,10 @@ final class LiveSessionViewModel {
     /// Zulip's account-wide default: whether channels without a setting of their
     /// own notify for every message.
     private(set) var channelNotificationsDefault = false
+    /// Everyone's status that says something, by user.
+    private(set) var userStatuses: [Int64: UserStatusDisplay] = [:]
+    /// Whether the account hides its presence (Zulip's invisible mode).
+    private(set) var isInvisible = false
     private(set) var identity: LiveSessionIdentity?
     private(set) var sidebarSnapshot: SidebarSnapshot?
     private(set) var navigationDirectory = NavigationDirectory(destinations: [])
@@ -289,6 +293,8 @@ final class LiveSessionViewModel {
     private var openRequests: [UInt64: ConversationKey] = [:]
     /// Notification setting writes awaiting the server's answer.
     private var notificationSettingRequests = Set<UInt64>()
+    /// Status and invisible-mode changes waiting for the server.
+    @ObservationIgnored private var statusRequests = Set<UInt64>()
     /// Refreshes and mark-read requests: when one fails the screen stays as it
     /// is and the connection is not reported as failed.
     private var quietRequestIDs = Set<UInt64>()
@@ -1310,6 +1316,55 @@ final class LiveSessionViewModel {
         )
     }
 
+    /// The user's own status, if they set one.
+    var ownStatus: UserStatusDisplay? {
+        identity.flatMap { userStatuses[$0.userID] }
+    }
+
+    func userStatus(forUserID userID: Int64) -> UserStatusDisplay? {
+        userStatuses[userID]
+    }
+
+    /// Sets the user's status; an empty one clears it. The new status shows once
+    /// the server reports it back.
+    func setStatus(_ status: UserStatusDisplay) {
+        submitStatusCommand { id, accountID in
+            .setUserStatus(
+                requestID: id,
+                accountID: accountID,
+                text: String(
+                    status.text
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                        .prefix(UserStatusDisplay.maximumTextLength)
+                ),
+                emojiName: status.emojiName,
+                emojiCode: status.emojiCode,
+                reactionType: status.emojiName.isEmpty ? "" : status.reactionType
+            )
+        }
+    }
+
+    func clearStatus() {
+        setStatus(UserStatusDisplay())
+    }
+
+    /// Turns invisible mode on or off: others then see the user as offline.
+    func setInvisible(_ invisible: Bool) {
+        submitStatusCommand { id, accountID in
+            .setInvisible(requestID: id, accountID: accountID, invisible: invisible)
+        }
+    }
+
+    private func submitStatusCommand(_ command: (UInt64, String) -> BridgeCommand) {
+        guard let identity, hasLiveSession else {
+            notice = "Your status can be changed once you are connected."
+            return
+        }
+        let id = nextRequestID()
+        statusRequests.insert(id)
+        client.submit(command(id, identity.accountID))
+    }
+
     private func submitNotificationSetting(streamID: Int64?, enabled: Bool) {
         guard let identity, hasLiveSession else {
             notice = "Notification settings can be changed once you are connected."
@@ -1342,6 +1397,22 @@ final class LiveSessionViewModel {
             state: presenceStates[userID] ?? .offline,
             lastActive: lastActiveDates[userID]
         )
+    }
+
+    /// The header line of a one-to-one conversation: the other person's status,
+    /// then whether they are online.
+    func conversationHeaderStatus(for key: ConversationKey) -> String? {
+        let presence = presenceDescription(for: key)
+        guard case let .directMessage(_, recipientIDs) = key,
+              recipientIDs.count == 1,
+              let userID = recipientIDs.first,
+              userID != identity?.userID,
+              let status = userStatuses[userID],
+              !status.summary.isEmpty
+        else {
+            return presence
+        }
+        return [status.summary, presence].compactMap { $0 }.joined(separator: " · ")
     }
 
     /// The header status of a one-to-one conversation.
@@ -1872,6 +1943,7 @@ final class LiveSessionViewModel {
 
         case let .notificationSettingSaved(requestID):
             notificationSettingRequests.remove(requestID)
+            statusRequests.remove(requestID)
 
         case let .messageSourceLoaded(requestID, _, source):
             guard let pending = messageSourceRequests.removeValue(forKey: requestID),
@@ -1955,6 +2027,8 @@ final class LiveSessionViewModel {
                 sessionLog.error("background request failed: \(message, privacy: .public)")
             } else if let requestID, notificationSettingRequests.remove(requestID) != nil {
                 notice = "The notification setting could not be saved: \(message)"
+            } else if let requestID, statusRequests.remove(requestID) != nil {
+                notice = "Your status could not be saved: \(message)"
             } else if let requestID, requestID == cachedSessionRequestID {
                 // No cached data yet (first run); the live connection continues.
                 cachedSessionRequestID = nil
@@ -2167,6 +2241,9 @@ final class LiveSessionViewModel {
         notificationPlanner.reset()
         unreadSummary = UnreadSummary()
         notifier?.setBadge(0)
+        userStatuses = [:]
+        isInvisible = false
+        statusRequests = []
         draftSaveTasks.values.forEach { $0.cancel() }
         draftSaveTasks = [:]
         drafts = [:]
@@ -2345,6 +2422,16 @@ final class LiveSessionViewModel {
         }
         replaceKnownTopics(from: snapshot)
         channelNotificationsDefault = snapshot.channelNotificationsDefault
+        let statuses = Dictionary(
+            snapshot.userStatuses.map { ($0.userID, UserStatusDisplay($0)) },
+            uniquingKeysWith: { _, latest in latest }
+        )
+        if statuses != userStatuses {
+            userStatuses = statuses
+        }
+        if snapshot.isInvisible != isInvisible {
+            isInvisible = snapshot.isInvisible
+        }
         unreadSummary = UnreadSummary(
             buckets: snapshot.unread,
             selfUserID: identity.userID,

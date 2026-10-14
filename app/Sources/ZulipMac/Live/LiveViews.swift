@@ -183,6 +183,7 @@ private struct LiveWindowView: View {
     @State private var topicSheet: LiveTopicSheetContext?
     @State private var isCreatingChannel = false
     @State private var channelRenameTarget: ChannelSnapshot?
+    @State private var isEditingStatus = false
 
     init(session: LiveSessionViewModel) {
         self.session = session
@@ -245,6 +246,16 @@ private struct LiveWindowView: View {
                     presenceDescription: { userID in
                         session.presenceDescription(forUserID: userID)
                     },
+                    userStatus: { userID in
+                        session.userStatus(forUserID: userID)
+                    },
+                    profileStatus: ProfileStatusControl(
+                        status: session.ownStatus,
+                        isInvisible: session.isInvisible,
+                        editStatus: { isEditingStatus = true },
+                        clearStatus: session.clearStatus,
+                        setInvisible: session.setInvisible
+                    ),
                     sessionControl: SidebarSessionControl(
                         action: .disconnect,
                         perform: session.disconnect
@@ -372,6 +383,13 @@ private struct LiveWindowView: View {
                 isCreatingChannel = false
             }
         }
+        .sheet(isPresented: $isEditingStatus) {
+            UserStatusEditor(
+                initial: session.ownStatus,
+                save: session.setStatus,
+                dismiss: { isEditingStatus = false }
+            )
+        }
         .sheet(item: $channelRenameTarget) { channel in
             RenameChannelSheet(session: session, channel: channel) {
                 channelRenameTarget = nil
@@ -413,7 +431,7 @@ private struct LiveWindowView: View {
                 renameTopic: renameAction(for: page),
                 renameChannel: renameChannelAction(for: page),
                 openParent: parentAction(for: page),
-                headerStatus: session.presenceDescription(for: page.key),
+                headerStatus: session.conversationHeaderStatus(for: page.key),
                 composerHint: composerHint(for: page),
                 moveMessage: { message in
                     topicSheet = .move(message: message)
@@ -469,7 +487,8 @@ private struct LiveWindowView: View {
                 typingDescription: session.typingDescription(for: page.key),
                 typingChanged: { session.composerTyping($0, in: page.key) },
                 readReceipts: session.readReceiptDisplay(for: page),
-                pollReadReceipts: { session.pollReadReceipts(messageID: $0, key: page.key) }
+                pollReadReceipts: { session.pollReadReceipts(messageID: $0, key: page.key) },
+                userStatus: { session.userStatus(forUserID: $0) }
             )
             // A fresh surface per conversation: switching straight from one loaded
             // chat to another used to reuse the old scroll view (which could stay
@@ -483,7 +502,7 @@ private struct LiveWindowView: View {
                 reconnect: session.reconnectNow,
                 openSearch: presentMessageSearch,
                 openParent: parentAction(for: page),
-                headerStatus: session.presenceDescription(for: page.key),
+                headerStatus: session.conversationHeaderStatus(for: page.key),
                 initialDraft: session.draft(for: page.key),
                 draftChanged: { session.updateDraft($0, for: page.key) }
             )

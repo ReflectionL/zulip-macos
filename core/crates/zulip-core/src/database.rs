@@ -10,7 +10,7 @@ use crate::{
     messages::TopicSummary,
     sync::{
         ChannelSummary, MessageSummary, RecentDirectConversation, TopicPolicy, UnreadBucket,
-        UserSummary,
+        UserStatus, UserSummary,
     },
 };
 
@@ -227,6 +227,12 @@ pub struct CachedSnapshot {
     /// Whether channels without their own choice notify for every message.
     #[serde(default)]
     pub channel_notifications_default: bool,
+    /// Statuses that say something.
+    #[serde(default)]
+    pub user_statuses: Vec<UserStatus>,
+    /// Whether the account hides its presence.
+    #[serde(default)]
+    pub invisible: bool,
 }
 
 /// One conversation as last fetched from the server.
@@ -713,6 +719,7 @@ mod tests {
     };
     use crate::sync::{
         MessageSummary, RecentDirectConversation, TopicPolicy, TopicVisibility, UnreadBucket,
+        UserStatus,
     };
 
     #[test]
@@ -807,6 +814,14 @@ mod tests {
                 visibility: TopicVisibility::Muted,
             }],
             channel_notifications_default: true,
+            user_statuses: vec![UserStatus {
+                user_id: 7,
+                status_text: "In a meeting".to_owned(),
+                emoji_name: "calendar".to_owned(),
+                emoji_code: "1f4c6".to_owned(),
+                reaction_type: "unicode_emoji".to_owned(),
+            }],
+            invisible: true,
         };
         assert!(database.account_cache("acme|maya").expect("read").is_none());
         database
@@ -823,6 +838,8 @@ mod tests {
         assert_eq!(cached_snapshot.unread, snapshot.unread);
         assert_eq!(cached_snapshot.topic_policies, snapshot.topic_policies);
         assert!(cached_snapshot.channel_notifications_default);
+        assert_eq!(cached_snapshot.user_statuses, snapshot.user_statuses);
+        assert!(cached_snapshot.invisible);
 
         for index in 0..45_i64 {
             database

@@ -55,6 +55,12 @@ roadmap lives in [`PLAN.md`](PLAN.md).
   description, site), from the server's preview or, when there is none, from
   the page itself (Settings › Link Previews turns that off). Untrusted HTML is parsed in Rust and never shown in a web
   view.
+- Status and invisible mode: click your avatar at the bottom of the sidebar to
+  set a status (an emoji and up to 60 characters, or one of Zulip's
+  suggestions such as "In a meeting"), clear it, or turn on invisible mode so
+  others see you as offline. Everyone's status emoji follows their name in
+  messages and the direct-message list; the text shows on hover and in a
+  direct message's header.
 - Read receipts: small overlapping avatars under your newest sent message show
   who has read it (needs Zulip 6.0 and read receipts enabled by the
   organization).
@@ -140,7 +146,7 @@ file. Do not disable Gatekeeper globally.
 - Offline use is read-only; failed writes are retried by hand, not replayed.
 - A message that was moved to another topic or channel shows "(edited)", like
   an edited one.
-- Custom (image) emoji appear as `:name:`; complex formulas and tables are not
+- Custom (image) emoji appear as `:name:` (and are left out of status emoji); complex formulas and tables are not
   rendered.
 - The media cache has no aggregate size limit yet (`REL-001`).
 - Read receipts rely on polling because Zulip sends no event when a message is

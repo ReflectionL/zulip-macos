@@ -984,6 +984,90 @@ struct LiveSessionTests {
         #expect(model.connectionState == .connected)
     }
 
+    @Test("Statuses and invisible mode come from the snapshot and changes go to Zulip")
+    func userStatusAndInvisibleMode() async {
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(client: core, credentialStore: MemoryCredentialStore())
+        model.startObserving()
+        let accountID = "account-1"
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: accountID),
+                credential: StoredAPICredential(accountID: accountID, apiKey: "key"),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.connectionState == .connected }
+        #expect(model.ownStatus == nil)
+        #expect(!model.isInvisible)
+
+        let base = snapshot
+        core.emit(
+            .snapshotUpdated(
+                accountID: accountID,
+                snapshot: LiveSnapshot(
+                    revision: 2,
+                    lastEventID: 11,
+                    users: base.users,
+                    channels: base.channels,
+                    topics: base.topics,
+                    messages: base.messages,
+                    userStatuses: [
+                        LiveUserStatus(
+                            userID: 9,
+                            text: "Working remotely",
+                            emojiName: "house",
+                            emojiCode: "1f3e0",
+                            reactionType: "unicode_emoji"
+                        ),
+                        LiveUserStatus(userID: 22, text: "In a meeting"),
+                    ],
+                    isInvisible: true
+                )
+            )
+        )
+        await eventually { model.isInvisible }
+        #expect(model.ownStatus?.text == "Working remotely")
+        #expect(model.ownStatus?.glyph == "🏠")
+        #expect(model.userStatus(forUserID: 22)?.summary == "In a meeting")
+        let header = model.conversationHeaderStatus(
+            for: .directMessage(accountID: accountID, recipientIDs: [22])
+        )
+        #expect(header?.hasPrefix("In a meeting · ") == true)
+
+        model.setStatus(UserStatusDisplay(
+            text: "  Commuting  ",
+            emoji: ReactionTarget(name: "bus", code: "1f68c")
+        ))
+        guard case let .setUserStatus(requestID, commandAccountID, text, name, code, type) =
+            core.commands.last
+        else {
+            Issue.record("Expected a status command")
+            return
+        }
+        #expect(commandAccountID == accountID)
+        #expect(text == "Commuting")
+        #expect(name == "bus" && code == "1f68c" && type == "unicode_emoji")
+        core.emit(.failed(requestID: requestID, message: "Invalid emoji name"))
+        await eventually { model.notice?.contains("Invalid emoji name") == true }
+        #expect(model.connectionState == .connected)
+
+        model.clearStatus()
+        guard case let .setUserStatus(_, _, "", "", "", "") = core.commands.last else {
+            Issue.record("Expected an empty status to clear it")
+            return
+        }
+
+        model.setInvisible(false)
+        guard case let .setInvisible(invisibleRequestID, _, false) = core.commands.last else {
+            Issue.record("Expected an invisible-mode command")
+            return
+        }
+        core.emit(.notificationSettingSaved(requestID: invisibleRequestID))
+        #expect(model.connectionState == .connected)
+    }
+
     @Test("A topic's notification level is sent to Zulip")
     func topicNotificationLevel() async {
         let core = RecordingCoreClient()

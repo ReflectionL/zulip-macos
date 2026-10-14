@@ -35,7 +35,7 @@ use zulip_core::{
     sync::{
         EventQueueClient, MessageSummary, RecentDirectConversation, RecoveryPolicy, SyncCycle,
         SyncSession, SyncSnapshot, TopicPolicy, TopicVisibility, TypingNotice, TypingScope,
-        UnreadBucket, UserSummary,
+        UnreadBucket, UserStatus, UserSummary,
     },
 };
 
@@ -505,6 +505,32 @@ pub enum CoreCommand {
         /// The wanted behavior.
         visibility: CoreTopicVisibilityChoice,
     },
+    /// Sets or clears the account's status (text and emoji). The change comes
+    /// back through the sync snapshot; `NotificationSettingSaved` acknowledges it.
+    SetUserStatus {
+        /// Correlates the response.
+        request_id: u64,
+        /// Client-owned account partition.
+        account_id: String,
+        /// Status text; empty for none.
+        status_text: String,
+        /// Emoji name; empty for none.
+        emoji_name: String,
+        /// Zulip emoji code for `emoji_name`.
+        emoji_code: String,
+        /// Zulip reaction type for `emoji_name`.
+        reaction_type: String,
+    },
+    /// Turns invisible mode on or off. The change comes back through the sync
+    /// snapshot; `NotificationSettingSaved` acknowledges it.
+    SetInvisible {
+        /// Correlates the response.
+        request_id: u64,
+        /// Client-owned account partition.
+        account_id: String,
+        /// Whether others should see the account as offline.
+        invisible: bool,
+    },
     /// Fetches the original Markdown of one message so it can be quoted or forwarded.
     FetchMessageSource {
         /// Correlates the response.
@@ -611,6 +637,8 @@ impl CoreCommand {
             | Self::RenameChannel { request_id, .. }
             | Self::SetNotificationSetting { request_id, .. }
             | Self::SetTopicVisibility { request_id, .. }
+            | Self::SetUserStatus { request_id, .. }
+            | Self::SetInvisible { request_id, .. }
             | Self::Disconnect { request_id } => *request_id,
         }
     }
@@ -664,6 +692,33 @@ pub struct CorePresence {
     pub status: CorePresenceStatus,
     /// When the user was last active, in Unix seconds, if the server knows.
     pub last_active_at: Option<i64>,
+}
+
+/// One user's self-chosen status.
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct CoreUserStatus {
+    /// Zulip user identifier.
+    pub user_id: i64,
+    /// Status text; empty when none.
+    pub status_text: String,
+    /// Emoji name; empty when none.
+    pub emoji_name: String,
+    /// Zulip emoji code (dash-joined code points for Unicode emoji).
+    pub emoji_code: String,
+    /// `unicode_emoji`, `realm_emoji` or `zulip_extra_emoji`.
+    pub reaction_type: String,
+}
+
+impl From<UserStatus> for CoreUserStatus {
+    fn from(status: UserStatus) -> Self {
+        Self {
+            user_id: status.user_id,
+            status_text: status.status_text,
+            emoji_name: status.emoji_name,
+            emoji_code: status.emoji_code,
+            reaction_type: status.reaction_type,
+        }
+    }
 }
 
 /// One-time API credential returned for immediate Keychain persistence.
@@ -961,6 +1016,10 @@ pub struct CoreSnapshot {
     pub topic_policies: Vec<CoreTopicPolicy>,
     /// Whether channels without their own choice notify for every message.
     pub channel_notifications_default: bool,
+    /// Statuses that say something, sorted by user.
+    pub user_statuses: Vec<CoreUserStatus>,
+    /// Whether the account hides its presence (invisible mode).
+    pub invisible: bool,
 }
 
 /// The unread messages of one conversation.
@@ -1265,7 +1324,7 @@ pub enum CoreEvent {
         /// Name the server accepted.
         name: String,
     },
-    /// The server accepted a notification setting.
+    /// The server accepted a notification, status or invisible-mode setting.
     NotificationSettingSaved {
         /// Matches the originating command.
         request_id: u64,
@@ -2013,6 +2072,37 @@ async fn handle_command(
             account.as_ref(),
             event_sink,
         ),
+        CoreCommand::SetUserStatus {
+            request_id,
+            account_id,
+            status_text,
+            emoji_name,
+            emoji_code,
+            reaction_type,
+        } => set_user_status(
+            request_id,
+            &account_id,
+            UserStatus {
+                user_id: 0,
+                status_text,
+                emoji_name,
+                emoji_code,
+                reaction_type,
+            },
+            account.as_ref(),
+            event_sink,
+        ),
+        CoreCommand::SetInvisible {
+            request_id,
+            account_id,
+            invisible,
+        } => set_invisible(
+            request_id,
+            &account_id,
+            invisible,
+            account.as_ref(),
+            event_sink,
+        ),
         CoreCommand::FetchMessageSource {
             request_id,
             account_id,
@@ -2152,6 +2242,56 @@ fn set_notification_setting(
             None => messages.set_default_channel_notifications(enabled).await,
         };
         match result {
+            Ok(()) => event_sink.handle_event(CoreEvent::NotificationSettingSaved { request_id }),
+            Err(error) => emit_error(Some(request_id), error, &event_sink),
+        }
+    });
+}
+
+fn set_user_status(
+    request_id: u64,
+    account_id: &str,
+    status: UserStatus,
+    account: Option<&AccountSession>,
+    event_sink: &Arc<dyn CoreEventSink>,
+) {
+    let Some(session) = account.filter(|item| item.account_id == account_id) else {
+        emit_no_session(request_id, event_sink);
+        return;
+    };
+    let messages = Arc::clone(&session.messages);
+    let event_sink = Arc::clone(event_sink);
+    tokio::spawn(async move {
+        match messages
+            .set_user_status(
+                &status.status_text,
+                &status.emoji_name,
+                &status.emoji_code,
+                &status.reaction_type,
+            )
+            .await
+        {
+            Ok(()) => event_sink.handle_event(CoreEvent::NotificationSettingSaved { request_id }),
+            Err(error) => emit_error(Some(request_id), error, &event_sink),
+        }
+    });
+}
+
+fn set_invisible(
+    request_id: u64,
+    account_id: &str,
+    invisible: bool,
+    account: Option<&AccountSession>,
+    event_sink: &Arc<dyn CoreEventSink>,
+) {
+    let Some(session) = account.filter(|item| item.account_id == account_id) else {
+        emit_no_session(request_id, event_sink);
+        return;
+    };
+    let messages = Arc::clone(&session.messages);
+    let event_sink = Arc::clone(event_sink);
+    tokio::spawn(async move {
+        match messages.set_invisible(invisible).await {
             Ok(()) => event_sink.handle_event(CoreEvent::NotificationSettingSaved { request_id }),
             Err(error) => emit_error(Some(request_id), error, &event_sink),
         }
@@ -3354,6 +3494,8 @@ fn cached_snapshot(snapshot: &SyncSnapshot, topics: &[TopicSummary]) -> CachedSn
         unread: snapshot.unread.clone(),
         topic_policies: snapshot.topic_policies.clone(),
         channel_notifications_default: snapshot.channel_notifications_default,
+        user_statuses: snapshot.user_statuses.clone(),
+        invisible: snapshot.invisible,
     }
 }
 
@@ -3460,6 +3602,8 @@ fn load_cached_session(
         unread: cached.unread,
         topic_policies: cached.topic_policies,
         channel_notifications_default: cached.channel_notifications_default,
+        user_statuses: cached.user_statuses,
+        invisible: cached.invisible,
     };
     event_sink.handle_event(CoreEvent::CachedSessionLoaded {
         request_id,
@@ -3648,6 +3792,8 @@ impl CoreSnapshot {
                 .map(Into::into)
                 .collect(),
             channel_notifications_default: snapshot.channel_notifications_default,
+            user_statuses: snapshot.user_statuses.into_iter().map(Into::into).collect(),
+            invisible: snapshot.invisible,
         }
     }
 }
@@ -3832,6 +3978,14 @@ mod tests {
                     visibility: TopicVisibility::Followed,
                 }],
                 channel_notifications_default: true,
+                user_statuses: vec![zulip_core::sync::UserStatus {
+                    user_id: 7,
+                    status_text: "Commuting".to_owned(),
+                    emoji_name: "bus".to_owned(),
+                    emoji_code: "1f68c".to_owned(),
+                    reaction_type: "unicode_emoji".to_owned(),
+                }],
+                invisible: true,
             },
             &[TopicSummary {
                 stream_id: 5,
@@ -3860,6 +4014,10 @@ mod tests {
             CoreTopicVisibility::Followed
         );
         assert!(snapshot.channel_notifications_default);
+        assert_eq!(snapshot.user_statuses.len(), 1);
+        assert_eq!(snapshot.user_statuses[0].status_text, "Commuting");
+        assert_eq!(snapshot.user_statuses[0].emoji_code, "1f68c");
+        assert!(snapshot.invisible);
     }
 
     #[test]
