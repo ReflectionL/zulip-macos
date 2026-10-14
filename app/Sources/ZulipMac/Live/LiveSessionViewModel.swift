@@ -215,6 +215,11 @@ final class LiveSessionViewModel {
     /// it does not write the same key back.
     @ObservationIgnored private var storedCredential: StoredAPICredential?
     @ObservationIgnored private var credentialSave: Task<Void, Never>?
+    /// The newest live snapshot not yet applied, and the task that applies it.
+    @ObservationIgnored private var pendingSnapshot: LiveSnapshot?
+    @ObservationIgnored private var snapshotApply: Task<Void, Never>?
+    /// The user list the mention candidates were last built from.
+    @ObservationIgnored private var candidateUsers: (ownUserID: Int64, users: [LiveUserSnapshot])?
     /// Keeps App Nap from throttling the app while it waits for new messages.
     @ObservationIgnored private var listeningActivity: NSObjectProtocol?
     @ObservationIgnored private let defaults: UserDefaults
@@ -1607,6 +1612,8 @@ final class LiveSessionViewModel {
 
         case let .sessionStarted(_, identity, credential, snapshot):
             cancelReconnect()
+            // A snapshot of the session this one replaces must not land on top.
+            pendingSnapshot = nil
             hasLiveSession = true
             self.identity = identity
             serverURL = identity.serverURL
@@ -1632,14 +1639,16 @@ final class LiveSessionViewModel {
             guard identity?.accountID == accountID else {
                 return
             }
-            let shouldRefresh = activeSelection.map {
-                conversationAffected(by: snapshot, key: $0)
-            } ?? false
-            apply(snapshot)
-            notifyAboutNewMessages(in: snapshot)
             connectionState = .connected
-            if shouldRefresh, let activeSelection {
-                refreshConversation(activeSelection)
+            // Every snapshot is complete, so in a burst only the newest needs
+            // applying, and the pages and events queued behind it must not wait
+            // while each older one is applied in turn.
+            pendingSnapshot = snapshot
+            if snapshotApply == nil {
+                snapshotApply = Task { [weak self] in
+                    await Task.yield()
+                    self?.applyPendingSnapshot()
+                }
             }
 
         case let .conversationOpened(requestID, page):
@@ -2039,6 +2048,22 @@ final class LiveSessionViewModel {
         }
     }
 
+    private func applyPendingSnapshot() {
+        snapshotApply = nil
+        guard let snapshot = pendingSnapshot else {
+            return
+        }
+        pendingSnapshot = nil
+        let shouldRefresh = activeSelection.map {
+            conversationAffected(by: snapshot, key: $0)
+        } ?? false
+        apply(snapshot)
+        notifyAboutNewMessages(in: snapshot)
+        if shouldRefresh, let activeSelection {
+            refreshConversation(activeSelection)
+        }
+    }
+
     /// Writes a newly issued key to the Keychain beside the event loop. A Keychain
     /// call can stall (an ad-hoc signed build may wait on a file-keychain access
     /// prompt), and every later core event, including opened conversations and new
@@ -2144,6 +2169,8 @@ final class LiveSessionViewModel {
         channelCreationState = .idle
         mentionPeople = []
         channelMemberCandidates = []
+        candidateUsers = nil
+        pendingSnapshot = nil
         isLoadingOlderMessages = false
         messageSearchState = .idle
         topicActionState = .idle
@@ -2271,17 +2298,43 @@ final class LiveSessionViewModel {
             snapshot.messages.map { ($0.messageID, $0) },
             uniquingKeysWith: { _, latest in latest }
         )
+        // Most snapshots only change messages; rebuilding (and sorting) every user
+        // of a large organization for each of them kept the main thread busy.
+        if candidateUsers?.ownUserID != identity.userID || candidateUsers?.users != snapshot.users {
+            candidateUsers = (identity.userID, snapshot.users)
+            rebuildUserIndexes(snapshot.users, identity: identity)
+        }
+        replaceKnownTopics(from: snapshot)
+        channelNotificationsDefault = snapshot.channelNotificationsDefault
+        unreadSummary = UnreadSummary(
+            buckets: snapshot.unread,
+            selfUserID: identity.userID,
+            mutedChannels: Set(snapshot.channels.filter(\.isMuted).map(\.streamID)),
+            settings: ChannelNotificationSettings(snapshot: snapshot)
+        )
+        notifier?.setBadge(unreadSummary.badge)
+        sidebarSnapshot = Self.makeSidebar(
+            snapshot: snapshot,
+            identity: identity,
+            topics: Array(knownTopics.values),
+            presence: presenceStates,
+            unread: unreadSummary
+        )
+        rebuildPresentation()
+    }
+
+    private func rebuildUserIndexes(_ users: [LiveUserSnapshot], identity: LiveSessionIdentity) {
         avatarURLs = Dictionary(
-            snapshot.users.compactMap { user in
+            users.compactMap { user in
                 user.avatarURL.map { (user.userID, $0) }
             },
             uniquingKeysWith: { _, latest in latest }
         )
         userNames = Dictionary(
-            snapshot.users.map { ($0.userID, $0.fullName) },
+            users.map { ($0.userID, $0.fullName) },
             uniquingKeysWith: { _, latest in latest }
         )
-        let others = snapshot.users
+        let others = users
             .filter { $0.isActive && $0.userID != identity.userID }
             .sorted { $0.fullName.localizedCaseInsensitiveCompare($1.fullName) == .orderedAscending }
         mentionPeople = others.map {
@@ -2300,23 +2353,6 @@ final class LiveSessionViewModel {
                     detail: $0.email ?? ""
                 )
             }
-        replaceKnownTopics(from: snapshot)
-        channelNotificationsDefault = snapshot.channelNotificationsDefault
-        unreadSummary = UnreadSummary(
-            buckets: snapshot.unread,
-            selfUserID: identity.userID,
-            mutedChannels: Set(snapshot.channels.filter(\.isMuted).map(\.streamID)),
-            settings: ChannelNotificationSettings(snapshot: snapshot)
-        )
-        notifier?.setBadge(unreadSummary.badge)
-        sidebarSnapshot = Self.makeSidebar(
-            snapshot: snapshot,
-            identity: identity,
-            topics: Array(knownTopics.values),
-            presence: presenceStates,
-            unread: unreadSummary
-        )
-        rebuildPresentation()
     }
 
     private func makeConversationPage(

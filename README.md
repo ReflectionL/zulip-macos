@@ -132,8 +132,7 @@ file. Do not disable Gatekeeper globally.
   an edited one.
 - Custom (image) emoji appear as `:name:`; complex formulas and tables are not
   rendered.
-- The live snapshot keeps every message received since launch and the media
-  cache has no aggregate size limit yet (`REL-001`).
+- The media cache has no aggregate size limit yet (`REL-001`).
 - Read receipts rely on polling because Zulip sends no event when a message is
   read.
 - Releases are not notarized and the self-hosted live smoke is still pending
