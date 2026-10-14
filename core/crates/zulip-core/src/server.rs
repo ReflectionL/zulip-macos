@@ -373,6 +373,19 @@ pub(crate) fn secure_transfer_client() -> Result<Client, String> {
         .map_err(|error| error.without_url().to_string())
 }
 
+/// A client for uploads. Unlike [`secure_transfer_client`] it has no read
+/// timeout: reqwest starts that timer when the request starts and resets it
+/// only once the response begins, so the time spent sending the file counts
+/// against it and a picture that takes longer than 30 s to send (a large
+/// screenshot on a slow uplink) always failed with "error sending request".
+/// TCP keepalive still detects a dead connection; callers add a deadline.
+pub(crate) fn secure_upload_client() -> Result<Client, String> {
+    secure_client_builder()
+        .connect_timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|error| error.without_url().to_string())
+}
+
 fn secure_client_builder() -> reqwest::ClientBuilder {
     Client::builder()
         .user_agent(concat!("zulip-mac/", env!("CARGO_PKG_VERSION")))

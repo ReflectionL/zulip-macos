@@ -4414,6 +4414,12 @@ mod tests {
         let _ = wait_for_event(&online_receiver, &online_sink, |event| {
             matches!(event, CoreEvent::SessionStarted { request_id: 30, .. })
         });
+        // Topic lists arrive in the background after the session starts.
+        let _ = wait_for_event(
+            &online_receiver,
+            &online_sink,
+            |event| matches!(event, CoreEvent::SnapshotUpdated { snapshot, .. } if !snapshot.topics.is_empty()),
+        );
         online.submit(CoreCommand::OpenConversation {
             request_id: 31,
             key: inbox.clone(),

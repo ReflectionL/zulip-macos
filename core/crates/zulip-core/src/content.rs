@@ -128,6 +128,7 @@ pub fn parse_zulip_html(html: &str) -> Vec<ContentBlock> {
     }
     blocks.retain(|block| !block_is_empty(block));
     add_missing_upload_previews(&mut blocks);
+    hide_previewed_upload_links(&mut blocks);
     if blocks.is_empty() {
         vec![ContentBlock::Paragraph(vec![InlineContent::Text(
             readable_text_fallback(html),
@@ -590,6 +591,50 @@ fn add_missing_upload_previews(blocks: &mut Vec<ContentBlock>) {
     }
 }
 
+/// A picture shown as a preview does not also need its link: links to
+/// previewed uploads leave their paragraphs (the file name stays the picture's
+/// description), and a paragraph with nothing else in it goes.
+fn hide_previewed_upload_links(blocks: &mut Vec<ContentBlock>) {
+    let previewed: Vec<String> = blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Image { url, .. } => upload_key(url),
+            _ => None,
+        })
+        .collect();
+    if previewed.is_empty() {
+        return;
+    }
+    let mut changed = false;
+    for block in blocks.iter_mut() {
+        let ContentBlock::Paragraph(inline) = block else {
+            continue;
+        };
+        let before = inline.len();
+        inline.retain(|item| match item {
+            InlineContent::Link { url, .. } => {
+                upload_key(url).is_none_or(|key| !previewed.contains(&key))
+            }
+            _ => true,
+        });
+        if inline.len() == before {
+            continue;
+        }
+        changed = true;
+        let mut remaining = coalesce_text(std::mem::take(inline));
+        if let Some(InlineContent::Text(first)) = remaining.first_mut() {
+            *first = first.trim_start().to_owned();
+        }
+        if let Some(InlineContent::Text(last)) = remaining.last_mut() {
+            *last = last.trim_end().to_owned();
+        }
+        *inline = remaining;
+    }
+    if changed {
+        blocks.retain(|block| !block_is_empty(block));
+    }
+}
+
 fn collect_links(inline: &[InlineContent], links: &mut Vec<(String, String)>) {
     for item in inline {
         match item {
@@ -1007,6 +1052,53 @@ mod tests {
             .filter(|block| matches!(block, ContentBlock::Image { .. }))
             .count();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn previewed_uploads_hide_their_links() {
+        // How Zulip renders a picture sent on its own: the link, then the preview.
+        let blocks = parse_zulip_html(
+            r#"<p><a href="/user_uploads/1/ab/shot.png">shot.png</a></p>
+                <div class="message_inline_image">
+                    <a href="/user_uploads/1/ab/shot.png" title="shot.png">
+                        <img src="/user_uploads/thumbnail/1/ab/shot.png/840x560.webp">
+                    </a>
+                </div>"#,
+        );
+        assert!(
+            matches!(blocks.as_slice(), [ContentBlock::Image { alt, .. }] if alt == "shot.png")
+        );
+
+        // Text sent with the picture stays; other links stay.
+        let blocks = parse_zulip_html(
+            r#"<p>Look at this<br>
+                <a href="/user_uploads/1/ab/shot.png">shot.png</a></p>
+                <p>and <a href="/user_uploads/1/cd/notes.pdf">notes.pdf</a></p>
+                <div class="message_inline_image">
+                    <a href="/user_uploads/1/ab/shot.png" title="shot.png">
+                        <img src="/user_uploads/thumbnail/1/ab/shot.png/840x560.webp">
+                    </a>
+                </div>"#,
+        );
+        assert_eq!(
+            blocks[0],
+            ContentBlock::Paragraph(vec![InlineContent::Text("Look at this".to_owned())])
+        );
+        assert!(matches!(
+            &blocks[1],
+            ContentBlock::Paragraph(inline)
+                if inline.iter().any(|item| matches!(item, InlineContent::Link { label, .. } if label == "notes.pdf"))
+        ));
+        assert!(matches!(blocks[2], ContentBlock::Image { .. }));
+        assert_eq!(blocks.len(), 3);
+
+        // A picture the client previews itself loses its link as well.
+        let blocks = parse_zulip_html(
+            r#"<p><a href="/user_uploads/1/ab/%E6%88%AA%E5%B1%8F.png">截屏.png</a></p>"#,
+        );
+        assert!(
+            matches!(blocks.as_slice(), [ContentBlock::Image { alt, .. }] if alt == "截屏.png")
+        );
     }
 
     #[test]

@@ -449,7 +449,7 @@ private struct LiveWindowView: View {
                     session.forwardDestinations(matching: query)
                 },
                 mentionCandidates: session.mentionCandidates(for: page.key),
-                attachmentUploadState: session.attachmentUploadState,
+                attachmentUploadState: session.attachmentUploadState(for: page.key),
                 attachmentInsertion: session.attachmentInsertion,
                 uploadAttachment: { url in
                     session.uploadAttachment(url, to: page.key)
@@ -458,6 +458,7 @@ private struct LiveWindowView: View {
                     session.uploadDroppedFiles(urls, to: page.key)
                 },
                 retryAttachmentUpload: session.retryAttachmentUpload,
+                dismissAttachmentUploadFailure: session.dismissAttachmentUploadFailure,
                 consumeAttachmentInsertion: session.consumeAttachmentInsertion,
                 mediaLocalURLs: session.mediaLocalURLs,
                 mediaFailures: session.mediaFailures,

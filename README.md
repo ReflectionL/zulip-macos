@@ -49,8 +49,9 @@ roadmap lives in [`PLAN.md`](PLAN.md).
 - Native rendering of Zulip content: Markdown, links, mentions, emoji, quotes,
   lists, code and images. Images keep their real aspect ratio (height capped),
   pictures from other sites go through the server's preview, an uploaded
-  picture that was only linked (no server preview) is still shown, and
-  clicking opens the default viewer. Untrusted HTML is parsed in Rust and never shown in a web
+  picture that was only linked (no server preview) is still shown, a
+  previewed picture's file link is hidden, and clicking opens the default
+  viewer. Untrusted HTML is parsed in Rust and never shown in a web
   view.
 - Read receipts: small overlapping avatars under your newest sent message show
   who has read it (needs Zulip 6.0 and read receipts enabled by the

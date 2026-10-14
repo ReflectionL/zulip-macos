@@ -34,6 +34,7 @@ struct ConversationSurface: View {
     /// Files dropped onto the conversation; the first uploads now, the rest queue.
     var uploadDroppedFiles: (([URL]) -> Void)?
     var retryAttachmentUpload: (() -> Void)?
+    var dismissAttachmentUploadFailure: (() -> Void)?
     var consumeAttachmentInsertion: ((UInt64) -> Void)?
     var mediaLocalURLs: [String: String] = [:]
     var mediaFailures: [String: String] = [:]
@@ -90,6 +91,7 @@ struct ConversationSurface: View {
         uploadAttachment: ((URL) -> Void)? = nil,
         uploadDroppedFiles: (([URL]) -> Void)? = nil,
         retryAttachmentUpload: (() -> Void)? = nil,
+        dismissAttachmentUploadFailure: (() -> Void)? = nil,
         consumeAttachmentInsertion: ((UInt64) -> Void)? = nil,
         mediaLocalURLs: [String: String] = [:],
         mediaFailures: [String: String] = [:],
@@ -131,6 +133,7 @@ struct ConversationSurface: View {
         self.uploadAttachment = uploadAttachment
         self.uploadDroppedFiles = uploadDroppedFiles
         self.retryAttachmentUpload = retryAttachmentUpload
+        self.dismissAttachmentUploadFailure = dismissAttachmentUploadFailure
         self.consumeAttachmentInsertion = consumeAttachmentInsertion
         self.mediaLocalURLs = mediaLocalURLs
         self.mediaFailures = mediaFailures
@@ -328,6 +331,7 @@ struct ConversationSurface: View {
                     ? nil
                     : { isChoosingAttachment = true },
                 retryAttachmentUpload: retryAttachmentUpload,
+                dismissAttachmentUploadFailure: dismissAttachmentUploadFailure,
                 send: sendDraft
             )
             .overlay(alignment: .topLeading) {
@@ -1212,6 +1216,7 @@ private struct ComposerView: View {
     let attachmentUploadState: AttachmentUploadState
     let chooseAttachment: (() -> Void)?
     let retryAttachmentUpload: (() -> Void)?
+    let dismissAttachmentUploadFailure: (() -> Void)?
     let send: () -> Void
 
     @State private var selection: TextSelection?
@@ -1385,10 +1390,23 @@ private struct ComposerView: View {
                 HStack(spacing: AppTheme.Spacing.small) {
                     Image(systemName: "exclamationmark.triangle")
                     Text("\(filename): \(message)")
-                        .lineLimit(1)
+                        .lineLimit(2)
+                        .help("\(filename): \(message)")
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     if let retryAttachmentUpload {
                         Button("Retry", action: retryAttachmentUpload)
-                            .buttonStyle(.borderless)
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .fixedSize()
+                    }
+                    if let dismissAttachmentUploadFailure {
+                        Button(action: dismissAttachmentUploadFailure) {
+                            Image(systemName: "xmark.circle.fill")
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(AppTheme.Colors.tertiaryText)
+                        .help("Dismiss")
+                        .accessibilityLabel("Dismiss upload error")
                     }
                 }
                 .font(AppTheme.Typography.metadata)
