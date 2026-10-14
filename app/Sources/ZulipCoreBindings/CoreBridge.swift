@@ -33,12 +33,42 @@ public struct LiveChannelSnapshot: Equatable, Sendable {
     public let name: String
     public let colorHex: String
     public let isMuted: Bool
+    /// The channel's own desktop-notification choice; nil follows the
+    /// account-wide default.
+    public let desktopNotifications: Bool?
 
-    public init(streamID: Int64, name: String, colorHex: String, isMuted: Bool) {
+    public init(
+        streamID: Int64,
+        name: String,
+        colorHex: String,
+        isMuted: Bool,
+        desktopNotifications: Bool? = nil
+    ) {
         self.streamID = streamID
         self.name = name
         self.colorHex = colorHex
         self.isMuted = isMuted
+        self.desktopNotifications = desktopNotifications
+    }
+}
+
+/// How the account treats one topic, overriding its channel's setting.
+public enum LiveTopicVisibility: Equatable, Sendable {
+    case muted
+    case unmuted
+    case followed
+}
+
+/// A personal visibility choice for one topic.
+public struct LiveTopicPolicy: Equatable, Sendable {
+    public let streamID: Int64
+    public let topic: String
+    public let visibility: LiveTopicVisibility
+
+    public init(streamID: Int64, topic: String, visibility: LiveTopicVisibility) {
+        self.streamID = streamID
+        self.topic = topic
+        self.visibility = visibility
     }
 }
 
@@ -67,6 +97,8 @@ public struct LiveMessageSnapshot: Equatable, Sendable {
     public let recipientIDs: [Int64]
     public let flags: [String]
     public let reactions: [LiveReactionSnapshot]
+    /// When the content was last edited; nil for a message never edited.
+    public let lastEditDate: Date?
 
     public init(
         messageID: Int64,
@@ -78,7 +110,8 @@ public struct LiveMessageSnapshot: Equatable, Sendable {
         topic: String?,
         recipientIDs: [Int64],
         flags: [String] = [],
-        reactions: [LiveReactionSnapshot] = []
+        reactions: [LiveReactionSnapshot] = [],
+        lastEditDate: Date? = nil
     ) {
         self.messageID = messageID
         self.senderID = senderID
@@ -90,6 +123,7 @@ public struct LiveMessageSnapshot: Equatable, Sendable {
         self.recipientIDs = recipientIDs
         self.flags = flags
         self.reactions = reactions
+        self.lastEditDate = lastEditDate
     }
 }
 
@@ -156,6 +190,10 @@ public struct LiveSnapshot: Equatable, Sendable {
     public let recentDirectConversations: [LiveRecentDirectConversation]
     /// Unread messages counted per conversation.
     public let unread: [LiveUnreadBucket]
+    /// Muted, unmuted and followed topics.
+    public let topicPolicies: [LiveTopicPolicy]
+    /// Whether channels without their own choice notify for every message.
+    public let channelNotificationsDefault: Bool
 
     public init(
         revision: UInt64,
@@ -166,7 +204,9 @@ public struct LiveSnapshot: Equatable, Sendable {
         messages: [LiveMessageSnapshot],
         realmIconURL: String? = nil,
         recentDirectConversations: [LiveRecentDirectConversation] = [],
-        unread: [LiveUnreadBucket] = []
+        unread: [LiveUnreadBucket] = [],
+        topicPolicies: [LiveTopicPolicy] = [],
+        channelNotificationsDefault: Bool = false
     ) {
         self.revision = revision
         self.lastEventID = lastEventID
@@ -177,6 +217,8 @@ public struct LiveSnapshot: Equatable, Sendable {
         self.realmIconURL = realmIconURL
         self.recentDirectConversations = recentDirectConversations
         self.unread = unread
+        self.topicPolicies = topicPolicies
+        self.channelNotificationsDefault = channelNotificationsDefault
     }
 }
 
@@ -1052,6 +1094,27 @@ private extension LiveSnapshot {
                 mentionCount: Int($0.mentionCount)
             )
         }
+        topicPolicies = snapshot.topicPolicies.map {
+            LiveTopicPolicy(
+                streamID: $0.streamId,
+                topic: $0.topic,
+                visibility: LiveTopicVisibility($0.visibility)
+            )
+        }
+        channelNotificationsDefault = snapshot.channelNotificationsDefault
+    }
+}
+
+private extension LiveTopicVisibility {
+    init(_ visibility: CoreTopicVisibility) {
+        switch visibility {
+        case .muted:
+            self = .muted
+        case .unmuted:
+            self = .unmuted
+        case .followed:
+            self = .followed
+        }
     }
 }
 
@@ -1072,6 +1135,7 @@ private extension LiveChannelSnapshot {
         name = channel.name
         colorHex = channel.color
         isMuted = channel.isMuted
+        desktopNotifications = channel.desktopNotifications
     }
 }
 
@@ -1096,6 +1160,9 @@ private extension LiveMessageSnapshot {
         flags = message.flags
         reactions = message.reactions.map {
             LiveReactionSnapshot(emojiName: $0.emojiName, userID: $0.userId)
+        }
+        lastEditDate = message.lastEditTimestamp.map {
+            Date(timeIntervalSince1970: TimeInterval($0))
         }
     }
 }

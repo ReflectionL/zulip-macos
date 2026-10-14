@@ -27,13 +27,14 @@ const MAX_LONGPOLL_TIMEOUT_SECONDS: u64 = 600;
 const EVENT_TYPES_JSON: &str = concat!(
     r#"["message","subscription","realm_user","update_message","#,
     r#""delete_message","reaction","update_message_flags","typing","user_settings","#,
-    r#""heartbeat","restart"]"#
+    r#""user_topic","heartbeat","restart"]"#
 );
 /// Initial state additionally includes organization settings (for the icon);
 /// realm change events are not consumed, so they are not subscribed to.
 const FETCH_EVENT_TYPES_JSON: &str = concat!(
     r#"["message","recent_private_conversations","subscription","realm_user","realm","update_message","#,
-    r#""delete_message","reaction","update_message_flags","user_settings","heartbeat","restart"]"#
+    r#""delete_message","reaction","update_message_flags","user_settings","user_topic","#,
+    r#""heartbeat","restart"]"#
 );
 
 /// A server-allocated queue and its current acknowledgement cursor.
@@ -78,6 +79,32 @@ pub struct ChannelSummary {
     pub color: String,
     /// Whether the current user muted this channel.
     pub is_muted: bool,
+    /// The channel's own desktop-notification choice; `None` follows the
+    /// account-wide default.
+    #[serde(default)]
+    pub desktop_notifications: Option<bool>,
+}
+
+/// How the account treats one topic, overriding its channel's setting.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum TopicVisibility {
+    /// The topic is muted.
+    Muted,
+    /// The topic is unmuted inside a muted channel.
+    Unmuted,
+    /// The topic is followed.
+    Followed,
+}
+
+/// A personal visibility choice for one topic.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TopicPolicy {
+    /// Channel identifier.
+    pub stream_id: i64,
+    /// Topic name as the server reports it.
+    pub topic: String,
+    /// The account's choice.
+    pub visibility: TopicVisibility,
 }
 
 /// A normalized message payload owned by the Rust domain layer.
@@ -103,6 +130,9 @@ pub struct MessageSummary {
     pub flags: Vec<String>,
     /// Reactions currently attached to this message.
     pub reactions: Vec<ReactionSummary>,
+    /// Unix timestamp in seconds of the last edit, absent when never edited.
+    #[serde(default)]
+    pub last_edit_timestamp: Option<i64>,
 }
 
 /// One normalized reaction attached to a message.
@@ -219,6 +249,11 @@ pub struct BootstrapState {
     pub unread: Vec<UnreadMessage>,
     /// Typing-notification privacy settings of the account.
     pub typing_preferences: TypingPreferences,
+    /// Muted, unmuted and followed topics.
+    pub topic_policies: Vec<TopicPolicy>,
+    /// `enable_stream_desktop_notifications`: whether channels without their own
+    /// choice notify for every message.
+    pub channel_notifications_default: bool,
 }
 
 /// Result of registering a live event queue.
@@ -241,6 +276,8 @@ pub struct MessageUpdate {
     pub message_ids: Vec<i64>,
     /// Replacement rendered content, when changed.
     pub content_html: Option<String>,
+    /// Unix timestamp in seconds of the edit, when the event reports one.
+    pub edit_timestamp: Option<i64>,
     /// Replacement topic, when changed.
     pub topic: Option<String>,
     /// Replacement channel identifier, when moved.
@@ -260,6 +297,9 @@ pub struct ChannelUpdate {
     pub color: Option<String>,
     /// Replacement personal mute state, when present.
     pub is_muted: Option<bool>,
+    /// Replacement desktop-notification choice, when the update carries one
+    /// (the inner `None` returns to the account-wide default).
+    pub desktop_notifications: Option<Option<bool>>,
 }
 
 /// A partial update to one visible organization user.
@@ -330,6 +370,24 @@ pub enum SyncEvent {
         channel: bool,
         /// The new setting.
         enabled: bool,
+    },
+    /// The account's default for channel desktop notifications changed.
+    ChannelNotificationDefaultChanged {
+        /// Monotonic queue-local event identifier.
+        event_id: i64,
+        /// The new setting.
+        enabled: bool,
+    },
+    /// The account muted, unmuted, followed or reset one topic.
+    TopicPolicyChanged {
+        /// Monotonic queue-local event identifier.
+        event_id: i64,
+        /// Channel identifier.
+        stream_id: i64,
+        /// Topic name.
+        topic: String,
+        /// The new choice; `None` returns the topic to its channel's setting.
+        visibility: Option<TopicVisibility>,
     },
     /// A personal flag such as `read` or `starred` was added or removed.
     MessageFlagsUpdated {
@@ -421,6 +479,8 @@ impl SyncEvent {
             | Self::MessagesDeleted { event_id, .. }
             | Self::Typing { event_id, .. }
             | Self::TypingPreferenceChanged { event_id, .. }
+            | Self::ChannelNotificationDefaultChanged { event_id, .. }
+            | Self::TopicPolicyChanged { event_id, .. }
             | Self::MessageFlagsUpdated { event_id, .. }
             | Self::ReactionChanged { event_id, .. }
             | Self::ChannelsUpserted { event_id, .. }
@@ -453,6 +513,10 @@ pub struct SyncSnapshot {
     pub recent_direct_conversations: Vec<RecentDirectConversation>,
     /// Unread messages grouped by conversation, ordered by conversation.
     pub unread: Vec<UnreadBucket>,
+    /// Muted, unmuted and followed topics.
+    pub topic_policies: Vec<TopicPolicy>,
+    /// Whether channels without their own choice notify for every message.
+    pub channel_notifications_default: bool,
 }
 
 /// Reduction statistics and at most one snapshot for a complete poll batch.
@@ -966,6 +1030,13 @@ pub struct SyncReducer {
     topic_changed_streams: BTreeSet<i64>,
     typing_preferences: TypingPreferences,
     typing_notices: Vec<TypingNotice>,
+    topic_policies: BTreeMap<(i64, String), TopicPolicy>,
+    channel_notifications_default: bool,
+}
+
+/// Zulip compares topic names case-insensitively.
+fn topic_policy_key(stream_id: i64, topic: &str) -> (i64, String) {
+    (stream_id, topic.to_lowercase())
 }
 
 impl SyncReducer {
@@ -1004,6 +1075,12 @@ impl SyncReducer {
             topic_changed_streams: BTreeSet::new(),
             typing_preferences: bootstrap.typing_preferences,
             typing_notices: Vec::new(),
+            topic_policies: bootstrap
+                .topic_policies
+                .into_iter()
+                .map(|policy| (topic_policy_key(policy.stream_id, &policy.topic), policy))
+                .collect(),
+            channel_notifications_default: bootstrap.channel_notifications_default,
         }
     }
 
@@ -1019,6 +1096,8 @@ impl SyncReducer {
             realm_icon_url: self.realm_icon_url.clone(),
             recent_direct_conversations: self.recent_direct_conversations.clone(),
             unread: self.unread_buckets(),
+            topic_policies: self.topic_policies.values().cloned().collect(),
+            channel_notifications_default: self.channel_notifications_default,
         }
     }
 
@@ -1230,6 +1309,11 @@ impl SyncReducer {
             && message.content_html != *content_html
         {
             message.content_html.clone_from(content_html);
+            // Only a content change counts as an edit; a topic or channel move
+            // arrives without new content.
+            if let Some(edited_at) = update.edit_timestamp {
+                message.last_edit_timestamp = Some(edited_at);
+            }
             changed = true;
         }
         if update.topic.is_none() && update.stream_id.is_none() {
@@ -1278,6 +1362,26 @@ impl SyncReducer {
         false
     }
 
+    fn set_topic_policy(
+        &mut self,
+        stream_id: i64,
+        topic: String,
+        visibility: Option<TopicVisibility>,
+    ) -> bool {
+        let key = topic_policy_key(stream_id, &topic);
+        match visibility {
+            Some(visibility) => {
+                let policy = TopicPolicy {
+                    stream_id,
+                    topic,
+                    visibility,
+                };
+                self.topic_policies.insert(key, policy.clone()) != Some(policy)
+            }
+            None => self.topic_policies.remove(&key).is_some(),
+        }
+    }
+
     fn set_typing_preference(&mut self, channel: bool, enabled: bool) -> bool {
         if channel {
             self.typing_preferences.channel = enabled;
@@ -1308,6 +1412,7 @@ impl SyncReducer {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn apply_event(&mut self, event: SyncEvent, heartbeats: &mut usize) -> bool {
         match event {
             SyncEvent::Heartbeat { .. } => {
@@ -1325,6 +1430,17 @@ impl SyncReducer {
             SyncEvent::TypingPreferenceChanged {
                 channel, enabled, ..
             } => self.set_typing_preference(channel, enabled),
+            SyncEvent::ChannelNotificationDefaultChanged { enabled, .. } => {
+                let changed = self.channel_notifications_default != enabled;
+                self.channel_notifications_default = enabled;
+                changed
+            }
+            SyncEvent::TopicPolicyChanged {
+                stream_id,
+                topic,
+                visibility,
+                ..
+            } => self.set_topic_policy(stream_id, topic, visibility),
             SyncEvent::MessagesDeleted {
                 message_ids,
                 stream_id,
@@ -1374,6 +1490,9 @@ impl SyncReducer {
                 }
                 if let Some(is_muted) = update.is_muted {
                     channel.is_muted = is_muted;
+                }
+                if let Some(choice) = update.desktop_notifications {
+                    channel.desktop_notifications = choice;
                 }
                 *channel != previous
             }
@@ -1617,6 +1736,37 @@ struct RegisterDocument {
     unread_msgs: Option<Value>,
     #[serde(default)]
     user_settings: Option<Value>,
+    #[serde(default)]
+    user_topics: Vec<UserTopicDocument>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UserTopicDocument {
+    stream_id: i64,
+    #[serde(default)]
+    topic_name: String,
+    #[serde(default)]
+    visibility_policy: i64,
+}
+
+impl UserTopicDocument {
+    fn normalize(self) -> Option<TopicPolicy> {
+        Some(TopicPolicy {
+            stream_id: self.stream_id,
+            topic: self.topic_name,
+            visibility: topic_visibility(self.visibility_policy)?,
+        })
+    }
+}
+
+/// Maps Zulip's `visibility_policy` (0 inherit, 1 muted, 2 unmuted, 3 followed).
+fn topic_visibility(policy: i64) -> Option<TopicVisibility> {
+    match policy {
+        1 => Some(TopicVisibility::Muted),
+        2 => Some(TopicVisibility::Unmuted),
+        3 => Some(TopicVisibility::Followed),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1673,6 +1823,17 @@ impl RegisterDocument {
             .collect();
         let unread = parse_unread_messages(self.unread_msgs.as_ref());
         let typing_preferences = parse_typing_preferences(self.user_settings.as_ref());
+        let channel_notifications_default = self
+            .user_settings
+            .as_ref()
+            .and_then(|settings| settings.get("enable_stream_desktop_notifications"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let topic_policies = self
+            .user_topics
+            .into_iter()
+            .filter_map(UserTopicDocument::normalize)
+            .collect();
 
         Ok(RegisteredQueue {
             queue: EventQueue {
@@ -1701,6 +1862,8 @@ impl RegisterDocument {
                 },
                 unread,
                 typing_preferences,
+                topic_policies,
+                channel_notifications_default,
             },
             zulip_feature_level: self.zulip_feature_level,
         })
@@ -1754,6 +1917,7 @@ impl EventDocument {
                     message_ids: integer_array_field(&self.payload, "message_ids"),
                     content_html: string_field(&self.payload, "rendered_content")
                         .or_else(|| string_field(&self.payload, "content")),
+                    edit_timestamp: optional_integer_field(&self.payload, "edit_timestamp"),
                     topic: string_field(&self.payload, "topic")
                         .or_else(|| string_field(&self.payload, "subject")),
                     // `stream_id` names the channel before a move; `new_stream_id`
@@ -1811,6 +1975,7 @@ impl EventDocument {
             "realm_user" => self.normalize_user(),
             "typing" => Ok(self.normalize_typing()),
             "user_settings" => Ok(self.normalize_user_setting()),
+            "user_topic" => Ok(self.normalize_user_topic()),
             _ => Ok(SyncEvent::Unknown {
                 event_id: self.id,
                 event_type: self.event_type,
@@ -1864,7 +2029,41 @@ impl EventDocument {
         }
     }
 
+    fn normalize_user_topic(self) -> SyncEvent {
+        let unknown = |event_id: i64| SyncEvent::Unknown {
+            event_id,
+            event_type: "user_topic".to_owned(),
+        };
+        let (Some(stream_id), Some(topic), Some(policy)) = (
+            optional_integer_field(&self.payload, "stream_id"),
+            string_field(&self.payload, "topic_name"),
+            optional_integer_field(&self.payload, "visibility_policy"),
+        ) else {
+            return unknown(self.id);
+        };
+        SyncEvent::TopicPolicyChanged {
+            event_id: self.id,
+            stream_id,
+            topic,
+            visibility: topic_visibility(policy),
+        }
+    }
+
     fn normalize_user_setting(self) -> SyncEvent {
+        if string_field(&self.payload, "property").as_deref()
+            == Some("enable_stream_desktop_notifications")
+        {
+            return match self.payload.get("value").and_then(Value::as_bool) {
+                Some(enabled) => SyncEvent::ChannelNotificationDefaultChanged {
+                    event_id: self.id,
+                    enabled,
+                },
+                None => SyncEvent::Unknown {
+                    event_id: self.id,
+                    event_type: self.event_type,
+                },
+            };
+        }
         let channel = match string_field(&self.payload, "property").as_deref() {
             Some("send_private_message_typing_notifications") => false,
             Some("send_stream_typing_notifications") => true,
@@ -1901,6 +2100,11 @@ impl EventDocument {
                 "is_muted" => ChannelUpdate {
                     channel_id,
                     is_muted: self.payload.get("value").and_then(Value::as_bool),
+                    ..ChannelUpdate::default()
+                },
+                "desktop_notifications" => ChannelUpdate {
+                    channel_id,
+                    desktop_notifications: Some(self.payload.get("value").and_then(Value::as_bool)),
                     ..ChannelUpdate::default()
                 },
                 "name" => ChannelUpdate {
@@ -2067,6 +2271,8 @@ struct ChannelDocument {
     color: String,
     #[serde(default)]
     is_muted: bool,
+    #[serde(default)]
+    desktop_notifications: Option<bool>,
 }
 
 impl ChannelDocument {
@@ -2079,6 +2285,7 @@ impl ChannelDocument {
             name: self.name,
             color: self.color,
             is_muted: self.is_muted,
+            desktop_notifications: self.desktop_notifications,
         })
     }
 }
@@ -2103,6 +2310,8 @@ struct MessageDocument {
     flags: Vec<String>,
     #[serde(default)]
     reactions: Vec<ReactionDocument>,
+    #[serde(default)]
+    last_edit_timestamp: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2164,6 +2373,7 @@ impl MessageDocument {
                 .into_iter()
                 .filter_map(ReactionDocument::normalize)
                 .collect(),
+            last_edit_timestamp: self.last_edit_timestamp,
         })
     }
 }
@@ -2297,8 +2507,8 @@ mod tests {
     use super::{
         BootstrapState, ChannelSummary, EventQueueClient, MessageSummary, MessageUpdate,
         RecoveryPolicy, ResyncReason, RetryBackoff, RetryOperation, SyncCycle, SyncError,
-        SyncEvent, SyncReducer, SyncSession, TypingNotice, TypingPreferences, TypingScope,
-        UnreadBucket, UserSummary, Value, parse_unread_messages,
+        SyncEvent, SyncReducer, SyncSession, TopicVisibility, TypingNotice, TypingPreferences,
+        TypingScope, UnreadBucket, UserSummary, Value, parse_unread_messages,
     };
     use crate::auth::SecretString;
 
@@ -2448,6 +2658,7 @@ mod tests {
                 recent_direct_conversations: Vec::new(),
                 unread: Vec::new(),
                 typing_preferences: TypingPreferences::default(),
+                ..BootstrapState::default()
             },
         );
         let message = fixture_message(100, "<p>first</p>");
@@ -2459,6 +2670,7 @@ mod tests {
                     message_id: 100,
                     message_ids: Vec::new(),
                     content_html: Some("<p>edited</p>".to_owned()),
+                    edit_timestamp: Some(1_770_000_100),
                     topic: None,
                     stream_id: None,
                     origin_stream_id: None,
@@ -2479,6 +2691,10 @@ mod tests {
         assert_eq!(snapshot.revision, 2);
         assert_eq!(snapshot.last_event_id, 15);
         assert_eq!(snapshot.messages[0].content_html, "<p>edited</p>");
+        assert_eq!(
+            snapshot.messages[0].last_edit_timestamp,
+            Some(1_770_000_100)
+        );
     }
 
     #[test]
@@ -2511,6 +2727,7 @@ mod tests {
                 recent_direct_conversations: Vec::new(),
                 unread: Vec::new(),
                 typing_preferences: TypingPreferences::default(),
+                ..BootstrapState::default()
             },
         );
 
@@ -2977,6 +3194,7 @@ mod tests {
                 message_id: 1,
                 message_ids: vec![1, 2],
                 content_html: None,
+                edit_timestamp: Some(1_770_000_200),
                 topic: Some("moved".to_owned()),
                 stream_id: Some(9),
                 origin_stream_id: Some(5),
@@ -2987,6 +3205,13 @@ mod tests {
         assert!(snapshot.messages.iter().all(|message| {
             message.stream_id == Some(9) && message.topic.as_deref() == Some("moved")
         }));
+        // A move is not a content edit.
+        assert!(
+            snapshot
+                .messages
+                .iter()
+                .all(|message| message.last_edit_timestamp.is_none())
+        );
     }
 
     #[tokio::test]
@@ -3160,6 +3385,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn notification_settings_and_topic_policies_follow_the_server() {
+        let register = r#"{
+            "result":"success",
+            "queue_id":"queue-fixture",
+            "last_event_id":40,
+            "realm_users":[],
+            "subscriptions":[
+                {"stream_id":5,"name":"engineering","desktop_notifications":true},
+                {"stream_id":6,"name":"random","desktop_notifications":null},
+                {"stream_id":7,"name":"general"}
+            ],
+            "user_settings":{"enable_stream_desktop_notifications":false},
+            "user_topics":[
+                {"stream_id":5,"topic_name":"Build Farm","last_updated":1,"visibility_policy":1},
+                {"stream_id":6,"topic_name":"deploys","last_updated":2,"visibility_policy":3},
+                {"stream_id":6,"topic_name":"inherit","last_updated":3,"visibility_policy":0}
+            ]
+        }"#;
+        let (server, requests) = spawn_mock(vec![
+            (StatusCode::OK, register.to_owned()),
+            (
+                StatusCode::OK,
+                r#"{
+                    "result":"success",
+                    "queue_id":"queue-fixture",
+                    "events":[
+                        {"id":41,"type":"subscription","op":"update","stream_id":6,
+                         "property":"desktop_notifications","value":true},
+                        {"id":42,"type":"subscription","op":"update","stream_id":5,
+                         "property":"desktop_notifications","value":null},
+                        {"id":43,"type":"user_settings","op":"update",
+                         "property":"enable_stream_desktop_notifications","value":true},
+                        {"id":44,"type":"user_topic","stream_id":5,"topic_name":"build farm",
+                         "last_updated":9,"visibility_policy":0},
+                        {"id":45,"type":"user_topic","stream_id":7,"topic_name":"Lunch",
+                         "last_updated":9,"visibility_policy":1}
+                    ]
+                }"#
+                .to_owned(),
+            ),
+        ]);
+        let client = EventQueueClient::new(&server, "maya@example.com", SecretString::new(API_KEY))
+            .expect("sync client");
+        let (mut session, initial) = SyncSession::start(client, RecoveryPolicy::default(), 3)
+            .await
+            .expect("initial registration");
+
+        let choices = initial
+            .channels
+            .iter()
+            .map(|channel| channel.desktop_notifications)
+            .collect::<Vec<_>>();
+        assert_eq!(choices, vec![Some(true), None, None]);
+        assert!(!initial.channel_notifications_default);
+        assert_eq!(
+            initial
+                .topic_policies
+                .iter()
+                .map(|policy| (policy.stream_id, policy.topic.as_str(), policy.visibility))
+                .collect::<Vec<_>>(),
+            vec![
+                (5, "Build Farm", TopicVisibility::Muted),
+                (6, "deploys", TopicVisibility::Followed),
+            ]
+        );
+
+        let SyncCycle::Events(outcome) = session.advance().await else {
+            panic!("settings events are ordinary events");
+        };
+        let snapshot = outcome.snapshot.expect("changed");
+        let choices = snapshot
+            .channels
+            .iter()
+            .map(|channel| channel.desktop_notifications)
+            .collect::<Vec<_>>();
+        assert_eq!(choices, vec![None, Some(true), None]);
+        assert!(snapshot.channel_notifications_default);
+        // The reset is matched case-insensitively; the new mute is added.
+        assert_eq!(
+            snapshot
+                .topic_policies
+                .iter()
+                .map(|policy| (policy.stream_id, policy.topic.as_str(), policy.visibility))
+                .collect::<Vec<_>>(),
+            vec![
+                (6, "deploys", TopicVisibility::Followed),
+                (7, "Lunch", TopicVisibility::Muted),
+            ]
+        );
+
+        let register_request = requests.recv().expect("register request");
+        assert!(register_request.contains("user_topic"));
+    }
+
+    #[tokio::test]
     async fn unusable_bootstrap_entries_do_not_block_registration() {
         let body = r#"{
             "result":"success",
@@ -3238,6 +3558,7 @@ mod tests {
             name: name.to_owned(),
             color: "#76ce90".to_owned(),
             is_muted: false,
+            desktop_notifications: None,
         }
     }
 
@@ -3253,6 +3574,7 @@ mod tests {
             recipient_ids: Vec::new(),
             flags: Vec::new(),
             reactions: Vec::new(),
+            last_edit_timestamp: None,
         }
     }
 

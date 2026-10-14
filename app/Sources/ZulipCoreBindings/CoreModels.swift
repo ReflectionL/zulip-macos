@@ -276,6 +276,8 @@ public struct MessageViewData: Identifiable, Equatable, Sendable {
     /// A local echo whose final rendering belongs to the server (the text uses
     /// Markdown), so the timeline shows a placeholder until the server copy arrives.
     public var isProvisional: Bool
+    /// When the content was last edited; nil for a message never edited.
+    public var editedAt: Date?
 
     public init(
         id: Int64,
@@ -296,7 +298,8 @@ public struct MessageViewData: Identifiable, Equatable, Sendable {
         deliveryState: MessageDeliveryState = .sent,
         actionState: MessageActionState = .idle,
         senderAvatarURL: String? = nil,
-        isProvisional: Bool = false
+        isProvisional: Bool = false,
+        editedAt: Date? = nil
     ) {
         self.id = id
         self.rowID = id
@@ -318,6 +321,7 @@ public struct MessageViewData: Identifiable, Equatable, Sendable {
         self.deliveryState = deliveryState
         self.actionState = actionState
         self.senderAvatarURL = senderAvatarURL
+        self.editedAt = editedAt
     }
 
     public var plainText: String {

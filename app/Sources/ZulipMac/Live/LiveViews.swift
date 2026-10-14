@@ -477,7 +477,8 @@ private struct LiveWindowView: View {
                 title: title,
                 subtitle: subtitle,
                 symbol: "exclamationmark.triangle",
-                message: message
+                message: message,
+                retry: session.retryOpenConversation
             )
         }
     }
@@ -811,13 +812,18 @@ private struct LivePlaceholder: View {
     let subtitle: String
     let symbol: String
     let message: String
+    var retry: (() -> Void)?
 
     var body: some View {
-        ContentUnavailableView(
-            title,
-            systemImage: symbol,
-            description: Text(message)
-        )
+        ContentUnavailableView {
+            Label(title, systemImage: symbol)
+        } description: {
+            Text(message)
+        } actions: {
+            if let retry {
+                Button("Try Again", action: retry)
+            }
+        }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(AppTheme.Colors.canvas)
         .conversationToolbar(

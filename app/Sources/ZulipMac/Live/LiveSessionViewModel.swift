@@ -261,6 +261,14 @@ final class LiveSessionViewModel {
     private var requestID: UInt64 = 1
     private var activeSelection: ConversationKey?
     private var pendingOlderRequestID: UInt64?
+    /// Conversation opens the user asked for that have not produced a page yet.
+    private var openRequests: [UInt64: ConversationKey] = [:]
+    /// Refreshes and mark-read requests: when one fails the screen stays as it
+    /// is and the connection is not reported as failed.
+    private var quietRequestIDs = Set<UInt64>()
+    /// Newest open request already shown per conversation, so a slow older
+    /// response cannot replace a newer page.
+    private var lastShownOpenRequestID: [ConversationKey: UInt64] = [:]
     private var pendingSearchRequestID: UInt64?
     private var pendingSearchQuery: String?
     private var issuedSearchRequestIDs = Set<UInt64>()
@@ -715,13 +723,23 @@ final class LiveSessionViewModel {
             cachedPlaceholderKey = nil
         }
         client.submit(.loadCachedConversation(requestID: nextRequestID(), key: key))
+        let openID = nextRequestID()
+        openRequests[openID] = key
         client.submit(
             .openConversation(
-                requestID: nextRequestID(),
+                requestID: openID,
                 key: key,
                 limit: Self.conversationPageSize
             )
         )
+    }
+
+    /// Asks for the open conversation's first page again after a failure.
+    func retryOpenConversation() {
+        guard let activeSelection else {
+            return
+        }
+        openConversation(activeSelection)
     }
 
     func searchMessages(_ query: String) {
@@ -1500,12 +1518,16 @@ final class LiveSessionViewModel {
                 refreshConversation(activeSelection)
             }
 
-        case let .conversationOpened(_, page):
+        case let .conversationOpened(requestID, page):
+            openRequests[requestID] = nil
+            quietRequestIDs.remove(requestID)
             guard pendingFocusedMessageRequestID == nil,
-                  activeSelection == page.key
+                  activeSelection == page.key,
+                  requestID > (lastShownOpenRequestID[page.key] ?? 0)
             else {
                 return
             }
+            lastShownOpenRequestID[page.key] = requestID
             rememberTopics(from: page.messages)
             let existing = cachedPlaceholderKey == page.key ? nil : loadedPage(for: page.key)
             cachedPlaceholderKey = nil
@@ -1522,13 +1544,7 @@ final class LiveSessionViewModel {
             if !messageIDs.isEmpty, let identity, isApplicationActive(),
                Self.marksMessagesRead(in: page.key)
             {
-                client.submit(
-                    .markRead(
-                        requestID: nextRequestID(),
-                        accountID: identity.accountID,
-                        messageIDs: messageIDs
-                    )
-                )
+                submitMarkRead(accountID: identity.accountID, messageIDs: messageIDs)
             }
 
         case let .cachedConversationLoaded(_, page):
@@ -1593,13 +1609,7 @@ final class LiveSessionViewModel {
             )
             let messageIDs = page.messages.map(\.messageID)
             if !messageIDs.isEmpty, let identity, Self.marksMessagesRead(in: page.key) {
-                client.submit(
-                    .markRead(
-                        requestID: nextRequestID(),
-                        accountID: identity.accountID,
-                        messageIDs: messageIDs
-                    )
-                )
+                submitMarkRead(accountID: identity.accountID, messageIDs: messageIDs)
             }
 
         case let .messageSent(requestID, _, messageID):
@@ -1715,7 +1725,10 @@ final class LiveSessionViewModel {
                 }
             }
 
-        case .messagesMarkedRead, .pong:
+        case let .messagesMarkedRead(requestID, _):
+            quietRequestIDs.remove(requestID)
+
+        case .pong:
             break
 
         case let .retryScheduled(_, delayMilliseconds):
@@ -1759,7 +1772,13 @@ final class LiveSessionViewModel {
             connectionState = .signedOut
 
         case let .failed(requestID, message):
-            if let requestID, requestID == cachedSessionRequestID {
+            let failedOpenKey = requestID.flatMap { openRequests.removeValue(forKey: $0) }
+            let wasQuietRequest = requestID.map { quietRequestIDs.remove($0) != nil } ?? false
+            if wasQuietRequest {
+                // A refresh or mark-read that did not go through: what is on screen
+                // stays, and the next snapshot or visit tries again.
+                sessionLog.error("background request failed: \(message, privacy: .public)")
+            } else if let requestID, requestID == cachedSessionRequestID {
                 // No cached data yet (first run); the live connection continues.
                 cachedSessionRequestID = nil
             } else if let requestID,
@@ -1854,6 +1873,18 @@ final class LiveSessionViewModel {
             {
                 // Offline with a cached session on screen: keep reading and retry.
                 scheduleReconnect()
+            } else if let failedOpenKey {
+                // The first page of a conversation the user opened could not be
+                // fetched. Say so instead of leaving the loading placeholder up.
+                guard activeSelection == failedOpenKey, case .loading = conversationState else {
+                    return
+                }
+                let destination = navigationDirectory.destination(for: failedOpenKey)
+                conversationState = .failure(
+                    title: destination?.title ?? "Conversation",
+                    subtitle: destination?.subtitle ?? organizationName,
+                    message: message
+                )
             } else if requestID == nil, identity != nil {
                 // The Rust core ended the live session (for example after the
                 // server rejected the stored key). Return to the login surface
@@ -1910,6 +1941,9 @@ final class LiveSessionViewModel {
         navigationDirectory = NavigationDirectory(destinations: [])
         activeSelection = nil
         pendingOlderRequestID = nil
+        openRequests = [:]
+        quietRequestIDs = []
+        lastShownOpenRequestID = [:]
         pendingSearchRequestID = nil
         pendingSearchQuery = nil
         issuedSearchRequestIDs = []
@@ -2095,7 +2129,8 @@ final class LiveSessionViewModel {
         unreadSummary = UnreadSummary(
             buckets: snapshot.unread,
             selfUserID: identity.userID,
-            mutedChannels: Set(snapshot.channels.filter(\.isMuted).map(\.streamID))
+            mutedChannels: Set(snapshot.channels.filter(\.isMuted).map(\.streamID)),
+            settings: ChannelNotificationSettings(snapshot: snapshot)
         )
         notifier?.setBadge(unreadSummary.badge)
         sidebarSnapshot = Self.makeSidebar(
@@ -2171,7 +2206,8 @@ final class LiveSessionViewModel {
                 reactionCount: thumbsUp.count,
                 hasOwnThumbsUp: thumbsUp.contains { $0.userID == identity?.userID },
                 isRead: message.flags.contains("read"),
-                senderAvatarURL: avatarURLs[message.senderID]
+                senderAvatarURL: avatarURLs[message.senderID],
+                editedAt: message.lastEditDate
             )
         }
     }
@@ -2248,6 +2284,7 @@ final class LiveSessionViewModel {
             switch action {
             case let .edit(_, content):
                 message.content = [.paragraph([.text(content)])]
+                message.editedAt = Date()
             case .delete:
                 break
             case let .reaction(_, add):
@@ -2548,12 +2585,22 @@ final class LiveSessionViewModel {
         guard identity?.accountID == key.accountID else {
             return
         }
+        let refreshID = nextRequestID()
+        quietRequestIDs.insert(refreshID)
         client.submit(
             .openConversation(
-                requestID: nextRequestID(),
+                requestID: refreshID,
                 key: key,
                 limit: Self.conversationPageSize
             )
+        )
+    }
+
+    private func submitMarkRead(accountID: String, messageIDs: [Int64]) {
+        let id = nextRequestID()
+        quietRequestIDs.insert(id)
+        client.submit(
+            .markRead(requestID: id, accountID: accountID, messageIDs: messageIDs)
         )
     }
 

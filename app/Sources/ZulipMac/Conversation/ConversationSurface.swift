@@ -732,6 +732,13 @@ private struct MessageRow: View {
                     )
                 }
 
+                if let editedAt = message.editedAt, !showsPlaceholder {
+                    Text("(edited)")
+                        .font(AppTheme.Typography.metadata)
+                        .foregroundStyle(AppTheme.Colors.tertiaryText)
+                        .help("Edited \(editedAt.formatted(date: .abbreviated, time: .shortened))")
+                }
+
                 if message.reactionCount > 0 {
                     Button(action: toggleReaction) {
                         Text("👍 \(message.reactionCount)")
@@ -1117,11 +1124,20 @@ private struct ComposerView: View {
     @State private var dismissedMentionDraft: String?
     @State private var pendingCaretOffset: Int?
 
-    private var caret: String.Index {
-        if let selection, case let .selection(range) = selection.indices {
-            return min(range.upperBound, draft.endIndex)
+    /// The selection clamped to the current draft. `selection` can lag behind
+    /// `draft` (after a send clears it, a conversation switch or a programmatic
+    /// edit), and a stale index used for a mutation traps.
+    private var selectedRange: Range<String.Index> {
+        guard let selection, case let .selection(range) = selection.indices else {
+            return draft.endIndex..<draft.endIndex
         }
-        return draft.endIndex
+        let lower = min(max(range.lowerBound, draft.startIndex), draft.endIndex)
+        let upper = min(max(range.upperBound, lower), draft.endIndex)
+        return lower..<upper
+    }
+
+    private var caret: String.Index {
+        selectedRange.upperBound
     }
 
     /// The `@` being typed with its matching people, if any.
@@ -1240,15 +1256,21 @@ private struct ComposerView: View {
 
     /// Return sends; Shift+Return or Option+Return inserts a line break at the
     /// caret (or replaces the selection).
+    ///
+    /// The field editor does the insertion itself, so the caret and selection
+    /// stay consistent with the text. Writing `draft` and `selection` together
+    /// from here made AppKit apply a caret that was past the end of the not yet
+    /// updated text, which crashed.
     private func insertLineBreak() {
-        guard let selection, case let .selection(range) = selection.indices else {
-            draft.append("\n")
+        if let editor = NSApp.keyWindow?.firstResponder as? NSTextView {
+            editor.insertNewlineIgnoringFieldEditor(nil)
             return
         }
+        let range = selectedRange
         let offset = draft.distance(from: draft.startIndex, to: range.lowerBound)
         draft.replaceSubrange(range, with: "\n")
-        let caret = draft.index(draft.startIndex, offsetBy: offset + 1)
-        self.selection = TextSelection(insertionPoint: caret)
+        // The caret moves once the field has taken the new text.
+        pendingCaretOffset = offset + 1
     }
 
     var body: some View {

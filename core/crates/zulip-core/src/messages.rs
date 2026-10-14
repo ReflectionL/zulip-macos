@@ -1248,6 +1248,8 @@ struct MessageDocument {
     flags: Vec<String>,
     #[serde(default)]
     reactions: Vec<crate::sync::ReactionDocument>,
+    #[serde(default)]
+    last_edit_timestamp: Option<i64>,
 }
 
 impl MessageDocument {
@@ -1286,6 +1288,7 @@ impl MessageDocument {
                 .into_iter()
                 .filter_map(crate::sync::ReactionDocument::normalize)
                 .collect(),
+            last_edit_timestamp: self.last_edit_timestamp,
         })
     }
 }
@@ -1387,6 +1390,7 @@ mod tests {
                         "subject":"Rust core",
                         "display_recipient":"engineering",
                         "flags":["read","starred"],
+                        "last_edit_timestamp":1770000090,
                         "reactions":[{"emoji_name":"thumbs_up","user_id":7}]
                     }]
                 }"#
@@ -1416,6 +1420,7 @@ mod tests {
         assert_eq!(page.messages[0].content_html, "<p>Hello</p>");
         assert_eq!(page.messages[0].flags, vec!["read", "starred"]);
         assert_eq!(page.messages[0].reactions[0].emoji_name, "thumbs_up");
+        assert_eq!(page.messages[0].last_edit_timestamp, Some(1_770_000_090));
         assert!(page.found_oldest && page.found_newest);
 
         let message_id = client

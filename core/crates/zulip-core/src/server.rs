@@ -354,6 +354,10 @@ fn redirect_transport_allowed(target: &Url, previous: &[Url]) -> bool {
 pub(crate) fn secure_http_client(timeout: Option<Duration>) -> Result<Client, String> {
     let mut builder = Client::builder()
         .user_agent(concat!("zulip-mac/", env!("CARGO_PKG_VERSION")))
+        // Drop idle connections early so a request never reuses one the server or
+        // network closed while the app was idle (it would stall until the timeout).
+        .pool_idle_timeout(Duration::from_secs(20))
+        .tcp_keepalive(Duration::from_secs(30))
         .redirect(Policy::custom(|attempt| {
             if attempt.previous().len() >= MAX_REDIRECTS {
                 return attempt.stop();

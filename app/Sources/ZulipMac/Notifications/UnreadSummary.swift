@@ -9,7 +9,7 @@ struct UnreadSummary: Equatable {
         let topic: String
     }
 
-    /// Unread messages per channel. Muted channels are left out, as in Zulip.
+    /// Unread messages per channel. Muted channels and topics are left out, as in Zulip.
     private(set) var channels: [Int64: Int] = [:]
     private(set) var topics: [TopicKey: Int] = [:]
     /// Unread messages per one-to-one conversation, keyed by the other person
@@ -23,11 +23,20 @@ struct UnreadSummary: Equatable {
 
     init() {}
 
-    init(buckets: [LiveUnreadBucket], selfUserID: Int64, mutedChannels: Set<Int64>) {
+    /// `settings`, when given, decides what is muted (topics included);
+    /// otherwise only `mutedChannels` are.
+    init(
+        buckets: [LiveUnreadBucket],
+        selfUserID: Int64,
+        mutedChannels: Set<Int64>,
+        settings: ChannelNotificationSettings? = nil
+    ) {
         for bucket in buckets where bucket.count > 0 {
             if let streamID = bucket.streamID {
                 mentions += bucket.mentionCount
-                if mutedChannels.contains(streamID) {
+                let isMuted = settings?.isMuted(streamID: streamID, topic: bucket.topic)
+                    ?? mutedChannels.contains(streamID)
+                if isMuted {
                     continue
                 }
                 channels[streamID, default: 0] += bucket.count
