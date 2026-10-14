@@ -1449,55 +1449,16 @@ private struct ComposerView: View {
                 mentionList(match)
             }
 
-            TextField(
-                LocalizedStringKey(placeholder),
-                text: $draft,
-                selection: $selection,
-                axis: .vertical
-            )
-            .textFieldStyle(.plain)
-            .font(AppTheme.Typography.body)
-            .lineLimit(1...6)
-            .focused(isFocused)
-            .disabled(isDisabled)
-            .onKeyPress(.upArrow) { moveMentionSelection(by: -1) }
-            .onKeyPress(.downArrow) { moveMentionSelection(by: 1) }
-            .onKeyPress(.tab) { acceptHighlightedMention() }
-            .onKeyPress(.return, phases: .down) { press in
-                if press.modifiers.isEmpty, mentionMatch != nil {
-                    return acceptHighlightedMention()
-                }
-                guard press.modifiers.contains(.shift) || press.modifiers.contains(.option) else {
-                    return .ignored
-                }
-                insertLineBreak()
-                return .handled
-            }
-            .onSubmit(send)
-            .onChange(of: draft) {
-                mentionIndex = 0
-                placePendingCaret()
-            }
-            .onExitCommand {
-                if mentionMatch != nil {
-                    dismissedMentionDraft = draft
-                } else {
-                    isFocused.wrappedValue = false
-                }
-            }
-            .accessibilityLabel("Message \(conversationTitle)")
-            .accessibilityHint(
-                isDisabled
-                    ? "Reconnect to send messages"
-                    : "Type a message and press Return to send"
-            )
-
-            HStack(spacing: AppTheme.Spacing.small) {
+            // One row: attach, the text (growing upward to six lines) and send.
+            HStack(alignment: .bottom, spacing: AppTheme.Spacing.small) {
                 Button {
                     chooseAttachment?()
                 } label: {
                     Image(systemName: "plus")
+                        .font(AppTheme.Typography.scaled(14, weight: .medium))
                 }
+                .buttonStyle(CircleHoverButtonStyle())
+                .foregroundStyle(AppTheme.Colors.secondaryText)
                 .disabled(
                     isDisabled
                         || chooseAttachment == nil
@@ -1506,7 +1467,50 @@ private struct ComposerView: View {
                 .help("Add attachment")
                 .accessibilityLabel("Add attachment")
 
-                Spacer()
+                TextField(
+                    LocalizedStringKey(placeholder),
+                    text: $draft,
+                    selection: $selection,
+                    axis: .vertical
+                )
+                .textFieldStyle(.plain)
+                .font(AppTheme.Typography.body)
+                .lineLimit(1...6)
+                .focused(isFocused)
+                .disabled(isDisabled)
+                .onKeyPress(.upArrow) { moveMentionSelection(by: -1) }
+                .onKeyPress(.downArrow) { moveMentionSelection(by: 1) }
+                .onKeyPress(.tab) { acceptHighlightedMention() }
+                .onKeyPress(.return, phases: .down) { press in
+                    if press.modifiers.isEmpty, mentionMatch != nil {
+                        return acceptHighlightedMention()
+                    }
+                    guard press.modifiers.contains(.shift) || press.modifiers.contains(.option) else {
+                        return .ignored
+                    }
+                    insertLineBreak()
+                    return .handled
+                }
+                .onSubmit(send)
+                .onChange(of: draft) {
+                    mentionIndex = 0
+                    placePendingCaret()
+                }
+                .onExitCommand {
+                    if mentionMatch != nil {
+                        dismissedMentionDraft = draft
+                    } else {
+                        isFocused.wrappedValue = false
+                    }
+                }
+                .accessibilityLabel("Message \(conversationTitle)")
+                .accessibilityHint(
+                    isDisabled
+                        ? "Reconnect to send messages"
+                        : "Type a message and press Return to send"
+                )
+                // As tall as the buttons, so a single line sits centered beside them.
+                .frame(minHeight: 28)
 
                 Button(action: send) {
                     Image(systemName: "arrow.up")
@@ -1521,8 +1525,6 @@ private struct ComposerView: View {
                 .help("Send message")
                 .accessibilityLabel("Send message")
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(AppTheme.Colors.secondaryText)
         }
         .padding(AppTheme.Spacing.medium)
         .frame(maxWidth: AppTheme.Metrics.composerMaximumWidth)
@@ -1541,6 +1543,36 @@ private struct ComposerView: View {
         )
     )
     .frame(width: 800, height: 720)
+}
+
+/// A round 28 pt hit area that lights up under the pointer, for the
+/// composer's icon buttons.
+private struct CircleHoverButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        CircleHoverButton(configuration: configuration)
+    }
+
+    private struct CircleHoverButton: View {
+        let configuration: ButtonStyleConfiguration
+        @Environment(\.isEnabled) private var isEnabled
+        @State private var isHovered = false
+
+        private var fillOpacity: Double {
+            guard isEnabled else { return 0 }
+            if configuration.isPressed { return 0.16 }
+            return isHovered ? 0.09 : 0
+        }
+
+        var body: some View {
+            configuration.label
+                .frame(width: 28, height: 28)
+                .background(Circle().fill(Color.primary.opacity(fillOpacity)))
+                .contentShape(Circle())
+                .opacity(isEnabled ? 1 : 0.45)
+                .onHover { isHovered = $0 }
+                .animation(.easeOut(duration: 0.12), value: isHovered)
+        }
+    }
 }
 
 /// A small note floating above the composer while someone else is typing.
