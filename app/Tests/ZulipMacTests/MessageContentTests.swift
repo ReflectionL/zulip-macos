@@ -19,7 +19,28 @@ struct MessageContentTests {
         #expect(snapshot.contains("list[ordered]"))
         #expect(snapshot.contains("code[rust]"))
         #expect(snapshot.contains("image(fixture://native-preview"))
+        #expect(snapshot.contains("card[server](https://zulip.com/help/,Zulip help center"))
         #expect(snapshot.contains("unsupported("))
+    }
+
+    @Test("A link card reads as its title, or its address without one")
+    func linkCardText() {
+        let titled = ContentBlock.linkPreview(
+            url: "https://example.com/post",
+            title: "A post",
+            description: nil,
+            imageURL: nil,
+            fromServer: false
+        )
+        let bare = ContentBlock.linkPreview(
+            url: "https://example.com/post",
+            title: nil,
+            description: nil,
+            imageURL: nil,
+            fromServer: false
+        )
+        #expect(titled.plainText == "A post")
+        #expect(bare.plainText == "https://example.com/post")
     }
 
     @Test("The complete content fixture renders in light and dark appearances")

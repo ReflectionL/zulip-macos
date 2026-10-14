@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import Observation
 import OSLog
 import UserNotifications
 
@@ -22,9 +23,42 @@ protocol MessageNotifier: AnyObject {
     func setBadge(_ count: Int)
 }
 
+/// What macOS currently allows the app to show.
+enum NotificationPermission: Equatable, Sendable {
+    /// Not read from the system yet.
+    case unknown
+    /// The app has not asked yet (or macOS forgot an earlier answer).
+    case notRequested
+    case allowed
+    /// Allowed, but the alert style is None, so nothing appears on screen.
+    case alertsOff
+    case denied
+
+    var label: String {
+        switch self {
+        case .unknown: "Checking…"
+        case .notRequested: "Not requested yet"
+        case .allowed: "Allowed"
+        case .alertsOff: "Allowed, but alerts are set to None"
+        case .denied: "Turned off in System Settings"
+        }
+    }
+}
+
+/// The notification permission as last read from macOS, for the Settings window.
+@MainActor
+@Observable
+final class NotificationStatus {
+    var permission = NotificationPermission.unknown
+    /// Why the last request for permission or test notification failed.
+    var lastError: String?
+}
+
 @MainActor
 final class SystemMessageNotifier: NSObject, MessageNotifier, UNUserNotificationCenterDelegate {
     private static let routeKey = "route"
+
+    let status = NotificationStatus()
 
     var onActivate: ((NotificationRoute) -> Void)?
     var onApplicationActivated: (() -> Void)?
@@ -48,33 +82,120 @@ final class SystemMessageNotifier: NSObject, MessageNotifier, UNUserNotification
                 self?.applicationActivated()
             }
         }
+        // Ask at launch, not only once signed in: a fresh install or an update
+        // that macOS treats as a new app gets the permission prompt right away.
+        // Deferred so the app has finished launching and the session has set
+        // its callbacks first.
+        Task { @MainActor [weak self] in
+            self?.requestAuthorization()
+        }
     }
 
+    /// Reads the current permission and, when the app has not asked yet, asks.
     func requestAuthorization() {
         guard isAvailable else { return }
         UNUserNotificationCenter.current().getNotificationSettings { [weak self] settings in
-            let status = settings.authorizationStatus
-            notificationLog.info("notification authorization status \(status.rawValue, privacy: .public)")
-            switch status {
-            case .notDetermined:
+            let permission = Self.permission(from: settings)
+            notificationLog.info(
+                "notification authorization status \(settings.authorizationStatus.rawValue, privacy: .public)"
+            )
+            self?.publish(permission)
+            switch permission {
+            case .notRequested:
                 UNUserNotificationCenter.current()
-                    .requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
+                    .requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
                         notificationLog.info(
                             "notification authorization granted \(granted, privacy: .public)"
                         )
+                        if let error {
+                            notificationLog.error(
+                                "notification authorization failed: \(error.localizedDescription, privacy: .public)"
+                            )
+                            self?.publish(error: error.localizedDescription)
+                        }
                         if !granted {
                             self?.reportDisabled()
                         }
+                        self?.readPermission()
                     }
-            case .denied:
+            case .denied, .alertsOff:
                 self?.reportDisabled()
-            default:
-                // Allowed, but set to show nothing: the user would never see one.
-                if settings.alertSetting == .disabled || settings.alertStyle == .none {
-                    notificationLog.info("notification alerts are switched off")
-                    self?.reportDisabled()
-                }
+            case .allowed, .unknown:
+                break
             }
+        }
+    }
+
+    /// Re-reads the permission, for example after the user changed it in System Settings.
+    func refreshPermission() {
+        guard isAvailable else { return }
+        readPermission()
+    }
+
+    private nonisolated func readPermission() {
+        UNUserNotificationCenter.current().getNotificationSettings { [weak self] settings in
+            self?.publish(Self.permission(from: settings))
+        }
+    }
+
+    /// Posts a sample notification so the user can see what one looks like.
+    func sendTestNotification() {
+        guard isAvailable else { return }
+        let content = UNMutableNotificationContent()
+        content.title = "Zulip Mac"
+        content.body = "Notifications are working."
+        content.sound = .default
+        let request = UNNotificationRequest(
+            identifier: "test-\(UUID().uuidString)",
+            content: content,
+            trigger: nil
+        )
+        status.lastError = nil
+        UNUserNotificationCenter.current().add(request) { [weak self] error in
+            if let error {
+                self?.publish(error: error.localizedDescription)
+            }
+        }
+    }
+
+    /// Opens this app's page in System Settings › Notifications.
+    func openSystemSettings() {
+        let bundleID = Bundle.main.bundleIdentifier ?? "io.github.huahai.ZulipMac"
+        let specific = URL(
+            string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=\(bundleID)"
+        )
+        let general = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension")
+        guard let url = specific ?? general else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    private nonisolated static func permission(
+        from settings: UNNotificationSettings
+    ) -> NotificationPermission {
+        switch settings.authorizationStatus {
+        case .notDetermined:
+            .notRequested
+        case .denied:
+            .denied
+        default:
+            settings.alertSetting == .disabled || settings.alertStyle == .none
+                ? .alertsOff
+                : .allowed
+        }
+    }
+
+    private nonisolated func publish(_ permission: NotificationPermission) {
+        Task { @MainActor [weak self] in
+            self?.status.permission = permission
+            if permission == .allowed {
+                self?.status.lastError = nil
+            }
+        }
+    }
+
+    private nonisolated func publish(error: String) {
+        Task { @MainActor [weak self] in
+            self?.status.lastError = error
         }
     }
 
@@ -124,6 +245,7 @@ final class SystemMessageNotifier: NSObject, MessageNotifier, UNUserNotification
 
     private func applicationActivated() {
         UNUserNotificationCenter.current().removeAllDeliveredNotifications()
+        refreshPermission()
         onApplicationActivated?()
     }
 

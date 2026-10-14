@@ -147,6 +147,7 @@ fn find_image_url(blocks: &[ContentBlock]) -> Option<String> {
             ContentBlock::Paragraph(_)
             | ContentBlock::Heading { .. }
             | ContentBlock::Code { .. }
+            | ContentBlock::LinkPreview { .. }
             | ContentBlock::Unsupported { .. } => {}
         }
     }

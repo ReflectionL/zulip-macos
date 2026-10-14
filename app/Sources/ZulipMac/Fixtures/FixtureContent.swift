@@ -66,6 +66,15 @@ enum FixtureContent {
             ]),
         ],
         [
+            .linkPreview(
+                url: "https://zulip.com/help/",
+                title: "Zulip help center",
+                description: "Guides for using Zulip, from getting started to advanced features.",
+                imageURL: nil,
+                fromServer: true
+            ),
+        ],
+        [
             .unsupported(summary: "Unsupported fixture content is shown safely."),
         ],
     ]

@@ -6,7 +6,14 @@ struct ZulipMacApp: App {
     /// Owned here, not by the window: a window's view is rebuilt whenever this
     /// scene's state changes, and every rebuild would create another session (and
     /// another notification delegate that replaces the working one).
-    @State private var session = LiveSessionViewModel(notifier: SystemMessageNotifier())
+    @State private var notifier: SystemMessageNotifier
+    @State private var session: LiveSessionViewModel
+
+    init() {
+        let notifier = SystemMessageNotifier()
+        _notifier = State(initialValue: notifier)
+        _session = State(initialValue: LiveSessionViewModel(notifier: notifier))
+    }
 
     var body: some Scene {
         WindowGroup(AppIdentity.displayName) {
@@ -26,6 +33,8 @@ struct ZulipMacApp: App {
                 LabeledContent("Application", value: AppIdentity.displayName)
                 LabeledContent("Minimum system", value: AppIdentity.minimumSystem)
                 TextSizeSettingsSection()
+                NotificationSettingsSection(notifier: notifier)
+                LinkPreviewSettingsSection()
                 UpdateSettingsSection(updates: updates)
                 Section("Keyboard") {
                     LabeledContent("Quick switcher", value: "⌘K")

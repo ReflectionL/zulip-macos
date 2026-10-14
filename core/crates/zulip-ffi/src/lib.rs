@@ -902,6 +902,19 @@ pub enum CoreContentBlock {
         /// Optional height hint.
         height: Option<u32>,
     },
+    /// Card for a linked web page.
+    LinkPreview {
+        /// `http` or `https` page.
+        url: String,
+        /// Page title or the link's label.
+        title: Option<String>,
+        /// Short description of the page.
+        page_description: Option<String>,
+        /// Sanitized preview picture.
+        image_url: Option<String>,
+        /// Built by the server; otherwise the app may describe the page itself.
+        from_server: bool,
+    },
     /// Readable unsupported/unsafe fallback.
     Unsupported {
         /// Sanitized summary.
@@ -3585,6 +3598,19 @@ impl From<NativeContentBlock> for CoreContentBlock {
                 width,
                 height,
             },
+            NativeContentBlock::LinkPreview {
+                url,
+                title,
+                description,
+                image_url,
+                from_server,
+            } => Self::LinkPreview {
+                url,
+                title,
+                page_description: description,
+                image_url,
+                from_server,
+            },
             NativeContentBlock::Unsupported { summary } => Self::Unsupported { summary },
         }
     }
@@ -4414,6 +4440,12 @@ mod tests {
         let _ = wait_for_event(&online_receiver, &online_sink, |event| {
             matches!(event, CoreEvent::SessionStarted { request_id: 30, .. })
         });
+        // Topic lists arrive in the background after the session starts.
+        let _ = wait_for_event(
+            &online_receiver,
+            &online_sink,
+            |event| matches!(event, CoreEvent::SnapshotUpdated { snapshot, .. } if !snapshot.topics.is_empty()),
+        );
         online.submit(CoreCommand::OpenConversation {
             request_id: 31,
             key: inbox.clone(),

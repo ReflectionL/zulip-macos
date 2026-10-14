@@ -25,7 +25,10 @@ use url::Url;
 
 use crate::{
     auth::SecretString,
-    server::{DEFAULT_REQUEST_TIMEOUT, ServerBaseUrl, ServerUrlError, secure_transfer_client},
+    server::{
+        DEFAULT_REQUEST_TIMEOUT, ServerBaseUrl, ServerUrlError, secure_transfer_client,
+        secure_upload_client,
+    },
 };
 
 const UPLOAD_PATH: &str = "api/v1/user_uploads";
@@ -39,9 +42,11 @@ const AVATAR_ROUTE_PREFIX: &str = "/user_avatars/";
 /// Where the server proxies images linked from other sites; no credentials needed.
 const EXTERNAL_CONTENT_ROUTE_PREFIX: &str = "/external_content/";
 const MAX_JSON_BYTES: usize = 1_048_576;
-/// Deadline for a whole picture download or file upload; a stalled connection
+/// Deadline for a whole picture download; a stalled connection
 /// is cut off much sooner by the client's read timeout.
 const TRANSFER_DEADLINE: Duration = Duration::from_mins(3);
+/// Deadline for sending one file: 25 MiB over a slow uplink takes minutes.
+const UPLOAD_DEADLINE: Duration = Duration::from_mins(10);
 const MAX_FILENAME_BYTES: usize = 1_024;
 static TEMPORARY_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -128,6 +133,7 @@ pub enum MediaError {
 #[derive(Debug)]
 pub struct MediaClient {
     http: Client,
+    upload_http: Client,
     base_url: ServerBaseUrl,
     email: String,
     api_key: SecretString,
@@ -161,9 +167,12 @@ impl MediaClient {
             return Err(MediaError::InvalidInput);
         }
         let http = secure_transfer_client().map_err(|message| MediaError::Transport { message })?;
+        let upload_http =
+            secure_upload_client().map_err(|message| MediaError::Transport { message })?;
         let account_partition = sha256_hex(account_id.as_bytes());
         Ok(Self {
             http,
+            upload_http,
             base_url,
             email,
             api_key,
@@ -204,9 +213,9 @@ impl MediaClient {
 
         let part = Part::bytes(bytes).file_name(filename.clone());
         let response = self
-            .http
+            .upload_http
             .post(self.base_url.endpoint(UPLOAD_PATH))
-            .timeout(TRANSFER_DEADLINE)
+            .timeout(UPLOAD_DEADLINE)
             .basic_auth(&self.email, Some(self.api_key.expose_secret()))
             .multipart(Form::new().part("filename", part))
             .send()
@@ -813,8 +822,29 @@ fn sha256_hex(value: &[u8]) -> String {
 
 fn transport_error(error: reqwest::Error) -> MediaError {
     MediaError::Transport {
-        message: error.without_url().to_string(),
+        message: describe_transport_error(error),
     }
+}
+
+/// reqwest's own message is only "error sending request"; the reason (timed
+/// out, connection reset, TLS) is in the error's sources. None of them carry
+/// the URL or credentials.
+fn describe_transport_error(error: reqwest::Error) -> String {
+    if error.is_timeout() {
+        return "the transfer timed out".to_owned();
+    }
+    let error = error.without_url();
+    let mut message = error.to_string();
+    let mut source = std::error::Error::source(&error);
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        if !text.is_empty() && !message.contains(&text) {
+            message.push_str(": ");
+            message.push_str(&text);
+        }
+        source = cause.source();
+    }
+    message
 }
 
 #[cfg(test)]
@@ -921,6 +951,28 @@ mod tests {
             Err(MediaError::InvalidInput)
         ));
         assert!(!format!("{:?}", MediaError::UploadTooLarge).contains(API_KEY));
+    }
+
+    #[tokio::test]
+    async fn uploads_have_no_read_timeout_and_report_why_they_failed() {
+        let fixture = TempDir::new().expect("fixture directory");
+        let client = media_client("http://127.0.0.1:9/", &fixture, "account-a");
+        // reqwest's read timeout also covers the time spent sending the body, so
+        // a slow upload must not use the client that has one.
+        assert!(format!("{:?}", client.http).contains("read_timeout"));
+        assert!(!format!("{:?}", client.upload_http).contains("read_timeout"));
+
+        let selected_file = fixture.path().join("shot.png");
+        std::fs::write(&selected_file, b"fixture-png").expect("write fixture");
+        let Err(MediaError::Transport { message }) =
+            client.upload_file(&selected_file, "shot.png").await
+        else {
+            panic!("a refused connection is a transport error");
+        };
+        // More than reqwest's bare "error sending request": the cause follows.
+        assert!(message.contains(": "), "{message}");
+        assert!(!message.contains(API_KEY));
+        assert!(!message.contains("127.0.0.1"));
     }
 
     #[tokio::test]

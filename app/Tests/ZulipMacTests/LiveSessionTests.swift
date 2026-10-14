@@ -1586,6 +1586,18 @@ struct LiveSessionTests {
             model.attachmentUploadState == .failed(filename: secondName, message: "too large")
         }
         #expect(uploadCount() == 2)
+
+        // The failure shows only in its own conversation and can be dismissed.
+        let other = ConversationKey.topic(accountID: accountID, streamID: 5, topic: "other")
+        #expect(
+            model.attachmentUploadState(for: key)
+                == .failed(filename: secondName, message: "too large")
+        )
+        #expect(model.attachmentUploadState(for: other) == .idle)
+        model.dismissAttachmentUploadFailure()
+        #expect(model.attachmentUploadState(for: key) == .idle)
+        model.retryAttachmentUpload()
+        #expect(uploadCount() == 2)
     }
 
     @Test("Media requests deduplicate, cache local URLs, and retry failures")

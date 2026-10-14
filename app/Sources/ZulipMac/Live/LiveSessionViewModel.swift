@@ -205,6 +205,8 @@ final class LiveSessionViewModel {
     private(set) var topicActionState = TopicActionState.idle
     private(set) var requestedTopicNavigation: ConversationKey?
     private(set) var attachmentUploadState = AttachmentUploadState.idle
+    /// The conversation the current or last upload belongs to.
+    private(set) var attachmentUploadKey: ConversationKey?
     private(set) var attachmentInsertion: ComposerAttachmentInsertion?
     private(set) var mediaLocalURLs: [String: String] = [:]
     private(set) var mediaFailures: [String: String] = [:]
@@ -1482,6 +1484,7 @@ final class LiveSessionViewModel {
             return
         }
         let filename = fileURL.lastPathComponent
+        attachmentUploadKey = key
         guard !filename.isEmpty else {
             attachmentUploadState = .failed(
                 filename: "Attachment",
@@ -1545,6 +1548,19 @@ final class LiveSessionViewModel {
     func retryAttachmentUpload() {
         guard let failedAttachmentUpload else { return }
         uploadAttachment(failedAttachmentUpload.fileURL, to: failedAttachmentUpload.key)
+    }
+
+    /// The upload state to show in `key`'s composer: an upload or its failure
+    /// shows only in the conversation it was started from.
+    func attachmentUploadState(for key: ConversationKey) -> AttachmentUploadState {
+        attachmentUploadKey == key ? attachmentUploadState : .idle
+    }
+
+    /// Closes a failed upload's message without retrying it.
+    func dismissAttachmentUploadFailure() {
+        guard case .failed = attachmentUploadState else { return }
+        failedAttachmentUpload = nil
+        attachmentUploadState = .idle
     }
 
     func consumeAttachmentInsertion(id: UInt64) {
@@ -2158,6 +2174,7 @@ final class LiveSessionViewModel {
         failedAttachmentUpload = nil
         queuedAttachmentUploads = []
         attachmentUploadState = .idle
+        attachmentUploadKey = nil
         attachmentInsertion = nil
         mediaRequestsByRequestID = [:]
         pendingMediaURLs = []

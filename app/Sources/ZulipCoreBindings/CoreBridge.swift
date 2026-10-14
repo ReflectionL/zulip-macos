@@ -1300,6 +1300,14 @@ private extension ContentBlock {
                 width: width.map(Int.init),
                 height: height.map(Int.init)
             )
+        case let .linkPreview(url, title, pageDescription, imageUrl, fromServer):
+            self = .linkPreview(
+                url: url,
+                title: title,
+                description: pageDescription,
+                imageURL: imageUrl,
+                fromServer: fromServer
+            )
         case let .unsupported(summary):
             self = .unsupported(summary: summary)
         }

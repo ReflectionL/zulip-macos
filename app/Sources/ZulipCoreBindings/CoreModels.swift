@@ -234,6 +234,15 @@ public indirect enum ContentBlock: Equatable, Sendable {
     case list(items: [[ContentBlock]], ordered: Bool)
     case code(language: String?, value: String)
     case image(url: String, alt: String, width: Int?, height: Int?)
+    /// A card for a web page; `fromServer` is false for a link sent on its own,
+    /// which the app may describe by fetching the page.
+    case linkPreview(
+        url: String,
+        title: String?,
+        description: String?,
+        imageURL: String?,
+        fromServer: Bool
+    )
     case unsupported(summary: String)
 
     public var plainText: String {
@@ -250,6 +259,8 @@ public indirect enum ContentBlock: Equatable, Sendable {
             value
         case let .image(_, alt, _, _):
             alt
+        case let .linkPreview(url, title, _, _, _):
+            title ?? url
         case let .unsupported(summary):
             summary
         }

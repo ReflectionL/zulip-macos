@@ -231,6 +231,17 @@ private struct ContentBlockView: View {
                 retryMedia: retryMedia
             )
 
+        case let .linkPreview(url, title, description, imageURL, fromServer):
+            LinkPreviewCard(
+                url: url,
+                title: title,
+                description: description,
+                imageURL: imageURL,
+                fromServer: fromServer,
+                localImageURL: imageURL.flatMap { mediaLocalURLs[$0] },
+                requestMedia: requestMedia
+            )
+
         case let .unsupported(summary):
             Label(summary, systemImage: "doc.questionmark")
                 .font(AppTheme.Typography.body)
@@ -573,6 +584,9 @@ enum ContentSnapshot {
             "code[\(language ?? "plain")](\(value))"
         case let .image(url, alt, width, height):
             "image(\(url),\(alt),\(width ?? 0)x\(height ?? 0))"
+        case let .linkPreview(url, title, description, imageURL, fromServer):
+            "card[\(fromServer ? "server" : "client")](\(url),\(title ?? ""),"
+                + "\(description ?? ""),\(imageURL ?? ""))"
         case let .unsupported(summary):
             "unsupported(\(summary))"
         }

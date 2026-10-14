@@ -49,8 +49,11 @@ roadmap lives in [`PLAN.md`](PLAN.md).
 - Native rendering of Zulip content: Markdown, links, mentions, emoji, quotes,
   lists, code and images. Images keep their real aspect ratio (height capped),
   pictures from other sites go through the server's preview, an uploaded
-  picture that was only linked (no server preview) is still shown, and
-  clicking opens the default viewer. Untrusted HTML is parsed in Rust and never shown in a web
+  picture that was only linked (no server preview) is still shown, a
+  previewed picture's file link is hidden, and clicking opens the default
+  viewer. A link sent on its own shows as a card (picture, title,
+  description, site), from the server's preview or, when there is none, from
+  the page itself (Settings › Link Previews turns that off). Untrusted HTML is parsed in Rust and never shown in a web
   view.
 - Read receipts: small overlapping avatars under your newest sent message show
   who has read it (needs Zulip 6.0 and read receipts enabled by the
@@ -92,6 +95,10 @@ roadmap lives in [`PLAN.md`](PLAN.md).
   example after the Mac sleeps) still notify once it is back. The app keeps
   macOS from napping it while signed in so notifications are not delayed; if
   the system refuses a notification, the Dock icon bounces instead.
+- The app asks macOS for permission to notify as soon as it opens, so a new
+  install or an update shows the Allow prompt right away. Settings ›
+  Notifications shows whether notifications are allowed and can ask again,
+  open the app's page in System Settings, or send a test notification.
 
 **Keyboard and appearance**
 
