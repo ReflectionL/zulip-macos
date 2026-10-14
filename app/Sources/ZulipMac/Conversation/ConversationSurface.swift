@@ -894,6 +894,8 @@ private struct MessageRow: View {
             .alignmentGuide(.top) { $0[.bottom] - Self.actionBarOverlap }
             .padding(.trailing, AppTheme.Spacing.small)
             .opacity(isActive || isPickingReaction ? 1 : 0)
+            // While hidden it must not catch the pointer over the row above.
+            .allowsHitTesting(isActive || isPickingReaction)
             .accessibilityHidden(!isActive && !isPickingReaction)
         }
         .onHover { isHovered = $0 }
