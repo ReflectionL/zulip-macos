@@ -52,10 +52,20 @@ jobs:
           if [[ "$RELEASE_TAG" == *-* ]]; then
             flags+=(--prerelease)
           fi
+          footer="Apple Silicon (arm64) build for macOS 26 or later. Ad-hoc signed and not notarized; right-click and choose Open on first launch. Verify the download with the attached SHA-256 file."
+          # Release notes (fixes and new features) live in docs/release-notes/<tag>.md.
+          notes_file="docs/release-notes/${RELEASE_TAG}.md"
+          {
+            if [[ -f "$notes_file" ]]; then
+              cat "$notes_file"
+              printf '\n---\n\n'
+            fi
+            printf '%s\n' "$footer"
+          } > "$RUNNER_TEMP/release-notes.md"
           gh release create "$RELEASE_TAG" \
             --target "$GITHUB_SHA" \
             --title "Zulip Mac $RELEASE_TAG" \
-            --notes "Apple Silicon (arm64) build for macOS 26 or later. Ad-hoc signed and not notarized; right-click and choose Open on first launch. Verify the download with the attached SHA-256 file." \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
             "${flags[@]}" \
             dist/Zulip-Mac-*-arm64.dmg \
             dist/Zulip-Mac-*-arm64.dmg.sha256
