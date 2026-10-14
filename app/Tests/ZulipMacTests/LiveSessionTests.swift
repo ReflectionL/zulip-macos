@@ -144,6 +144,8 @@ struct LiveSessionTests {
             )
         )
         await eventually { signedIn.connectionState == .connected }
+        // The key is written to the Keychain beside the event loop.
+        await eventually { await credentials.savedCredential() != nil }
 
         let relaunchCore = RecordingCoreClient()
         let relaunched = LiveSessionViewModel(
