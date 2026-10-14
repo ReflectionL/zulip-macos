@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import UniformTypeIdentifiers
 import ZulipCoreBindings
@@ -59,6 +60,10 @@ struct ConversationSurface: View {
     @State private var pendingQuote: ComposerQuote?
     @State private var isChoosingAttachment = false
     @State private var isDropTargeted = false
+    /// What "Today" and "Yesterday" are measured from. Refreshed when the day or
+    /// the time zone changes and when the app comes back, so an open chat that
+    /// stays on screen past midnight does not keep yesterday's labels.
+    @State private var labelsReferenceDate = Date.now
     @FocusState private var isComposerFocused: Bool
 
     init(
@@ -199,7 +204,7 @@ struct ConversationSurface: View {
                             ForEach(messages, id: \.rowID) { message in
                                 VStack(spacing: 0) {
                                     if dayStarts.contains(message.id) {
-                                        DateSeparator(date: message.timestamp)
+                                        DateSeparator(date: message.timestamp, now: labelsReferenceDate)
                                     }
                                     MessageRow(
                                         message: message,
@@ -345,6 +350,9 @@ struct ConversationSurface: View {
             .animation(.easeOut(duration: 0.15), value: typingDescription)
         }
         .background(AppTheme.Colors.canvas)
+        .onReceive(Self.dayLabelRefreshes) { _ in
+            labelsReferenceDate = .now
+        }
         .dropDestination(for: URL.self) { urls, _ in
             guard let uploadDroppedFiles, !isOffline, !urls.isEmpty else {
                 return false
@@ -693,9 +701,28 @@ private struct ConversationToolbarModifier: ViewModifier {
     }
 }
 
+extension ConversationSurface {
+    /// The moments after which "Today" and "Yesterday" may name other days.
+    /// Built once and shared, so redrawing the surface does not resubscribe.
+    @MainActor private static let dayLabelRefreshes: AnyPublisher<Void, Never> = {
+        let center = NotificationCenter.default
+        return Publishers.MergeMany(
+            center.publisher(for: .NSCalendarDayChanged),
+            center.publisher(for: .NSSystemTimeZoneDidChange),
+            center.publisher(for: NSApplication.didBecomeActiveNotification),
+            NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didWakeNotification)
+        )
+        .map { _ in () }
+        .receive(on: RunLoop.main)
+        .eraseToAnyPublisher()
+    }()
+}
+
 /// A centered date between two hairlines above the first message of each day.
 private struct DateSeparator: View {
     let date: Date
+    /// The moment "Today" means; passed in so the label redraws when it changes.
+    let now: Date
 
     var body: some View {
         HStack(spacing: AppTheme.Spacing.medium) {
@@ -714,14 +741,7 @@ private struct DateSeparator: View {
     }
 
     private var label: String {
-        let calendar = Calendar.current
-        if calendar.isDateInToday(date) {
-            return "Today"
-        }
-        if calendar.isDateInYesterday(date) {
-            return "Yesterday"
-        }
-        return date.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day().year())
+        MessageTimestamp.dayLabel(for: date, now: now)
     }
 
     private var hairline: some View {
@@ -784,7 +804,7 @@ private struct MessageRow: View {
             }
 
             HStack(alignment: .top, spacing: AppTheme.Spacing.medium) {
-                Text(message.timestamp, format: .dateTime.hour(.twoDigits(amPM: .omitted)).minute())
+                Text(message.timestamp, format: .dateTime.hour(.twoDigits(amPM: .narrow)).minute())
                     .font(AppTheme.Typography.scaled(10).monospacedDigit())
                     .foregroundStyle(AppTheme.Colors.tertiaryText)
                     .lineLimit(1)
