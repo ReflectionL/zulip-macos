@@ -1716,7 +1716,9 @@ struct LiveSessionTests {
         #expect(loadedMessage(model)?.isStarred == true)
 
         let starred = try #require(loadedMessage(model))
-        #expect(model.toggleThumbsUp(starred))
+        let thumbsUp = ReactionTarget(name: "thumbs_up", code: "1f44d")
+        #expect(model.toggleReaction(starred, thumbsUp))
+        #expect(loadedMessage(model)?.reactions.first?.includesMe == true)
         guard case let .updateReaction(reactionID, _, 44, "thumbs_up", true) = core.commands.last
         else {
             Issue.record("Expected reaction command")
@@ -1731,7 +1733,7 @@ struct LiveSessionTests {
             )
         )
         await eventually { self.loadedMessage(model)?.actionState == .idle }
-        #expect(loadedMessage(model)?.reactionCount == 1)
+        #expect(loadedMessage(model)?.reactions.map(\.count) == [1])
 
         let reacted = try #require(loadedMessage(model))
         #expect(model.editMessage(reacted, content: "Edited"))

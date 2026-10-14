@@ -129,10 +129,21 @@ public struct LiveMessageSnapshot: Equatable, Sendable {
 
 public struct LiveReactionSnapshot: Equatable, Sendable {
     public let emojiName: String
+    /// Dash-joined hexadecimal code points of a Unicode emoji; empty when unknown.
+    public let emojiCode: String
+    /// `unicode_emoji`, `realm_emoji` or `zulip_extra_emoji`; empty when unknown.
+    public let reactionType: String
     public let userID: Int64
 
-    public init(emojiName: String, userID: Int64) {
+    public init(
+        emojiName: String,
+        emojiCode: String = "",
+        reactionType: String = "",
+        userID: Int64
+    ) {
         self.emojiName = emojiName
+        self.emojiCode = emojiCode
+        self.reactionType = reactionType
         self.userID = userID
     }
 }
@@ -1181,7 +1192,12 @@ private extension LiveMessageSnapshot {
         recipientIDs = message.recipientIds
         flags = message.flags
         reactions = message.reactions.map {
-            LiveReactionSnapshot(emojiName: $0.emojiName, userID: $0.userId)
+            LiveReactionSnapshot(
+                emojiName: $0.emojiName,
+                emojiCode: $0.emojiCode,
+                reactionType: $0.reactionType,
+                userID: $0.userId
+            )
         }
         lastEditDate = message.lastEditTimestamp.map {
             Date(timeIntervalSince1970: TimeInterval($0))

@@ -1452,7 +1452,7 @@ mod tests {
                         "display_recipient":"engineering",
                         "flags":["read","starred"],
                         "last_edit_timestamp":1770000090,
-                        "reactions":[{"emoji_name":"thumbs_up","user_id":7}]
+                        "reactions":[{"emoji_name":"thumbs_up","emoji_code":"1f44d","reaction_type":"unicode_emoji","user_id":7}]
                     }]
                 }"#
                 .to_owned(),
@@ -1481,6 +1481,7 @@ mod tests {
         assert_eq!(page.messages[0].content_html, "<p>Hello</p>");
         assert_eq!(page.messages[0].flags, vec!["read", "starred"]);
         assert_eq!(page.messages[0].reactions[0].emoji_name, "thumbs_up");
+        assert_eq!(page.messages[0].reactions[0].emoji_code, "1f44d");
         assert_eq!(page.messages[0].last_edit_timestamp, Some(1_770_000_090));
         assert!(page.found_oldest && page.found_newest);
 

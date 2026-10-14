@@ -140,6 +140,13 @@ pub struct MessageSummary {
 pub struct ReactionSummary {
     /// Stable emoji name used by Zulip's reaction write API.
     pub emoji_name: String,
+    /// Zulip's code for the emoji: dash-joined hexadecimal code points for a
+    /// Unicode emoji, an identifier for custom emoji. Empty for old cache rows.
+    #[serde(default)]
+    pub emoji_code: String,
+    /// `unicode_emoji`, `realm_emoji` or `zulip_extra_emoji`; empty for old cache rows.
+    #[serde(default)]
+    pub reaction_type: String,
     /// Zulip identifier of the reacting user.
     pub user_id: i64,
 }
@@ -1400,12 +1407,17 @@ impl SyncReducer {
         let Some(message) = self.messages.get_mut(&message_id) else {
             return false;
         };
-        let present = message.reactions.contains(&reaction);
+        // A reaction is identified by its emoji name and user; cache rows written
+        // before emoji codes were stored carry no code to compare.
+        let same = |existing: &ReactionSummary| {
+            existing.emoji_name == reaction.emoji_name && existing.user_id == reaction.user_id
+        };
+        let present = message.reactions.iter().any(same);
         if added && !present {
             message.reactions.push(reaction);
             true
         } else if !added && present {
-            message.reactions.retain(|existing| *existing != reaction);
+            message.reactions.retain(|existing| !same(existing));
             true
         } else {
             false
@@ -1960,6 +1972,8 @@ impl EventDocument {
             "reaction" => {
                 let reaction = ReactionDocument {
                     emoji_name: string_field(&self.payload, "emoji_name").unwrap_or_default(),
+                    emoji_code: string_field(&self.payload, "emoji_code").unwrap_or_default(),
+                    reaction_type: string_field(&self.payload, "reaction_type").unwrap_or_default(),
                     user_id: optional_integer_field(&self.payload, "user_id").unwrap_or(0),
                 }
                 .normalize()
@@ -2317,6 +2331,10 @@ struct MessageDocument {
 #[derive(Debug, Deserialize)]
 pub(crate) struct ReactionDocument {
     emoji_name: String,
+    #[serde(default)]
+    emoji_code: String,
+    #[serde(default)]
+    reaction_type: String,
     user_id: i64,
 }
 
@@ -2330,6 +2348,8 @@ impl ReactionDocument {
         }
         Some(ReactionSummary {
             emoji_name: self.emoji_name,
+            emoji_code: self.emoji_code,
+            reaction_type: self.reaction_type,
             user_id: self.user_id,
         })
     }
@@ -2926,7 +2946,8 @@ mod tests {
             "events":[
                 {"id":41,"type":"update_message_flags","op":"add","flag":"read","messages":[7,99]},
                 {"id":42,"type":"reaction","op":"add","message_id":7,
-                 "emoji_name":"thumbs_up","user_id":2},
+                 "emoji_name":"thumbs_up","emoji_code":"1f44d",
+                 "reaction_type":"unicode_emoji","user_id":2},
                 {"id":43,"type":"reaction","op":"add","message_id":7,
                  "emoji_name":"thumbs_up","user_id":2}
             ]
@@ -2959,6 +2980,8 @@ mod tests {
         let message = &outcome.snapshot.expect("changed").messages[0];
         assert_eq!(message.flags, ["read"]);
         assert_eq!(message.reactions.len(), 1, "duplicate reactions collapse");
+        assert_eq!(message.reactions[0].emoji_code, "1f44d");
+        assert_eq!(message.reactions[0].reaction_type, "unicode_emoji");
 
         let SyncCycle::Events(outcome) = session.advance().await else {
             panic!("events expected");

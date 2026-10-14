@@ -58,7 +58,16 @@ enum FixtureConversation {
                 content: content,
                 isOwnMessage: sender.id == 42,
                 isStarred: index.isMultiple(of: 29),
-                reactionCount: index.isMultiple(of: 11) ? (index % 4) + 1 : 0
+                reactions: index.isMultiple(of: 11)
+                    ? [
+                        MessageReaction(
+                            emojiName: "thumbs_up",
+                            emojiCode: "1f44d",
+                            reactionType: "unicode_emoji",
+                            count: (index % 4) + 1
+                        ),
+                    ]
+                    : []
             )
         }
 

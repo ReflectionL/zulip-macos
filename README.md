@@ -56,6 +56,10 @@ roadmap lives in [`PLAN.md`](PLAN.md).
 - Send, edit, delete, react, star, mark read/unread, quote and reply, and
   forward, each with visible pending, rollback and retry states. Edited
   messages carry a gray "(edited)" label.
+- Emoji reactions: a quick row of ten recommended emoji plus a searchable list
+  of all standard emoji (type a word or paste an emoji). Existing reactions
+  show their counts, highlight your own, and toggle on click. Custom (realm)
+  emoji appear as `:name:` text and cannot be picked yet.
 - `@` mention suggestions in the composer, Shift/Option+Return for a line
   break, file upload up to 25 MiB (attach button or drag files from Finder
   onto the conversation) with authenticated media caching.

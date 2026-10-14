@@ -881,6 +881,11 @@ pub enum CoreContentBlock {
 pub struct CoreReaction {
     /// Stable emoji name used by the write endpoint.
     pub emoji_name: String,
+    /// Dash-joined hexadecimal code points for a Unicode emoji, an identifier
+    /// for custom emoji; empty when the server did not say.
+    pub emoji_code: String,
+    /// `unicode_emoji`, `realm_emoji` or `zulip_extra_emoji`; empty when unknown.
+    pub reaction_type: String,
     /// Zulip user identifier of the reacting user.
     pub user_id: i64,
 }
@@ -3106,6 +3111,8 @@ impl From<MessageSummary> for CoreMessage {
                 .into_iter()
                 .map(|reaction| CoreReaction {
                     emoji_name: reaction.emoji_name,
+                    emoji_code: reaction.emoji_code,
+                    reaction_type: reaction.reaction_type,
                     user_id: reaction.user_id,
                 })
                 .collect(),

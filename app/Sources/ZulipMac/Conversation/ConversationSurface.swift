@@ -19,7 +19,7 @@ struct ConversationSurface: View {
     var moveMessage: ((MessageViewData) -> Void)?
     var editMessage: ((MessageViewData, String) -> Bool)?
     var deleteMessage: ((MessageViewData) -> Bool)?
-    var reactToMessage: ((MessageViewData) -> Bool)?
+    var reactToMessage: ((MessageViewData, ReactionTarget) -> Bool)?
     var starMessage: ((MessageViewData) -> Bool)?
     var setMessageRead: ((MessageViewData, Bool) -> Bool)?
     var retryMessageAction: ((MessageViewData) -> Void)?
@@ -76,7 +76,7 @@ struct ConversationSurface: View {
         moveMessage: ((MessageViewData) -> Void)? = nil,
         editMessage: ((MessageViewData, String) -> Bool)? = nil,
         deleteMessage: ((MessageViewData) -> Bool)? = nil,
-        reactToMessage: ((MessageViewData) -> Bool)? = nil,
+        reactToMessage: ((MessageViewData, ReactionTarget) -> Bool)? = nil,
         starMessage: ((MessageViewData) -> Bool)? = nil,
         setMessageRead: ((MessageViewData, Bool) -> Bool)? = nil,
         retryMessageAction: ((MessageViewData) -> Void)? = nil,
@@ -197,11 +197,11 @@ struct ConversationSurface: View {
                                     message: message,
                                     isContinuation: continuations.contains(message.id),
                                     isFocusedSearchResult: page.focusedMessageID == message.id,
-                                    toggleReaction: {
+                                    react: { target in
                                         if let reactToMessage {
-                                            _ = reactToMessage(message)
+                                            _ = reactToMessage(message, target)
                                         } else {
-                                            toggleReaction(for: message.id)
+                                            toggleReaction(target, for: message.id)
                                         }
                                     },
                                     toggleStar: {
@@ -470,11 +470,12 @@ struct ConversationSurface: View {
         messages.first(where: { $0.id == messageID })?.rowID ?? messageID
     }
 
-    private func toggleReaction(for messageID: Int64) {
+    private func toggleReaction(_ target: ReactionTarget, for messageID: Int64) {
         guard let index = messages.firstIndex(where: { $0.id == messageID }) else {
             return
         }
-        messages[index].reactionCount = messages[index].reactionCount == 0 ? 1 : 0
+        let add = messages[index].reaction(matching: target)?.includesMe != true
+        messages[index].applyReaction(target, add: add)
     }
 
     private func toggleStar(for messageID: Int64) {
@@ -692,7 +693,7 @@ private struct MessageRow: View {
     let message: MessageViewData
     let isContinuation: Bool
     let isFocusedSearchResult: Bool
-    let toggleReaction: () -> Void
+    let react: (ReactionTarget) -> Void
     let toggleStar: () -> Void
     let moveToTopic: (() -> Void)?
     let edit: (() -> Void)?
@@ -709,6 +710,7 @@ private struct MessageRow: View {
     var readers: [ReadReceiptReader] = []
 
     @State private var isHovered = false
+    @State private var isPickingReaction = false
 
     var body: some View {
         HStack(alignment: .top, spacing: AppTheme.Spacing.medium) {
@@ -770,17 +772,12 @@ private struct MessageRow: View {
                         .help("Edited \(editedAt.formatted(date: .abbreviated, time: .shortened))")
                 }
 
-                if message.reactionCount > 0 {
-                    Button(action: toggleReaction) {
-                        Text("👍 \(message.reactionCount)")
-                            .font(AppTheme.Typography.metadata)
-                            .padding(.horizontal, 7)
-                            .frame(height: 24)
-                            .background(AppTheme.Colors.hover)
-                            .clipShape(Capsule())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Thumbs up, \(message.reactionCount) reactions")
+                if !message.reactions.isEmpty {
+                    ReactionChips(
+                        reactions: message.reactions,
+                        isDisabled: message.actionState.isPending || message.deliveryState != .sent,
+                        react: react
+                    )
                 }
 
                 if message.deliveryState == .failed {
@@ -851,7 +848,9 @@ private struct MessageRow: View {
         .overlay(alignment: .topTrailing) {
             MessageActions(
                 isStarred: message.isStarred,
-                toggleReaction: toggleReaction,
+                isPickingReaction: $isPickingReaction,
+                reactions: message.reactions,
+                react: react,
                 toggleStar: toggleStar,
                 moveToTopic: moveToTopic,
                 edit: edit,
@@ -864,15 +863,15 @@ private struct MessageRow: View {
             )
             .padding(.top, 4)
             .padding(.trailing, AppTheme.Spacing.small)
-            .opacity(isHovered ? 1 : 0)
-            .accessibilityHidden(!isHovered)
+            .opacity(isHovered || isPickingReaction ? 1 : 0)
+            .accessibilityHidden(!isHovered && !isPickingReaction)
         }
         .onHover { isHovered = $0 }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(message.senderName), \(message.plainText)")
         .accessibilityHint(isFocusedSearchResult ? "Selected search result" : "")
         .accessibilityAction(named: "React") {
-            toggleReaction()
+            isPickingReaction = true
         }
         .accessibilityAction(named: message.isStarred ? "Unstar" : "Star") {
             toggleStar()
@@ -947,7 +946,9 @@ private struct MessageRow: View {
 
 private struct MessageActions: View {
     let isStarred: Bool
-    let toggleReaction: () -> Void
+    @Binding var isPickingReaction: Bool
+    let reactions: [MessageReaction]
+    let react: (ReactionTarget) -> Void
     let toggleStar: () -> Void
     let moveToTopic: (() -> Void)?
     let edit: (() -> Void)?
@@ -963,8 +964,14 @@ private struct MessageActions: View {
             actionButton(
                 title: "React",
                 systemImage: "face.smiling",
-                action: toggleReaction
+                action: { isPickingReaction = true }
             )
+            .popover(isPresented: $isPickingReaction, arrowEdge: .bottom) {
+                ReactionPicker(existing: reactions) { target in
+                    isPickingReaction = false
+                    react(target)
+                }
+            }
             actionButton(
                 title: isStarred ? "Unstar" : "Star",
                 systemImage: isStarred ? "star.fill" : "star",

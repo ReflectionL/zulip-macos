@@ -417,8 +417,8 @@ private struct LiveWindowView: View {
                 deleteMessage: { message in
                     session.deleteMessage(message)
                 },
-                reactToMessage: { message in
-                    session.toggleThumbsUp(message)
+                reactToMessage: { message, target in
+                    session.toggleReaction(message, target)
                 },
                 starMessage: { message in
                     session.toggleStar(message)

@@ -98,14 +98,14 @@ struct ComposerAttachmentInsertion: Equatable, Sendable {
 private enum MessageAction: Equatable, Sendable {
     case edit(messageID: Int64, content: String)
     case delete(messageID: Int64)
-    case reaction(messageID: Int64, add: Bool)
+    case reaction(messageID: Int64, target: ReactionTarget, add: Bool)
     case flag(messageID: Int64, flag: LiveMessageFlag, add: Bool)
 
     var messageID: Int64 {
         switch self {
         case let .edit(messageID, _),
              let .delete(messageID),
-             let .reaction(messageID, _),
+             let .reaction(messageID, _, _),
              let .flag(messageID, _, _):
             messageID
         }
@@ -994,10 +994,15 @@ final class LiveSessionViewModel {
         submitMessageAction(.delete(messageID: message.id))
     }
 
+    /// Reacts with `target`, or withdraws the user's own reaction when they already
+    /// used it. Joining an existing group reuses that group's emoji name.
     @discardableResult
-    func toggleThumbsUp(_ message: MessageViewData) -> Bool {
-        submitMessageAction(
-            .reaction(messageID: message.id, add: !message.hasOwnThumbsUp)
+    func toggleReaction(_ message: MessageViewData, _ target: ReactionTarget) -> Bool {
+        let existing = message.reaction(matching: target)
+        let add = existing?.includesMe != true
+        let chosen = existing.map(\.target) ?? target
+        return submitMessageAction(
+            .reaction(messageID: message.id, target: chosen, add: add)
         )
     }
 
@@ -2264,9 +2269,48 @@ final class LiveSessionViewModel {
         )
     }
 
+    /// One entry per emoji, in the order each first appeared. The name shown to
+    /// the action is the current user's own when they reacted, otherwise the first used.
+    static func groupReactions(
+        _ reactions: [LiveReactionSnapshot],
+        me: Int64?
+    ) -> [MessageReaction] {
+        var groups: [MessageReaction] = []
+        for reaction in reactions {
+            let target = ReactionTarget(
+                name: reaction.emojiName,
+                code: reaction.emojiCode,
+                type: reaction.reactionType
+            )
+            let isMine = reaction.userID == me
+            if let index = groups.firstIndex(where: { target.matches($0) }) {
+                groups[index].count += 1
+                if isMine, !groups[index].includesMe {
+                    groups[index] = MessageReaction(
+                        emojiName: reaction.emojiName,
+                        emojiCode: groups[index].emojiCode,
+                        reactionType: groups[index].reactionType,
+                        count: groups[index].count,
+                        includesMe: true
+                    )
+                }
+            } else {
+                groups.append(
+                    MessageReaction(
+                        emojiName: reaction.emojiName,
+                        emojiCode: reaction.emojiCode,
+                        reactionType: reaction.reactionType,
+                        count: 1,
+                        includesMe: isMine
+                    )
+                )
+            }
+        }
+        return groups
+    }
+
     private func makeMessages(_ livePage: LiveConversationPage) -> [MessageViewData] {
         livePage.messages.map { message in
-            let thumbsUp = message.reactions.filter { $0.emojiName == "thumbs_up" }
             return MessageViewData(
                 id: message.messageID,
                 accountID: livePage.key.accountID,
@@ -2280,8 +2324,7 @@ final class LiveSessionViewModel {
                 sourceStreamID: message.streamID,
                 sourceTopic: message.topic,
                 isStarred: message.flags.contains("starred"),
-                reactionCount: thumbsUp.count,
-                hasOwnThumbsUp: thumbsUp.contains { $0.userID == identity?.userID },
+                reactions: Self.groupReactions(message.reactions, me: identity?.userID),
                 isRead: message.flags.contains("read"),
                 senderAvatarURL: avatarURLs[message.senderID],
                 editedAt: message.lastEditDate
@@ -2331,13 +2374,13 @@ final class LiveSessionViewModel {
                     messageID: messageID
                 )
             )
-        case let .reaction(messageID, add):
+        case let .reaction(messageID, target, add):
             client.submit(
                 .updateReaction(
                     requestID: id,
                     accountID: identity.accountID,
                     messageID: messageID,
-                    emojiName: "thumbs_up",
+                    emojiName: target.name,
                     add: add
                 )
             )
@@ -2364,9 +2407,8 @@ final class LiveSessionViewModel {
                 message.editedAt = Date()
             case .delete:
                 break
-            case let .reaction(_, add):
-                message.hasOwnThumbsUp = add
-                message.reactionCount = max(0, message.reactionCount + (add ? 1 : -1))
+            case let .reaction(_, target, add):
+                message.applyReaction(target, add: add)
             case let .flag(_, flag, add):
                 if flag == .starred {
                     message.isStarred = add
