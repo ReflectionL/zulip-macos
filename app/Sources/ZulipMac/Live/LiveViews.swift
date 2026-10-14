@@ -227,6 +227,14 @@ private struct LiveWindowView: View {
                     renameChannel: { channel in
                         channelRenameTarget = channel
                     },
+                    setChannelNotifications: { channel, enabled in
+                        session.setChannelNotifications(
+                            streamID: channel.streamID,
+                            enabled: enabled
+                        )
+                    },
+                    notifiesForAllChannels: session.channelNotificationsDefault,
+                    setNotifiesForAllChannels: session.setChannelNotificationsDefault,
                     presenceDescription: { userID in
                         session.presenceDescription(forUserID: userID)
                     },

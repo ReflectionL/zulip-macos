@@ -67,7 +67,9 @@ roadmap lives in [`PLAN.md`](PLAN.md).
   @-mentions (including wildcard mentions in channels), every message in
   channels you turned desktop notifications on for (or that follow your
   account default), and followed topics. Muted channels and muted topics stay
-  quiet. Clicking a notification opens the message. The Dock badge shows
+  quiet. Turn a channel's notifications on or off from its context menu in
+  the sidebar, or use "Notify for All Channel Messages" in the gear menu; both
+  are saved to Zulip, so the web app agrees. Clicking a notification opens the message. The Dock badge shows
   unread direct messages plus unread mentions in unmuted channels and topics.
 
 **Keyboard and appearance**

@@ -80,6 +80,9 @@ public struct ChannelSnapshot: Identifiable, Equatable, Sendable {
     public let unreadCount: Int
     public let isMuted: Bool
     public let topics: [TopicSnapshot]
+    /// Whether every message in the channel raises a notification: its own
+    /// Zulip setting, or the account-wide default when it has none.
+    public let notifiesForAllMessages: Bool
 
     public var id: Int64 { streamID }
 
@@ -89,8 +92,10 @@ public struct ChannelSnapshot: Identifiable, Equatable, Sendable {
         colorHex: String,
         unreadCount: Int = 0,
         isMuted: Bool = false,
+        notifiesForAllMessages: Bool = false,
         topics: [TopicSnapshot] = []
     ) {
+        self.notifiesForAllMessages = notifiesForAllMessages
         self.streamID = streamID
         self.name = name
         self.colorHex = colorHex

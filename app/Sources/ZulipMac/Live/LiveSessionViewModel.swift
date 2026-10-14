@@ -190,6 +190,9 @@ final class LiveSessionViewModel {
     var secret = ""
     var connectionState = LiveConnectionState.signedOut
     var notice: String?
+    /// Zulip's account-wide default: whether channels without a setting of their
+    /// own notify for every message.
+    private(set) var channelNotificationsDefault = false
     private(set) var identity: LiveSessionIdentity?
     private(set) var sidebarSnapshot: SidebarSnapshot?
     private(set) var navigationDirectory = NavigationDirectory(destinations: [])
@@ -263,6 +266,8 @@ final class LiveSessionViewModel {
     private var pendingOlderRequestID: UInt64?
     /// Conversation opens the user asked for that have not produced a page yet.
     private var openRequests: [UInt64: ConversationKey] = [:]
+    /// Notification setting writes awaiting the server's answer.
+    private var notificationSettingRequests = Set<UInt64>()
     /// Refreshes and mark-read requests: when one fails the screen stays as it
     /// is and the connection is not reported as failed.
     private var quietRequestIDs = Set<UInt64>()
@@ -1203,6 +1208,35 @@ final class LiveSessionViewModel {
         )
     }
 
+    /// Turns notifications for every message of one channel on or off, in Zulip
+    /// itself, so the web app and other clients agree. The sidebar follows once
+    /// the server's update arrives with the next snapshot.
+    func setChannelNotifications(streamID: Int64, enabled: Bool) {
+        submitNotificationSetting(streamID: streamID, enabled: enabled)
+    }
+
+    /// Sets Zulip's account-wide default for channels without a setting of their own.
+    func setChannelNotificationsDefault(_ enabled: Bool) {
+        submitNotificationSetting(streamID: nil, enabled: enabled)
+    }
+
+    private func submitNotificationSetting(streamID: Int64?, enabled: Bool) {
+        guard let identity, hasLiveSession else {
+            notice = "Notification settings can be changed once you are connected."
+            return
+        }
+        let id = nextRequestID()
+        notificationSettingRequests.insert(id)
+        client.submit(
+            .setNotificationSetting(
+                requestID: id,
+                accountID: identity.accountID,
+                streamID: streamID,
+                enabled: enabled
+            )
+        )
+    }
+
     func resetChannelRename() {
         channelRenameRequestID = nil
         channelRenameState = .idle
@@ -1698,6 +1732,9 @@ final class LiveSessionViewModel {
             channelRenameState = .renamed(name: name)
             notice = "Renamed the channel to “\(name)”."
 
+        case let .notificationSettingSaved(requestID):
+            notificationSettingRequests.remove(requestID)
+
         case let .messageSourceLoaded(requestID, _, source):
             guard let pending = messageSourceRequests.removeValue(forKey: requestID),
                   identity?.accountID == pending.message.accountID
@@ -1778,6 +1815,8 @@ final class LiveSessionViewModel {
                 // A refresh or mark-read that did not go through: what is on screen
                 // stays, and the next snapshot or visit tries again.
                 sessionLog.error("background request failed: \(message, privacy: .public)")
+            } else if let requestID, notificationSettingRequests.remove(requestID) != nil {
+                notice = "The notification setting could not be saved: \(message)"
             } else if let requestID, requestID == cachedSessionRequestID {
                 // No cached data yet (first run); the live connection continues.
                 cachedSessionRequestID = nil
@@ -1942,6 +1981,8 @@ final class LiveSessionViewModel {
         activeSelection = nil
         pendingOlderRequestID = nil
         openRequests = [:]
+        notificationSettingRequests = []
+        channelNotificationsDefault = false
         quietRequestIDs = []
         lastShownOpenRequestID = [:]
         pendingSearchRequestID = nil
@@ -2126,6 +2167,7 @@ final class LiveSessionViewModel {
                 )
             }
         replaceKnownTopics(from: snapshot)
+        channelNotificationsDefault = snapshot.channelNotificationsDefault
         unreadSummary = UnreadSummary(
             buckets: snapshot.unread,
             selfUserID: identity.userID,
@@ -2724,6 +2766,7 @@ final class LiveSessionViewModel {
                 colorHex: channel.colorHex,
                 unreadCount: channel.unreadCount,
                 isMuted: channel.isMuted,
+                notifiesForAllMessages: channel.notifiesForAllMessages,
                 topics: topics
                     .filter { $0.streamID == channel.streamID }
                     .sorted {
@@ -2947,6 +2990,8 @@ final class LiveSessionViewModel {
                     colorHex: channel.colorHex,
                     unreadCount: unread.unreadCount(streamID: channel.streamID),
                     isMuted: channel.isMuted,
+                    notifiesForAllMessages: channel.desktopNotifications
+                        ?? snapshot.channelNotificationsDefault,
                     topics: channelTopics
                         .sorted { $0.maxMessageID > $1.maxMessageID }
                         .map {

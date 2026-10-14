@@ -40,6 +40,12 @@ struct SidebarView: View {
     var startNewTopic: (ChannelSnapshot) -> Void = { _ in }
     var createChannel: (() -> Void)?
     var renameChannel: ((ChannelSnapshot) -> Void)?
+    /// Turns notifications for every message of a channel on or off.
+    var setChannelNotifications: ((ChannelSnapshot, Bool) -> Void)?
+    /// The account-wide default for channels without a setting of their own,
+    /// and the way to change it.
+    var notifiesForAllChannels = false
+    var setNotifiesForAllChannels: ((Bool) -> Void)?
     var presenceDescription: ((Int64) -> String?)?
     var sessionControl: SidebarSessionControl?
     var mediaLocalURLs: [String: String] = [:]
@@ -145,6 +151,18 @@ struct SidebarView: View {
                                     selection = key
                                 }
                                 .contextMenu {
+                                    if let setChannelNotifications {
+                                        Button(
+                                            channel.notifiesForAllMessages
+                                                ? "Turn Off Notifications"
+                                                : "Turn On Notifications"
+                                        ) {
+                                            setChannelNotifications(
+                                                channel,
+                                                !channel.notifiesForAllMessages
+                                            )
+                                        }
+                                    }
                                     if let renameChannel {
                                         Button("Rename channel…") {
                                             renameChannel(channel)
@@ -283,6 +301,18 @@ struct SidebarView: View {
                             systemImage: sessionControl.action.systemImage
                         )
                     }
+
+                    Divider()
+                }
+
+                if let setNotifiesForAllChannels {
+                    Toggle(
+                        "Notify for All Channel Messages",
+                        isOn: Binding(
+                            get: { notifiesForAllChannels },
+                            set: setNotifiesForAllChannels
+                        )
+                    )
 
                     Divider()
                 }

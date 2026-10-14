@@ -942,6 +942,79 @@ struct LiveSessionTests {
         await eventually { model.channelRenameState == .renamed(name: "platform") }
     }
 
+    @Test("Notification settings are written to Zulip and a refusal is reported quietly")
+    func notificationSettings() async {
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(client: core, credentialStore: MemoryCredentialStore())
+        model.startObserving()
+        let accountID = "account-1"
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: accountID),
+                credential: StoredAPICredential(accountID: accountID, apiKey: "key"),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.connectionState == .connected }
+
+        model.setChannelNotifications(streamID: 5, enabled: true)
+        guard case let .setNotificationSetting(requestID, commandAccountID, 5, true) = core.commands.last
+        else {
+            Issue.record("Expected a channel notification command")
+            return
+        }
+        #expect(commandAccountID == accountID)
+        core.emit(.failed(requestID: requestID, message: "not allowed"))
+        await eventually { model.notice?.contains("not allowed") == true }
+        #expect(model.connectionState == .connected, "a refused setting is not a connection failure")
+
+        model.setChannelNotificationsDefault(true)
+        guard case let .setNotificationSetting(secondRequestID, _, nil, true) = core.commands.last else {
+            Issue.record("Expected an account default notification command")
+            return
+        }
+        core.emit(.notificationSettingSaved(requestID: secondRequestID))
+        #expect(model.connectionState == .connected)
+    }
+
+    @Test("A conversation whose first page cannot be fetched offers a retry instead of loading forever")
+    func failedFirstPageShowsFailure() async {
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(client: core, credentialStore: MemoryCredentialStore())
+        model.startObserving()
+        let accountID = "account-1"
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: accountID),
+                credential: StoredAPICredential(accountID: accountID, apiKey: "key"),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.connectionState == .connected }
+
+        model.openConversation(.channel(accountID: accountID, streamID: 5))
+        guard case let .openConversation(requestID, _, _) = core.commands.last else {
+            Issue.record("Expected an open-conversation command")
+            return
+        }
+        core.emit(.failed(requestID: requestID, message: "could not communicate with the Zulip server"))
+        await eventually {
+            if case .failure = model.conversationState { return true }
+            return false
+        }
+        #expect(model.connectionState == .connected, "a failed page is not a lost connection")
+
+        model.retryOpenConversation()
+        if case .openConversation = core.commands.last {} else {
+            Issue.record("Retrying must ask for the page again")
+        }
+        if case .loading = model.conversationState {} else {
+            Issue.record("Retrying shows the loading state again")
+        }
+    }
+
     @Test("Reopening a conversation seen this session paints at once without a loading state")
     func reopenedConversationSkipsLoading() async {
         let core = RecordingCoreClient()

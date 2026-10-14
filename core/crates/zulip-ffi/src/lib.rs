@@ -473,6 +473,19 @@ pub enum CoreCommand {
         /// New channel name.
         new_name: String,
     },
+    /// Turns desktop notifications on or off: for one channel when `stream_id`
+    /// is given, otherwise as the account-wide default for channels without a
+    /// setting of their own. The change comes back through the sync snapshot.
+    SetNotificationSetting {
+        /// Correlates the response.
+        request_id: u64,
+        /// Client-owned account partition.
+        account_id: String,
+        /// Channel to change; `None` changes the account-wide default.
+        stream_id: Option<i64>,
+        /// Whether every message should notify.
+        enabled: bool,
+    },
     /// Fetches the original Markdown of one message so it can be quoted or forwarded.
     FetchMessageSource {
         /// Correlates the response.
@@ -577,6 +590,7 @@ impl CoreCommand {
             | Self::FetchMessageSource { request_id, .. }
             | Self::CreateChannel { request_id, .. }
             | Self::RenameChannel { request_id, .. }
+            | Self::SetNotificationSetting { request_id, .. }
             | Self::Disconnect { request_id } => *request_id,
         }
     }
@@ -1200,6 +1214,11 @@ pub enum CoreEvent {
         /// Name the server accepted.
         name: String,
     },
+    /// The server accepted a notification setting.
+    NotificationSettingSaved {
+        /// Matches the originating command.
+        request_id: u64,
+    },
     /// The original Markdown source of a requested message.
     MessageSourceLoaded {
         /// Matches the originating command.
@@ -1733,6 +1752,19 @@ async fn handle_command(
             account.as_ref(),
             event_sink,
         ),
+        CoreCommand::SetNotificationSetting {
+            request_id,
+            account_id,
+            stream_id,
+            enabled,
+        } => set_notification_setting(
+            request_id,
+            &account_id,
+            stream_id,
+            enabled,
+            account.as_ref(),
+            event_sink,
+        ),
         CoreCommand::FetchMessageSource {
             request_id,
             account_id,
@@ -1843,6 +1875,36 @@ fn rename_channel(
                 stream_id,
                 name: new_name.trim().to_owned(),
             }),
+            Err(error) => emit_error(Some(request_id), error, &event_sink),
+        }
+    });
+}
+
+fn set_notification_setting(
+    request_id: u64,
+    account_id: &str,
+    stream_id: Option<i64>,
+    enabled: bool,
+    account: Option<&AccountSession>,
+    event_sink: &Arc<dyn CoreEventSink>,
+) {
+    let Some(session) = account.filter(|item| item.account_id == account_id) else {
+        emit_no_session(request_id, event_sink);
+        return;
+    };
+    let messages = Arc::clone(&session.messages);
+    let event_sink = Arc::clone(event_sink);
+    tokio::spawn(async move {
+        let result = match stream_id {
+            Some(stream_id) => {
+                messages
+                    .set_channel_desktop_notifications(stream_id, enabled)
+                    .await
+            }
+            None => messages.set_default_channel_notifications(enabled).await,
+        };
+        match result {
+            Ok(()) => event_sink.handle_event(CoreEvent::NotificationSettingSaved { request_id }),
             Err(error) => emit_error(Some(request_id), error, &event_sink),
         }
     });
