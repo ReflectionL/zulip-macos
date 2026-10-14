@@ -63,6 +63,7 @@ become active; completed rows are never removed.
 
 ### 2026-10-14
 
+- Merged `FIX-009` (PR #21, green macOS CI on the first Swift compile of the batch). Release notes now come from `docs/release-notes/<tag>.md` (Chinese Fixes / New features) and `release.yml` reads that file; `v0.1.0-beta.3` is built right after this lands. `FIX-009` stays `in_progress` until the owner confirms on a Mac.
 - Added emoji reactions to `FIX-009` (quick row + searchable list, grouped chips with counts, toggle). Rust keeps `emoji_code`/`reaction_type`; Swift groups by code. The bundled emoji table uses names from the Python `emoji` package (gemoji-style aliases first); Zulip resolves any name it knows, so a rare emoji the server does not recognise shows an "Action failed" with Retry rather than silently failing. Not compiled in the cloud.
 - Added drag-and-drop upload to `FIX-009` (existing picker upload reused; drop target on the conversation, one-at-a-time queue, failure clears it). Not compiled in the cloud; whether a drop over the text field itself is taken by the field (inserting a path) rather than the conversation pane can only be checked on a Mac.
 - Began `FIX-009` from the owner's beta 2 report (slow direct-message loading, Shift+Return crash, "(edited)" label, notification scope); one PR, one CI run, the owner is asked before the push, and the release is built right after CI passes and the PR merges.
