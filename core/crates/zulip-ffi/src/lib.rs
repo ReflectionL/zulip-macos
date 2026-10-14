@@ -29,7 +29,8 @@ use zulip_core::{
     },
     sync::{
         EventQueueClient, MessageSummary, RecentDirectConversation, RecoveryPolicy, SyncCycle,
-        SyncSession, SyncSnapshot, TypingNotice, TypingScope, UnreadBucket, UserSummary,
+        SyncSession, SyncSnapshot, TopicPolicy, TopicVisibility, TypingNotice, TypingScope,
+        UnreadBucket, UserSummary,
     },
 };
 
@@ -472,6 +473,19 @@ pub enum CoreCommand {
         /// New channel name.
         new_name: String,
     },
+    /// Turns desktop notifications on or off: for one channel when `stream_id`
+    /// is given, otherwise as the account-wide default for channels without a
+    /// setting of their own. The change comes back through the sync snapshot.
+    SetNotificationSetting {
+        /// Correlates the response.
+        request_id: u64,
+        /// Client-owned account partition.
+        account_id: String,
+        /// Channel to change; `None` changes the account-wide default.
+        stream_id: Option<i64>,
+        /// Whether every message should notify.
+        enabled: bool,
+    },
     /// Fetches the original Markdown of one message so it can be quoted or forwarded.
     FetchMessageSource {
         /// Correlates the response.
@@ -576,6 +590,7 @@ impl CoreCommand {
             | Self::FetchMessageSource { request_id, .. }
             | Self::CreateChannel { request_id, .. }
             | Self::RenameChannel { request_id, .. }
+            | Self::SetNotificationSetting { request_id, .. }
             | Self::Disconnect { request_id } => *request_id,
         }
     }
@@ -672,6 +687,45 @@ pub struct CoreChannel {
     pub color: String,
     /// Personal mute state.
     pub is_muted: bool,
+    /// The channel's own desktop-notification choice; `None` follows the
+    /// account-wide default.
+    pub desktop_notifications: Option<bool>,
+}
+
+/// How the account treats one topic, overriding its channel's setting.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum CoreTopicVisibility {
+    /// The topic is muted.
+    Muted,
+    /// The topic is unmuted inside a muted channel.
+    Unmuted,
+    /// The topic is followed.
+    Followed,
+}
+
+/// A personal visibility choice for one topic.
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct CoreTopicPolicy {
+    /// Channel identifier.
+    pub stream_id: i64,
+    /// Topic name as the server reports it.
+    pub topic: String,
+    /// The account's choice.
+    pub visibility: CoreTopicVisibility,
+}
+
+impl From<TopicPolicy> for CoreTopicPolicy {
+    fn from(policy: TopicPolicy) -> Self {
+        Self {
+            stream_id: policy.stream_id,
+            topic: policy.topic,
+            visibility: match policy.visibility {
+                TopicVisibility::Muted => CoreTopicVisibility::Muted,
+                TopicVisibility::Unmuted => CoreTopicVisibility::Unmuted,
+                TopicVisibility::Followed => CoreTopicVisibility::Followed,
+            },
+        }
+    }
 }
 
 /// Topic projection discovered through the authenticated topics API.
@@ -708,6 +762,8 @@ pub struct CoreMessage {
     pub flags: Vec<String>,
     /// Reactions currently attached to the message.
     pub reactions: Vec<CoreReaction>,
+    /// Unix timestamp in seconds of the last content edit, absent when never edited.
+    pub last_edit_timestamp: Option<i64>,
 }
 
 /// Sanitized inline content crossing the application bridge.
@@ -825,6 +881,11 @@ pub enum CoreContentBlock {
 pub struct CoreReaction {
     /// Stable emoji name used by the write endpoint.
     pub emoji_name: String,
+    /// Dash-joined hexadecimal code points for a Unicode emoji, an identifier
+    /// for custom emoji; empty when the server did not say.
+    pub emoji_code: String,
+    /// `unicode_emoji`, `realm_emoji` or `zulip_extra_emoji`; empty when unknown.
+    pub reaction_type: String,
     /// Zulip user identifier of the reacting user.
     pub user_id: i64,
 }
@@ -850,6 +911,10 @@ pub struct CoreSnapshot {
     pub recent_direct_conversations: Vec<CoreRecentDirectConversation>,
     /// Unread messages counted per conversation.
     pub unread: Vec<CoreUnreadBucket>,
+    /// Muted, unmuted and followed topics.
+    pub topic_policies: Vec<CoreTopicPolicy>,
+    /// Whether channels without their own choice notify for every message.
+    pub channel_notifications_default: bool,
 }
 
 /// The unread messages of one conversation.
@@ -1154,6 +1219,11 @@ pub enum CoreEvent {
         /// Name the server accepted.
         name: String,
     },
+    /// The server accepted a notification setting.
+    NotificationSettingSaved {
+        /// Matches the originating command.
+        request_id: u64,
+    },
     /// The original Markdown source of a requested message.
     MessageSourceLoaded {
         /// Matches the originating command.
@@ -1425,7 +1495,7 @@ async fn handle_command(
             request_id,
             key,
             limit,
-        } => open_conversation(request_id, key, limit, account.as_ref(), cache, event_sink).await,
+        } => open_conversation(request_id, key, limit, account.as_ref(), cache, event_sink),
         CoreCommand::LoadCachedConversation { request_id, key } => {
             if let Some(page) = cached_conversation_page(&key, cache) {
                 event_sink.handle_event(CoreEvent::CachedConversationLoaded { request_id, page });
@@ -1444,8 +1514,7 @@ async fn handle_command(
                 limit,
                 account.as_ref(),
                 event_sink,
-            )
-            .await;
+            );
         }
         CoreCommand::SearchMessages {
             request_id,
@@ -1455,13 +1524,12 @@ async fn handle_command(
         } => {
             search_messages(
                 request_id,
-                &account_id,
-                &query,
+                account_id,
+                query,
                 limit,
                 account.as_ref(),
                 event_sink,
-            )
-            .await;
+            );
         }
         CoreCommand::OpenMessage {
             request_id,
@@ -1478,8 +1546,7 @@ async fn handle_command(
                 num_after,
                 account.as_ref(),
                 event_sink,
-            )
-            .await;
+            );
         }
         CoreCommand::SendChannelMessage {
             request_id,
@@ -1690,6 +1757,19 @@ async fn handle_command(
             account.as_ref(),
             event_sink,
         ),
+        CoreCommand::SetNotificationSetting {
+            request_id,
+            account_id,
+            stream_id,
+            enabled,
+        } => set_notification_setting(
+            request_id,
+            &account_id,
+            stream_id,
+            enabled,
+            account.as_ref(),
+            event_sink,
+        ),
         CoreCommand::FetchMessageSource {
             request_id,
             account_id,
@@ -1712,8 +1792,7 @@ async fn handle_command(
                 message_ids,
                 account.as_ref(),
                 event_sink,
-            )
-            .await;
+            );
         }
         CoreCommand::Disconnect { request_id } => {
             disconnect(request_id, account, cache, event_sink);
@@ -1801,6 +1880,36 @@ fn rename_channel(
                 stream_id,
                 name: new_name.trim().to_owned(),
             }),
+            Err(error) => emit_error(Some(request_id), error, &event_sink),
+        }
+    });
+}
+
+fn set_notification_setting(
+    request_id: u64,
+    account_id: &str,
+    stream_id: Option<i64>,
+    enabled: bool,
+    account: Option<&AccountSession>,
+    event_sink: &Arc<dyn CoreEventSink>,
+) {
+    let Some(session) = account.filter(|item| item.account_id == account_id) else {
+        emit_no_session(request_id, event_sink);
+        return;
+    };
+    let messages = Arc::clone(&session.messages);
+    let event_sink = Arc::clone(event_sink);
+    tokio::spawn(async move {
+        let result = match stream_id {
+            Some(stream_id) => {
+                messages
+                    .set_channel_desktop_notifications(stream_id, enabled)
+                    .await
+            }
+            None => messages.set_default_channel_notifications(enabled).await,
+        };
+        match result {
+            Ok(()) => event_sink.handle_event(CoreEvent::NotificationSettingSaved { request_id }),
             Err(error) => emit_error(Some(request_id), error, &event_sink),
         }
     });
@@ -2092,7 +2201,7 @@ fn disconnect(
     event_sink.handle_event(CoreEvent::Disconnected { request_id });
 }
 
-async fn load_older_messages(
+fn load_older_messages(
     request_id: u64,
     key: CoreConversationKey,
     before_message_id: i64,
@@ -2104,28 +2213,31 @@ async fn load_older_messages(
         emit_no_session(request_id, event_sink);
         return;
     };
-    match session
-        .messages
-        .fetch_older_messages(key.target(), before_message_id, limit)
-        .await
-    {
-        Ok(page) => event_sink.handle_event(CoreEvent::ConversationHistoryLoaded {
-            request_id,
-            page: CoreConversationPage {
-                key,
-                messages: page.messages.into_iter().map(Into::into).collect(),
-                found_oldest: page.found_oldest,
-                found_newest: page.found_newest,
-            },
-        }),
-        Err(error) => emit_error(Some(request_id), error, event_sink),
-    }
+    let messages = Arc::clone(&session.messages);
+    let event_sink = Arc::clone(event_sink);
+    tokio::spawn(async move {
+        match messages
+            .fetch_older_messages(key.target(), before_message_id, limit)
+            .await
+        {
+            Ok(page) => event_sink.handle_event(CoreEvent::ConversationHistoryLoaded {
+                request_id,
+                page: CoreConversationPage {
+                    key,
+                    messages: page.messages.into_iter().map(Into::into).collect(),
+                    found_oldest: page.found_oldest,
+                    found_newest: page.found_newest,
+                },
+            }),
+            Err(error) => emit_error(Some(request_id), error, &event_sink),
+        }
+    });
 }
 
-async fn search_messages(
+fn search_messages(
     request_id: u64,
-    account_id: &str,
-    query: &str,
+    account_id: String,
+    query: String,
     limit: u16,
     account: Option<&AccountSession>,
     event_sink: &Arc<dyn CoreEventSink>,
@@ -2134,31 +2246,32 @@ async fn search_messages(
         emit_no_session(request_id, event_sink);
         return;
     };
-    match session.messages.search_messages(query, limit).await {
-        Ok(messages) => {
-            let results = messages
-                .into_iter()
-                .map(|message| CoreSearchResult {
-                    key: conversation_key_for_message(
-                        &session.account_id,
-                        session.own_user_id,
-                        &message,
-                    ),
-                    message: message.into(),
-                })
-                .collect();
-            event_sink.handle_event(CoreEvent::SearchCompleted {
-                request_id,
-                account_id: account_id.to_owned(),
-                results,
-            });
+    let messages = Arc::clone(&session.messages);
+    let own_user_id = session.own_user_id;
+    let event_sink = Arc::clone(event_sink);
+    tokio::spawn(async move {
+        match messages.search_messages(&query, limit).await {
+            Ok(found) => {
+                let results = found
+                    .into_iter()
+                    .map(|message| CoreSearchResult {
+                        key: conversation_key_for_message(&account_id, own_user_id, &message),
+                        message: message.into(),
+                    })
+                    .collect();
+                event_sink.handle_event(CoreEvent::SearchCompleted {
+                    request_id,
+                    account_id,
+                    results,
+                });
+            }
+            Err(error) => emit_error(Some(request_id), error, &event_sink),
         }
-        Err(error) => emit_error(Some(request_id), error, event_sink),
-    }
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn open_message(
+fn open_message(
     request_id: u64,
     key: CoreConversationKey,
     message_id: i64,
@@ -2171,23 +2284,26 @@ async fn open_message(
         emit_no_session(request_id, event_sink);
         return;
     };
-    match session
-        .messages
-        .fetch_message_context(key.target(), message_id, num_before, num_after)
-        .await
-    {
-        Ok(page) => event_sink.handle_event(CoreEvent::MessageFocused {
-            request_id,
-            message_id,
-            page: CoreConversationPage {
-                key,
-                messages: page.messages.into_iter().map(Into::into).collect(),
-                found_oldest: page.found_oldest,
-                found_newest: page.found_newest,
-            },
-        }),
-        Err(error) => emit_error(Some(request_id), error, event_sink),
-    }
+    let messages = Arc::clone(&session.messages);
+    let event_sink = Arc::clone(event_sink);
+    tokio::spawn(async move {
+        match messages
+            .fetch_message_context(key.target(), message_id, num_before, num_after)
+            .await
+        {
+            Ok(page) => event_sink.handle_event(CoreEvent::MessageFocused {
+                request_id,
+                message_id,
+                page: CoreConversationPage {
+                    key,
+                    messages: page.messages.into_iter().map(Into::into).collect(),
+                    found_oldest: page.found_oldest,
+                    found_newest: page.found_newest,
+                },
+            }),
+            Err(error) => emit_error(Some(request_id), error, &event_sink),
+        }
+    });
 }
 
 fn conversation_key_for_message(
@@ -2222,7 +2338,35 @@ fn conversation_key_for_message(
     }
 }
 
-async fn open_conversation(
+/// How long the first attempt to fetch a conversation may take before it is
+/// abandoned and repeated once. A connection the server or network silently
+/// dropped while the app was idle otherwise hangs until the full request
+/// timeout, and the visible conversation would sit in its loading state.
+const FIRST_CONVERSATION_FETCH_ATTEMPT: Duration = Duration::from_secs(6);
+
+/// Fetches the newest messages of a conversation, repeating the request once
+/// on a transport failure or a stalled first attempt.
+async fn fetch_conversation_with_retry(
+    messages: &MessageClient,
+    key: &CoreConversationKey,
+    limit: u16,
+) -> Result<zulip_core::messages::ConversationMessages, zulip_core::messages::MessageApiError> {
+    use zulip_core::messages::MessageApiError;
+
+    match tokio::time::timeout(
+        FIRST_CONVERSATION_FETCH_ATTEMPT,
+        messages.fetch_conversation(key.target(), limit),
+    )
+    .await
+    {
+        Ok(Ok(page)) => return Ok(page),
+        Ok(Err(error)) if !matches!(error, MessageApiError::Transport { .. }) => return Err(error),
+        Ok(Err(_)) | Err(_) => {}
+    }
+    messages.fetch_conversation(key.target(), limit).await
+}
+
+fn open_conversation(
     request_id: u64,
     key: CoreConversationKey,
     limit: u16,
@@ -2237,42 +2381,46 @@ async fn open_conversation(
         }
         return;
     };
-    match session
-        .messages
-        .fetch_conversation(key.target(), limit)
-        .await
-    {
-        Ok(page) => {
-            let cached = CachedConversation {
-                messages: page.messages.clone(),
-                found_oldest: page.found_oldest,
-                found_newest: page.found_newest,
-            };
-            session.cache.with(|database| {
-                database.save_conversation(
-                    key.account_id(),
-                    &key.cache_key(),
-                    &cached,
-                    now_timestamp(),
-                )
-            });
-            event_sink.handle_event(CoreEvent::ConversationOpened {
-                request_id,
-                page: CoreConversationPage {
-                    key,
-                    messages: page.messages.into_iter().map(Into::into).collect(),
+    // The fetch runs beside the actor so that it neither waits behind other
+    // requests nor holds up sync and later commands while the network is slow.
+    let messages = Arc::clone(&session.messages);
+    let session_cache = session.cache.clone();
+    let cache = cache.clone();
+    let event_sink = Arc::clone(event_sink);
+    tokio::spawn(async move {
+        match fetch_conversation_with_retry(&messages, &key, limit).await {
+            Ok(page) => {
+                let cached = CachedConversation {
+                    messages: page.messages.clone(),
                     found_oldest: page.found_oldest,
                     found_newest: page.found_newest,
-                },
-            });
-        }
-        Err(error) => {
-            // A network failure should not blank a conversation we already have.
-            if !emit_cached_conversation(request_id, &key, cache, event_sink) {
-                emit_error(Some(request_id), error, event_sink);
+                };
+                session_cache.with(|database| {
+                    database.save_conversation(
+                        key.account_id(),
+                        &key.cache_key(),
+                        &cached,
+                        now_timestamp(),
+                    )
+                });
+                event_sink.handle_event(CoreEvent::ConversationOpened {
+                    request_id,
+                    page: CoreConversationPage {
+                        key,
+                        messages: page.messages.into_iter().map(Into::into).collect(),
+                        found_oldest: page.found_oldest,
+                        found_newest: page.found_newest,
+                    },
+                });
+            }
+            Err(error) => {
+                // A network failure should not blank a conversation we already have.
+                if !emit_cached_conversation(request_id, &key, &cache, &event_sink) {
+                    emit_error(Some(request_id), error, &event_sink);
+                }
             }
         }
-    }
+    });
 }
 
 /// Reads the cached copy of `key`, if any.
@@ -2454,7 +2602,7 @@ fn normalize_topics(topics: &mut Vec<TopicSummary>) {
     });
 }
 
-async fn mark_read(
+fn mark_read(
     request_id: u64,
     account_id: &str,
     message_ids: Vec<i64>,
@@ -2465,13 +2613,17 @@ async fn mark_read(
         emit_no_session(request_id, event_sink);
         return;
     };
-    match session.messages.mark_read(&message_ids).await {
-        Ok(()) => event_sink.handle_event(CoreEvent::MessagesMarkedRead {
-            request_id,
-            message_ids,
-        }),
-        Err(error) => emit_error(Some(request_id), error, event_sink),
-    }
+    let messages = Arc::clone(&session.messages);
+    let event_sink = Arc::clone(event_sink);
+    tokio::spawn(async move {
+        match messages.mark_read(&message_ids).await {
+            Ok(()) => event_sink.handle_event(CoreEvent::MessagesMarkedRead {
+                request_id,
+                message_ids,
+            }),
+            Err(error) => emit_error(Some(request_id), error, &event_sink),
+        }
+    });
 }
 
 fn emit_pong(request_id: u64, payload: &str, event_sink: &Arc<dyn CoreEventSink>) {
@@ -2788,6 +2940,8 @@ fn cached_snapshot(snapshot: &SyncSnapshot, topics: &[TopicSummary]) -> CachedSn
         realm_icon_url: snapshot.realm_icon_url.clone(),
         recent_direct_conversations: snapshot.recent_direct_conversations.clone(),
         unread: snapshot.unread.clone(),
+        topic_policies: snapshot.topic_policies.clone(),
+        channel_notifications_default: snapshot.channel_notifications_default,
     }
 }
 
@@ -2887,6 +3041,8 @@ fn load_cached_session(
         realm_icon_url: cached.realm_icon_url,
         recent_direct_conversations: cached.recent_direct_conversations,
         unread: cached.unread,
+        topic_policies: cached.topic_policies,
+        channel_notifications_default: cached.channel_notifications_default,
     };
     event_sink.handle_event(CoreEvent::CachedSessionLoaded {
         request_id,
@@ -2955,9 +3111,12 @@ impl From<MessageSummary> for CoreMessage {
                 .into_iter()
                 .map(|reaction| CoreReaction {
                     emoji_name: reaction.emoji_name,
+                    emoji_code: reaction.emoji_code,
+                    reaction_type: reaction.reaction_type,
                     user_id: reaction.user_id,
                 })
                 .collect(),
+            last_edit_timestamp: message.last_edit_timestamp,
         }
     }
 }
@@ -3041,6 +3200,7 @@ impl CoreSnapshot {
                     name: channel.name,
                     color: channel.color,
                     is_muted: channel.is_muted,
+                    desktop_notifications: channel.desktop_notifications,
                 })
                 .collect(),
             topics: topics.iter().cloned().map(Into::into).collect(),
@@ -3052,6 +3212,12 @@ impl CoreSnapshot {
                 .map(Into::into)
                 .collect(),
             unread: snapshot.unread.into_iter().map(Into::into).collect(),
+            topic_policies: snapshot
+                .topic_policies
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            channel_notifications_default: snapshot.channel_notifications_default,
         }
     }
 }
@@ -3079,14 +3245,14 @@ mod tests {
     use super::{
         CoreCommand, CoreContentBlock, CoreConversationKey, CoreEvent, CoreEventSink,
         CoreInlineContent, CoreMessage, CoreMessageFlag, CoreSnapshot, CoreTopicPropagation,
-        RustCoreClient, conversation_key_for_message, typing_key,
+        CoreTopicVisibility, RustCoreClient, conversation_key_for_message, typing_key,
     };
     use tempfile::TempDir;
     use zulip_core::{
         messages::{ConversationTarget, TopicSummary},
         sync::{
-            MessageSummary, RecentDirectConversation, SyncSnapshot, TypingNotice, TypingScope,
-            UnreadBucket,
+            MessageSummary, RecentDirectConversation, SyncSnapshot, TopicPolicy, TopicVisibility,
+            TypingNotice, TypingScope, UnreadBucket,
         },
     };
 
@@ -3226,6 +3392,12 @@ mod tests {
                     count: 4,
                     mention_count: 1,
                 }],
+                topic_policies: vec![TopicPolicy {
+                    stream_id: 5,
+                    topic: "macOS".to_owned(),
+                    visibility: TopicVisibility::Followed,
+                }],
+                channel_notifications_default: true,
             },
             &[TopicSummary {
                 stream_id: 5,
@@ -3248,6 +3420,12 @@ mod tests {
         );
         assert_eq!(snapshot.topics[0].name, "macOS");
         assert_eq!(snapshot.topics[0].max_message_id, 44);
+        assert_eq!(snapshot.topic_policies.len(), 1);
+        assert_eq!(
+            snapshot.topic_policies[0].visibility,
+            CoreTopicVisibility::Followed
+        );
+        assert!(snapshot.channel_notifications_default);
     }
 
     #[test]
@@ -3263,6 +3441,7 @@ mod tests {
             recipient_ids: Vec::new(),
             flags: vec!["read".to_owned()],
             reactions: Vec::new(),
+            last_edit_timestamp: None,
         };
         assert_eq!(
             conversation_key_for_message("account-1", 9, &topic_message),
@@ -3323,9 +3502,11 @@ mod tests {
             recipient_ids: Vec::new(),
             flags: vec!["read".to_owned()],
             reactions: Vec::new(),
+            last_edit_timestamp: Some(1_770_000_050),
         };
 
         let mapped = CoreMessage::from(message);
+        assert_eq!(mapped.last_edit_timestamp, Some(1_770_000_050));
         let CoreContentBlock::Paragraph { content } = &mapped.content[0] else {
             panic!("expected a paragraph, got {:?}", mapped.content);
         };

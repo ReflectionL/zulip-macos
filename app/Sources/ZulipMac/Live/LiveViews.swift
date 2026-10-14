@@ -227,6 +227,14 @@ private struct LiveWindowView: View {
                     renameChannel: { channel in
                         channelRenameTarget = channel
                     },
+                    setChannelNotifications: { channel, enabled in
+                        session.setChannelNotifications(
+                            streamID: channel.streamID,
+                            enabled: enabled
+                        )
+                    },
+                    notifiesForAllChannels: session.channelNotificationsDefault,
+                    setNotifiesForAllChannels: session.setChannelNotificationsDefault,
                     presenceDescription: { userID in
                         session.presenceDescription(forUserID: userID)
                     },
@@ -409,8 +417,8 @@ private struct LiveWindowView: View {
                 deleteMessage: { message in
                     session.deleteMessage(message)
                 },
-                reactToMessage: { message in
-                    session.toggleThumbsUp(message)
+                reactToMessage: { message, target in
+                    session.toggleReaction(message, target)
                 },
                 starMessage: { message in
                     session.toggleStar(message)
@@ -438,6 +446,9 @@ private struct LiveWindowView: View {
                 attachmentInsertion: session.attachmentInsertion,
                 uploadAttachment: { url in
                     session.uploadAttachment(url, to: page.key)
+                },
+                uploadDroppedFiles: { urls in
+                    session.uploadDroppedFiles(urls, to: page.key)
                 },
                 retryAttachmentUpload: session.retryAttachmentUpload,
                 consumeAttachmentInsertion: session.consumeAttachmentInsertion,
@@ -477,7 +488,8 @@ private struct LiveWindowView: View {
                 title: title,
                 subtitle: subtitle,
                 symbol: "exclamationmark.triangle",
-                message: message
+                message: message,
+                retry: session.retryOpenConversation
             )
         }
     }
@@ -811,13 +823,18 @@ private struct LivePlaceholder: View {
     let subtitle: String
     let symbol: String
     let message: String
+    var retry: (() -> Void)?
 
     var body: some View {
-        ContentUnavailableView(
-            title,
-            systemImage: symbol,
-            description: Text(message)
-        )
+        ContentUnavailableView {
+            Label(title, systemImage: symbol)
+        } description: {
+            Text(message)
+        } actions: {
+            if let retry {
+                Button("Try Again", action: retry)
+            }
+        }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(AppTheme.Colors.canvas)
         .conversationToolbar(

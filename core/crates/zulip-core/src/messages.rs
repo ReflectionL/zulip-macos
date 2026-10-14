@@ -19,6 +19,8 @@ const PRESENCE_PATH: &str = "api/v1/users/me/presence";
 const TYPING_PATH: &str = "api/v1/typing";
 const STREAMS_PATH_PREFIX: &str = "api/v1/streams";
 const SUBSCRIPTIONS_PATH: &str = "api/v1/users/me/subscriptions";
+const SUBSCRIPTION_PROPERTIES_PATH: &str = "api/v1/users/me/subscriptions/properties";
+const SETTINGS_PATH: &str = "api/v1/settings";
 const MAX_CHANNEL_NAME_CHARS: usize = 60;
 const MAX_CHANNEL_DESCRIPTION_CHARS: usize = 1_024;
 const MAX_CHANNEL_MEMBERS: usize = 1_000;
@@ -760,6 +762,65 @@ impl MessageClient {
         document.validate_result()
     }
 
+    /// Turns desktop notifications for every message of one channel on or off
+    /// (the subscription's `desktop_notifications` property).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageApiError`] for an invalid channel identifier, transport,
+    /// rejection, size, or response failures.
+    pub async fn set_channel_desktop_notifications(
+        &self,
+        stream_id: i64,
+        enabled: bool,
+    ) -> Result<(), MessageApiError> {
+        if stream_id <= 0 {
+            return Err(MessageApiError::InvalidInput);
+        }
+        let subscription_data = serde_json::json!([{
+            "stream_id": stream_id,
+            "property": "desktop_notifications",
+            "value": enabled,
+        }])
+        .to_string();
+        let response = self
+            .http
+            .post(self.base_url.endpoint(SUBSCRIPTION_PROPERTIES_PATH))
+            .basic_auth(&self.email, Some(self.api_key.expose_secret()))
+            .form(&[("subscription_data", subscription_data)])
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let document: ApiResultDocument =
+            decode_response(response, MAX_WRITE_RESPONSE_BYTES).await?;
+        document.validate_result()
+    }
+
+    /// Sets the account-wide default for desktop notifications about every
+    /// message in channels that have no setting of their own
+    /// (`enable_stream_desktop_notifications`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageApiError`] for transport, rejection, size, or response
+    /// failures.
+    pub async fn set_default_channel_notifications(
+        &self,
+        enabled: bool,
+    ) -> Result<(), MessageApiError> {
+        let response = self
+            .http
+            .patch(self.base_url.endpoint(SETTINGS_PATH))
+            .basic_auth(&self.email, Some(self.api_key.expose_secret()))
+            .form(&[("enable_stream_desktop_notifications", enabled.to_string())])
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let document: ApiResultDocument =
+            decode_response(response, MAX_WRITE_RESPONSE_BYTES).await?;
+        document.validate_result()
+    }
+
     /// Fetches the original Markdown source of one visible message, as needed
     /// to quote or forward it.
     ///
@@ -1248,6 +1309,8 @@ struct MessageDocument {
     flags: Vec<String>,
     #[serde(default)]
     reactions: Vec<crate::sync::ReactionDocument>,
+    #[serde(default)]
+    last_edit_timestamp: Option<i64>,
 }
 
 impl MessageDocument {
@@ -1286,6 +1349,7 @@ impl MessageDocument {
                 .into_iter()
                 .filter_map(crate::sync::ReactionDocument::normalize)
                 .collect(),
+            last_edit_timestamp: self.last_edit_timestamp,
         })
     }
 }
@@ -1387,7 +1451,8 @@ mod tests {
                         "subject":"Rust core",
                         "display_recipient":"engineering",
                         "flags":["read","starred"],
-                        "reactions":[{"emoji_name":"thumbs_up","user_id":7}]
+                        "last_edit_timestamp":1770000090,
+                        "reactions":[{"emoji_name":"thumbs_up","emoji_code":"1f44d","reaction_type":"unicode_emoji","user_id":7}]
                     }]
                 }"#
                 .to_owned(),
@@ -1416,6 +1481,8 @@ mod tests {
         assert_eq!(page.messages[0].content_html, "<p>Hello</p>");
         assert_eq!(page.messages[0].flags, vec!["read", "starred"]);
         assert_eq!(page.messages[0].reactions[0].emoji_name, "thumbs_up");
+        assert_eq!(page.messages[0].reactions[0].emoji_code, "1f44d");
+        assert_eq!(page.messages[0].last_edit_timestamp, Some(1_770_000_090));
         assert!(page.found_oldest && page.found_newest);
 
         let message_id = client
@@ -1603,6 +1670,58 @@ mod tests {
         ));
         assert!(matches!(
             client.rename_channel(5, "  ").await,
+            Err(MessageApiError::InvalidInput)
+        ));
+    }
+
+    #[tokio::test]
+    async fn notification_settings_are_written_to_the_server() {
+        let responses = vec![
+            (
+                StatusCode::OK,
+                r#"{"result":"success","msg":""}"#.to_owned(),
+            ),
+            (
+                StatusCode::OK,
+                r#"{"result":"success","msg":""}"#.to_owned(),
+            ),
+            (
+                StatusCode::BAD_REQUEST,
+                r#"{"result":"error","code":"BAD_REQUEST","msg":"Invalid stream id"}"#.to_owned(),
+            ),
+        ];
+        let (server, requests) = spawn_mock(responses);
+        let client = MessageClient::new(&server, "maya@example.com", SecretString::new(API_KEY))
+            .expect("message client");
+
+        client
+            .set_channel_desktop_notifications(5, true)
+            .await
+            .expect("channel setting");
+        let request = requests.recv().expect("channel request");
+        assert!(request.starts_with("POST /api/v1/users/me/subscriptions/properties HTTP/1.1"));
+        assert!(request.contains("subscription_data="));
+        assert!(request.contains("desktop_notifications"));
+        assert!(request.contains("%22stream_id%22%3A5"));
+        assert!(request.contains("%22value%22%3Atrue"));
+        assert!(!request.contains(API_KEY));
+
+        client
+            .set_default_channel_notifications(false)
+            .await
+            .expect("default setting");
+        let request = requests.recv().expect("default request");
+        assert!(request.starts_with("PATCH /api/v1/settings HTTP/1.1"));
+        assert!(request.contains("enable_stream_desktop_notifications=false"));
+
+        assert!(
+            client
+                .set_channel_desktop_notifications(9, false)
+                .await
+                .is_err()
+        );
+        assert!(matches!(
+            client.set_channel_desktop_notifications(0, true).await,
             Err(MessageApiError::InvalidInput)
         ));
     }

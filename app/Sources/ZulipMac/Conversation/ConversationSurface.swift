@@ -19,7 +19,7 @@ struct ConversationSurface: View {
     var moveMessage: ((MessageViewData) -> Void)?
     var editMessage: ((MessageViewData, String) -> Bool)?
     var deleteMessage: ((MessageViewData) -> Bool)?
-    var reactToMessage: ((MessageViewData) -> Bool)?
+    var reactToMessage: ((MessageViewData, ReactionTarget) -> Bool)?
     var starMessage: ((MessageViewData) -> Bool)?
     var setMessageRead: ((MessageViewData, Bool) -> Bool)?
     var retryMessageAction: ((MessageViewData) -> Void)?
@@ -31,6 +31,8 @@ struct ConversationSurface: View {
     var attachmentUploadState = AttachmentUploadState.idle
     var attachmentInsertion: ComposerAttachmentInsertion?
     var uploadAttachment: ((URL) -> Void)?
+    /// Files dropped onto the conversation; the first uploads now, the rest queue.
+    var uploadDroppedFiles: (([URL]) -> Void)?
     var retryAttachmentUpload: (() -> Void)?
     var consumeAttachmentInsertion: ((UInt64) -> Void)?
     var mediaLocalURLs: [String: String] = [:]
@@ -55,6 +57,7 @@ struct ConversationSurface: View {
     @State private var forwardingMessage: MessageViewData?
     @State private var pendingQuote: ComposerQuote?
     @State private var isChoosingAttachment = false
+    @State private var isDropTargeted = false
     @FocusState private var isComposerFocused: Bool
 
     init(
@@ -73,7 +76,7 @@ struct ConversationSurface: View {
         moveMessage: ((MessageViewData) -> Void)? = nil,
         editMessage: ((MessageViewData, String) -> Bool)? = nil,
         deleteMessage: ((MessageViewData) -> Bool)? = nil,
-        reactToMessage: ((MessageViewData) -> Bool)? = nil,
+        reactToMessage: ((MessageViewData, ReactionTarget) -> Bool)? = nil,
         starMessage: ((MessageViewData) -> Bool)? = nil,
         setMessageRead: ((MessageViewData, Bool) -> Bool)? = nil,
         retryMessageAction: ((MessageViewData) -> Void)? = nil,
@@ -85,6 +88,7 @@ struct ConversationSurface: View {
         attachmentUploadState: AttachmentUploadState = .idle,
         attachmentInsertion: ComposerAttachmentInsertion? = nil,
         uploadAttachment: ((URL) -> Void)? = nil,
+        uploadDroppedFiles: (([URL]) -> Void)? = nil,
         retryAttachmentUpload: (() -> Void)? = nil,
         consumeAttachmentInsertion: ((UInt64) -> Void)? = nil,
         mediaLocalURLs: [String: String] = [:],
@@ -125,6 +129,7 @@ struct ConversationSurface: View {
         self.attachmentUploadState = attachmentUploadState
         self.attachmentInsertion = attachmentInsertion
         self.uploadAttachment = uploadAttachment
+        self.uploadDroppedFiles = uploadDroppedFiles
         self.retryAttachmentUpload = retryAttachmentUpload
         self.consumeAttachmentInsertion = consumeAttachmentInsertion
         self.mediaLocalURLs = mediaLocalURLs
@@ -192,11 +197,11 @@ struct ConversationSurface: View {
                                     message: message,
                                     isContinuation: continuations.contains(message.id),
                                     isFocusedSearchResult: page.focusedMessageID == message.id,
-                                    toggleReaction: {
+                                    react: { target in
                                         if let reactToMessage {
-                                            _ = reactToMessage(message)
+                                            _ = reactToMessage(message, target)
                                         } else {
-                                            toggleReaction(for: message.id)
+                                            toggleReaction(target, for: message.id)
                                         }
                                     },
                                     toggleStar: {
@@ -330,6 +335,32 @@ struct ConversationSurface: View {
             .animation(.easeOut(duration: 0.15), value: typingDescription)
         }
         .background(AppTheme.Colors.canvas)
+        .dropDestination(for: URL.self) { urls, _ in
+            guard let uploadDroppedFiles, !isOffline, !urls.isEmpty else {
+                return false
+            }
+            uploadDroppedFiles(urls)
+            return true
+        } isTargeted: { targeted in
+            isDropTargeted = targeted && uploadDroppedFiles != nil && !isOffline
+        }
+        .overlay {
+            if isDropTargeted {
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 3, dash: [8]))
+                    .background(Color.accentColor.opacity(0.08))
+                    .overlay {
+                        Label("Drop to upload", systemImage: "arrow.up.doc")
+                            .font(.headline)
+                            .padding(AppTheme.Spacing.large)
+                            .background(.regularMaterial, in: Capsule())
+                    }
+                    .padding(AppTheme.Spacing.small)
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.12), value: isDropTargeted)
         .conversationToolbar(
             title: page.title,
             subtitle: page.subtitle,
@@ -439,11 +470,12 @@ struct ConversationSurface: View {
         messages.first(where: { $0.id == messageID })?.rowID ?? messageID
     }
 
-    private func toggleReaction(for messageID: Int64) {
+    private func toggleReaction(_ target: ReactionTarget, for messageID: Int64) {
         guard let index = messages.firstIndex(where: { $0.id == messageID }) else {
             return
         }
-        messages[index].reactionCount = messages[index].reactionCount == 0 ? 1 : 0
+        let add = messages[index].reaction(matching: target)?.includesMe != true
+        messages[index].applyReaction(target, add: add)
     }
 
     private func toggleStar(for messageID: Int64) {
@@ -661,7 +693,7 @@ private struct MessageRow: View {
     let message: MessageViewData
     let isContinuation: Bool
     let isFocusedSearchResult: Bool
-    let toggleReaction: () -> Void
+    let react: (ReactionTarget) -> Void
     let toggleStar: () -> Void
     let moveToTopic: (() -> Void)?
     let edit: (() -> Void)?
@@ -678,6 +710,7 @@ private struct MessageRow: View {
     var readers: [ReadReceiptReader] = []
 
     @State private var isHovered = false
+    @State private var isPickingReaction = false
 
     var body: some View {
         HStack(alignment: .top, spacing: AppTheme.Spacing.medium) {
@@ -732,17 +765,19 @@ private struct MessageRow: View {
                     )
                 }
 
-                if message.reactionCount > 0 {
-                    Button(action: toggleReaction) {
-                        Text("👍 \(message.reactionCount)")
-                            .font(AppTheme.Typography.metadata)
-                            .padding(.horizontal, 7)
-                            .frame(height: 24)
-                            .background(AppTheme.Colors.hover)
-                            .clipShape(Capsule())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Thumbs up, \(message.reactionCount) reactions")
+                if let editedAt = message.editedAt, !showsPlaceholder {
+                    Text("(edited)")
+                        .font(AppTheme.Typography.metadata)
+                        .foregroundStyle(AppTheme.Colors.tertiaryText)
+                        .help("Edited \(editedAt.formatted(date: .abbreviated, time: .shortened))")
+                }
+
+                if !message.reactions.isEmpty {
+                    ReactionChips(
+                        reactions: message.reactions,
+                        isDisabled: message.actionState.isPending || message.deliveryState != .sent,
+                        react: react
+                    )
                 }
 
                 if message.deliveryState == .failed {
@@ -813,7 +848,9 @@ private struct MessageRow: View {
         .overlay(alignment: .topTrailing) {
             MessageActions(
                 isStarred: message.isStarred,
-                toggleReaction: toggleReaction,
+                isPickingReaction: $isPickingReaction,
+                reactions: message.reactions,
+                react: react,
                 toggleStar: toggleStar,
                 moveToTopic: moveToTopic,
                 edit: edit,
@@ -826,15 +863,15 @@ private struct MessageRow: View {
             )
             .padding(.top, 4)
             .padding(.trailing, AppTheme.Spacing.small)
-            .opacity(isHovered ? 1 : 0)
-            .accessibilityHidden(!isHovered)
+            .opacity(isHovered || isPickingReaction ? 1 : 0)
+            .accessibilityHidden(!isHovered && !isPickingReaction)
         }
         .onHover { isHovered = $0 }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(message.senderName), \(message.plainText)")
         .accessibilityHint(isFocusedSearchResult ? "Selected search result" : "")
         .accessibilityAction(named: "React") {
-            toggleReaction()
+            isPickingReaction = true
         }
         .accessibilityAction(named: message.isStarred ? "Unstar" : "Star") {
             toggleStar()
@@ -909,7 +946,9 @@ private struct MessageRow: View {
 
 private struct MessageActions: View {
     let isStarred: Bool
-    let toggleReaction: () -> Void
+    @Binding var isPickingReaction: Bool
+    let reactions: [MessageReaction]
+    let react: (ReactionTarget) -> Void
     let toggleStar: () -> Void
     let moveToTopic: (() -> Void)?
     let edit: (() -> Void)?
@@ -925,8 +964,14 @@ private struct MessageActions: View {
             actionButton(
                 title: "React",
                 systemImage: "face.smiling",
-                action: toggleReaction
+                action: { isPickingReaction = true }
             )
+            .popover(isPresented: $isPickingReaction, arrowEdge: .bottom) {
+                ReactionPicker(existing: reactions) { target in
+                    isPickingReaction = false
+                    react(target)
+                }
+            }
             actionButton(
                 title: isStarred ? "Unstar" : "Star",
                 systemImage: isStarred ? "star.fill" : "star",
@@ -1117,11 +1162,20 @@ private struct ComposerView: View {
     @State private var dismissedMentionDraft: String?
     @State private var pendingCaretOffset: Int?
 
-    private var caret: String.Index {
-        if let selection, case let .selection(range) = selection.indices {
-            return min(range.upperBound, draft.endIndex)
+    /// The selection clamped to the current draft. `selection` can lag behind
+    /// `draft` (after a send clears it, a conversation switch or a programmatic
+    /// edit), and a stale index used for a mutation traps.
+    private var selectedRange: Range<String.Index> {
+        guard let selection, case let .selection(range) = selection.indices else {
+            return draft.endIndex..<draft.endIndex
         }
-        return draft.endIndex
+        let lower = min(max(range.lowerBound, draft.startIndex), draft.endIndex)
+        let upper = min(max(range.upperBound, lower), draft.endIndex)
+        return lower..<upper
+    }
+
+    private var caret: String.Index {
+        selectedRange.upperBound
     }
 
     /// The `@` being typed with its matching people, if any.
@@ -1240,15 +1294,21 @@ private struct ComposerView: View {
 
     /// Return sends; Shift+Return or Option+Return inserts a line break at the
     /// caret (or replaces the selection).
+    ///
+    /// The field editor does the insertion itself, so the caret and selection
+    /// stay consistent with the text. Writing `draft` and `selection` together
+    /// from here made AppKit apply a caret that was past the end of the not yet
+    /// updated text, which crashed.
     private func insertLineBreak() {
-        guard let selection, case let .selection(range) = selection.indices else {
-            draft.append("\n")
+        if let editor = NSApp.keyWindow?.firstResponder as? NSTextView {
+            editor.insertNewlineIgnoringFieldEditor(nil)
             return
         }
+        let range = selectedRange
         let offset = draft.distance(from: draft.startIndex, to: range.lowerBound)
         draft.replaceSubrange(range, with: "\n")
-        let caret = draft.index(draft.startIndex, offsetBy: offset + 1)
-        self.selection = TextSelection(insertionPoint: caret)
+        // The caret moves once the field has taken the new text.
+        pendingCaretOffset = offset + 1
     }
 
     var body: some View {

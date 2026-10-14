@@ -4,6 +4,7 @@ use std::{
     fmt::Write as _,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
 };
 
 use futures_util::StreamExt;
@@ -24,7 +25,7 @@ use url::Url;
 
 use crate::{
     auth::SecretString,
-    server::{DEFAULT_REQUEST_TIMEOUT, ServerBaseUrl, ServerUrlError, secure_http_client},
+    server::{DEFAULT_REQUEST_TIMEOUT, ServerBaseUrl, ServerUrlError, secure_transfer_client},
 };
 
 const UPLOAD_PATH: &str = "api/v1/user_uploads";
@@ -38,6 +39,9 @@ const AVATAR_ROUTE_PREFIX: &str = "/user_avatars/";
 /// Where the server proxies images linked from other sites; no credentials needed.
 const EXTERNAL_CONTENT_ROUTE_PREFIX: &str = "/external_content/";
 const MAX_JSON_BYTES: usize = 1_048_576;
+/// Deadline for a whole picture download or file upload; a stalled connection
+/// is cut off much sooner by the client's read timeout.
+const TRANSFER_DEADLINE: Duration = Duration::from_mins(3);
 const MAX_FILENAME_BYTES: usize = 1_024;
 static TEMPORARY_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -106,6 +110,12 @@ pub enum MediaError {
     /// A response was malformed or requested an unsafe route.
     #[error("the server returned an invalid attachment response")]
     InvalidResponse,
+    /// The server would not hand out a download link for an uploaded file.
+    #[error("the server gave no download link ({0})")]
+    LinkUnavailable(String),
+    /// The download itself was refused.
+    #[error("the picture download was refused (HTTP {0})")]
+    DownloadRefused(u16),
     /// The download was a web page or JSON document, not a picture.
     #[error("the server sent a web page instead of the image (content type {0})")]
     NotAnImage(String),
@@ -150,8 +160,7 @@ impl MediaClient {
         {
             return Err(MediaError::InvalidInput);
         }
-        let http = secure_http_client(Some(DEFAULT_REQUEST_TIMEOUT))
-            .map_err(|message| MediaError::Transport { message })?;
+        let http = secure_transfer_client().map_err(|message| MediaError::Transport { message })?;
         let account_partition = sha256_hex(account_id.as_bytes());
         Ok(Self {
             http,
@@ -197,6 +206,7 @@ impl MediaClient {
         let response = self
             .http
             .post(self.base_url.endpoint(UPLOAD_PATH))
+            .timeout(TRANSFER_DEADLINE)
             .basic_auth(&self.email, Some(self.api_key.expose_secret()))
             .multipart(Form::new().part("filename", part))
             .send()
@@ -259,21 +269,29 @@ impl MediaClient {
         let response = self
             .http
             .get(self.base_url.endpoint(&api_path))
+            .timeout(DEFAULT_REQUEST_TIMEOUT)
             .basic_auth(&self.email, Some(self.api_key.expose_secret()))
             .send()
             .await
             .map_err(transport_error)?;
-        let document: TemporaryUrlDocument = decode_json(response).await?;
-        document.validate_result()?;
-        let temporary_url = self.validated_temporary_url(&document.url)?;
+        let document: TemporaryUrlDocument = decode_json(response)
+            .await
+            .map_err(|error| MediaError::LinkUnavailable(error.to_string()))?;
+        document
+            .validate_result()
+            .map_err(|error| MediaError::LinkUnavailable(error.to_string()))?;
+        let temporary_url = self
+            .validated_temporary_url(&document.url)
+            .map_err(|error| MediaError::LinkUnavailable(error.to_string()))?;
         let response = self
             .http
             .get(temporary_url)
+            .timeout(TRANSFER_DEADLINE)
             .send()
             .await
             .map_err(transport_error)?;
         if !response.status().is_success() {
-            return Err(MediaError::HttpStatus(response.status().as_u16()));
+            return Err(MediaError::DownloadRefused(response.status().as_u16()));
         }
         if response
             .content_length()
@@ -309,9 +327,15 @@ impl MediaClient {
             return cached_media(key, final_path, None, byte_count, true);
         }
 
-        let response = self.http.get(url).send().await.map_err(transport_error)?;
+        let response = self
+            .http
+            .get(url)
+            .timeout(TRANSFER_DEADLINE)
+            .send()
+            .await
+            .map_err(transport_error)?;
         if !response.status().is_success() {
-            return Err(MediaError::HttpStatus(response.status().as_u16()));
+            return Err(MediaError::DownloadRefused(response.status().as_u16()));
         }
         if response
             .content_length()
@@ -463,6 +487,7 @@ impl MediaClient {
         } else {
             Url::parse(input).map_err(|_| MediaError::InvalidInput)?
         };
+        let url = original_upload_url(url);
         if !same_origin(&url, self.base_url.as_str())
             || !url.username().is_empty()
             || url.password().is_some()
@@ -655,6 +680,36 @@ fn markdown_url(url: &str) -> String {
     url.replace('(', "%28").replace(')', "%29")
 }
 
+/// Maps a picture preview route to the uploaded file it was made from.
+///
+/// Message content can point at a preview instead of the upload: Zulip 9 and
+/// later use `/user_uploads/thumbnail/<realm>/<xx>/<id>/<name>/<size>.webp`,
+/// older servers `/thumbnail?url=user_uploads%2F…&size=…`. The API only hands out
+/// download links for the upload itself, so the preview route is translated to it.
+/// Any other URL is returned unchanged.
+fn original_upload_url(mut url: Url) -> Url {
+    const THUMBNAIL_PREFIX: &str = "/user_uploads/thumbnail/";
+    let original_path = if url.path() == "/thumbnail" {
+        url.query_pairs()
+            .find(|(name, _)| name == "url")
+            .map(|(_, value)| value.trim_start_matches('/').to_owned())
+            .filter(|target| target.starts_with("user_uploads/") && !target.contains('?'))
+            .map(|target| format!("/{target}"))
+    } else {
+        url.path().strip_prefix(THUMBNAIL_PREFIX).and_then(|rest| {
+            // realm, two-character prefix, random id, file name, then the size.
+            let segments: Vec<&str> = rest.split('/').collect();
+            (segments.len() >= 5)
+                .then(|| format!("/user_uploads/{}", segments[..segments.len() - 1].join("/")))
+        })
+    };
+    if let Some(path) = original_path {
+        url.set_path(&path);
+        url.set_query(None);
+    }
+    url
+}
+
 fn same_origin(url: &Url, base: &str) -> bool {
     let Ok(base) = Url::parse(base) else {
         return false;
@@ -837,6 +892,42 @@ mod tests {
             tokio::fs::read(local_path).await.expect("cached bytes"),
             b"fixture-png"
         );
+    }
+
+    #[tokio::test]
+    async fn preview_routes_load_the_upload_they_were_made_from() {
+        let responses = vec![
+            MockResponse::json(
+                StatusCode::OK,
+                r#"{"result":"success","url":"/user_uploads/temporary/token/image.png"}"#,
+            ),
+            MockResponse::bytes(StatusCode::OK, "image/png", b"fixture-png".to_vec()),
+            MockResponse::json(
+                StatusCode::OK,
+                r#"{"result":"success","url":"/user_uploads/temporary/token/other.png"}"#,
+            ),
+            MockResponse::bytes(StatusCode::OK, "image/png", b"fixture-png-2".to_vec()),
+        ];
+        let (server, requests) = spawn_mock(responses);
+        let fixture = TempDir::new().expect("fixture directory");
+        let client = media_client(&server, &fixture, "account-a");
+
+        let modern = client
+            .load_media("/user_uploads/thumbnail/1/ab/cd/image.png/840x560.webp")
+            .await
+            .expect("modern preview route");
+        assert_eq!(modern.remote_url, "/user_uploads/1/ab/cd/image.png");
+        let resolution = requests.recv().expect("temporary URL request");
+        assert!(resolution.starts_with("GET /api/v1/user_uploads/1/ab/cd/image.png HTTP/1.1"));
+        let _ = requests.recv().expect("download");
+
+        let legacy = client
+            .load_media("/thumbnail?url=user_uploads%2F1%2Fef%2Fgh%2Fother.png&size=thumbnail")
+            .await
+            .expect("legacy preview route");
+        assert_eq!(legacy.remote_url, "/user_uploads/1/ef/gh/other.png");
+        let resolution = requests.recv().expect("temporary URL request");
+        assert!(resolution.starts_with("GET /api/v1/user_uploads/1/ef/gh/other.png HTTP/1.1"));
     }
 
     #[tokio::test]

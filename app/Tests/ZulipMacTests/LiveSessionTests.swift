@@ -942,6 +942,79 @@ struct LiveSessionTests {
         await eventually { model.channelRenameState == .renamed(name: "platform") }
     }
 
+    @Test("Notification settings are written to Zulip and a refusal is reported quietly")
+    func notificationSettings() async {
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(client: core, credentialStore: MemoryCredentialStore())
+        model.startObserving()
+        let accountID = "account-1"
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: accountID),
+                credential: StoredAPICredential(accountID: accountID, apiKey: "key"),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.connectionState == .connected }
+
+        model.setChannelNotifications(streamID: 5, enabled: true)
+        guard case let .setNotificationSetting(requestID, commandAccountID, 5, true) = core.commands.last
+        else {
+            Issue.record("Expected a channel notification command")
+            return
+        }
+        #expect(commandAccountID == accountID)
+        core.emit(.failed(requestID: requestID, message: "not allowed"))
+        await eventually { model.notice?.contains("not allowed") == true }
+        #expect(model.connectionState == .connected, "a refused setting is not a connection failure")
+
+        model.setChannelNotificationsDefault(true)
+        guard case let .setNotificationSetting(secondRequestID, _, nil, true) = core.commands.last else {
+            Issue.record("Expected an account default notification command")
+            return
+        }
+        core.emit(.notificationSettingSaved(requestID: secondRequestID))
+        #expect(model.connectionState == .connected)
+    }
+
+    @Test("A conversation whose first page cannot be fetched offers a retry instead of loading forever")
+    func failedFirstPageShowsFailure() async {
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(client: core, credentialStore: MemoryCredentialStore())
+        model.startObserving()
+        let accountID = "account-1"
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: accountID),
+                credential: StoredAPICredential(accountID: accountID, apiKey: "key"),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.connectionState == .connected }
+
+        model.openConversation(.channel(accountID: accountID, streamID: 5))
+        guard case let .openConversation(requestID, _, _) = core.commands.last else {
+            Issue.record("Expected an open-conversation command")
+            return
+        }
+        core.emit(.failed(requestID: requestID, message: "could not communicate with the Zulip server"))
+        await eventually {
+            if case .failure = model.conversationState { return true }
+            return false
+        }
+        #expect(model.connectionState == .connected, "a failed page is not a lost connection")
+
+        model.retryOpenConversation()
+        if case .openConversation = core.commands.last {} else {
+            Issue.record("Retrying must ask for the page again")
+        }
+        if case .loading = model.conversationState {} else {
+            Issue.record("Retrying shows the loading state again")
+        }
+    }
+
     @Test("Reopening a conversation seen this session paints at once without a loading state")
     func reopenedConversationSkipsLoading() async {
         let core = RecordingCoreClient()
@@ -1387,6 +1460,71 @@ struct LiveSessionTests {
         #expect(core.commands.filter { if case .uploadAttachment = $0 { true } else { false } }.count == 3)
     }
 
+    @Test("Dropped files upload one at a time and a failure clears the queue")
+    func droppedFilesQueue() async throws {
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(
+            client: core,
+            credentialStore: MemoryCredentialStore()
+        )
+        model.startObserving()
+        let accountID = "account-drop"
+        let key = ConversationKey.topic(accountID: accountID, streamID: 5, topic: "macOS")
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: accountID),
+                credential: StoredAPICredential(accountID: accountID, apiKey: "key"),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.connectionState == .connected }
+        model.openConversation(key)
+
+        func uploadCount() -> Int {
+            core.commands.filter { if case .uploadAttachment = $0 { true } else { false } }.count
+        }
+
+        model.uploadDroppedFiles([URL(string: "https://example.com/a.png")!], to: key)
+        #expect(uploadCount() == 0)
+        #expect(model.notice != nil)
+
+        let first = URL(fileURLWithPath: "/tmp/drop-one.png")
+        let second = URL(fileURLWithPath: "/tmp/drop-two.png")
+        let third = URL(fileURLWithPath: "/tmp/drop-three.png")
+        model.uploadDroppedFiles([first, second, third], to: key)
+        #expect(uploadCount() == 1)
+        guard case let .uploadAttachment(firstID, _, _, firstName) = core.commands.last else {
+            Issue.record("Expected first upload command")
+            return
+        }
+        #expect(firstName == "drop-one.png")
+
+        core.emit(
+            .attachmentUploaded(
+                requestID: firstID,
+                attachment: LiveUploadedAttachment(
+                    accountID: accountID,
+                    filename: firstName,
+                    url: "/user_uploads/1/ab/one.png",
+                    markdown: "[drop-one.png](/user_uploads/1/ab/one.png)"
+                )
+            )
+        )
+        await eventually { uploadCount() == 2 }
+        guard case let .uploadAttachment(secondID, _, _, secondName) = core.commands.last else {
+            Issue.record("Expected second upload command")
+            return
+        }
+        #expect(secondName == "drop-two.png")
+
+        core.emit(.failed(requestID: secondID, message: "too large"))
+        await eventually {
+            model.attachmentUploadState == .failed(filename: secondName, message: "too large")
+        }
+        #expect(uploadCount() == 2)
+    }
+
     @Test("Media requests deduplicate, cache local URLs, and retry failures")
     func mediaState() async throws {
         let core = RecordingCoreClient()
@@ -1578,7 +1716,9 @@ struct LiveSessionTests {
         #expect(loadedMessage(model)?.isStarred == true)
 
         let starred = try #require(loadedMessage(model))
-        #expect(model.toggleThumbsUp(starred))
+        let thumbsUp = ReactionTarget(name: "thumbs_up", code: "1f44d")
+        #expect(model.toggleReaction(starred, thumbsUp))
+        #expect(loadedMessage(model)?.reactions.first?.includesMe == true)
         guard case let .updateReaction(reactionID, _, 44, "thumbs_up", true) = core.commands.last
         else {
             Issue.record("Expected reaction command")
@@ -1593,7 +1733,7 @@ struct LiveSessionTests {
             )
         )
         await eventually { self.loadedMessage(model)?.actionState == .idle }
-        #expect(loadedMessage(model)?.reactionCount == 1)
+        #expect(loadedMessage(model)?.reactions.map(\.count) == [1])
 
         let reacted = try #require(loadedMessage(model))
         #expect(model.editMessage(reacted, content: "Edited"))

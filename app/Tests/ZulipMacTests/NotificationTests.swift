@@ -54,6 +54,111 @@ struct NotificationTests {
         )
     }
 
+    @Test("A channel set to notify announces every message; the account default applies otherwise")
+    func followsChannelNotificationSettings() {
+        var planner = NotificationPlanner()
+        planner.prime(with: snapshot([]))
+        let chatty = planner.plan(
+            snapshot: snapshot(
+                [message(id: 2, direct: false, text: "plain chatter")],
+                channelNotifications: true
+            ),
+            identity: identity
+        )
+        #expect(chatty.map(\.route.messageID) == [2])
+
+        let optedOut = planner.plan(
+            snapshot: snapshot(
+                [message(id: 2, direct: false), message(id: 3, direct: false)],
+                channelNotifications: false,
+                channelNotificationsDefault: true
+            ),
+            identity: identity
+        )
+        #expect(optedOut.isEmpty, "the channel's own choice beats the account default")
+
+        let defaulted = planner.plan(
+            snapshot: snapshot(
+                [message(id: 2, direct: false), message(id: 3, direct: false), message(id: 4, direct: false)],
+                channelNotificationsDefault: true
+            ),
+            identity: identity
+        )
+        #expect(defaulted.map(\.route.messageID) == [4])
+    }
+
+    @Test("Muted channels and topics stay quiet, followed topics always notify")
+    func respectsMutedAndFollowedTopics() {
+        var planner = NotificationPlanner()
+        planner.prime(with: snapshot([]))
+
+        let mutedTopic = planner.plan(
+            snapshot: snapshot(
+                [message(id: 2, direct: false, flags: ["mentioned"])],
+                channelNotifications: true,
+                topicPolicies: [LiveTopicPolicy(streamID: 5, topic: "MACOS", visibility: .muted)]
+            ),
+            identity: identity
+        )
+        #expect(mutedTopic.isEmpty, "topic names compare without case")
+
+        let mutedChannel = planner.plan(
+            snapshot: snapshot(
+                [message(id: 2, direct: false), message(id: 3, direct: false)],
+                mutedChannel: true,
+                channelNotifications: true
+            ),
+            identity: identity
+        )
+        #expect(mutedChannel.isEmpty)
+
+        let unmutedTopic = planner.plan(
+            snapshot: snapshot(
+                [message(id: 2, direct: false), message(id: 3, direct: false), message(id: 4, direct: false)],
+                mutedChannel: true,
+                channelNotifications: true,
+                topicPolicies: [LiveTopicPolicy(streamID: 5, topic: "macOS", visibility: .unmuted)]
+            ),
+            identity: identity
+        )
+        #expect(unmutedTopic.map(\.route.messageID) == [4])
+
+        let followed = planner.plan(
+            snapshot: snapshot(
+                (2...5).map { message(id: Int64($0), direct: false) },
+                mutedChannel: true,
+                topicPolicies: [LiveTopicPolicy(streamID: 5, topic: "macOS", visibility: .followed)]
+            ),
+            identity: identity
+        )
+        #expect(followed.map(\.route.messageID) == [5])
+    }
+
+    @Test("Muted topics add nothing to the unread counts or the badge")
+    func mutedTopicsAreNotCounted() {
+        let settings = ChannelNotificationSettings(
+            snapshot: snapshot(
+                [],
+                topicPolicies: [
+                    LiveTopicPolicy(streamID: 5, topic: "noise", visibility: .muted),
+                ]
+            )
+        )
+        let summary = UnreadSummary(
+            buckets: [
+                LiveUnreadBucket(streamID: 5, topic: "macOS", count: 4, mentionCount: 1),
+                LiveUnreadBucket(streamID: 5, topic: "Noise", count: 9, mentionCount: 2),
+            ],
+            selfUserID: 9,
+            mutedChannels: [],
+            settings: settings
+        )
+        #expect(summary.unreadCount(streamID: 5) == 4)
+        #expect(summary.unreadCount(streamID: 5, topic: "Noise") == 0)
+        #expect(summary.badge == 1)
+        #expect(summary.mentions == 3)
+    }
+
     @Test("Messages are announced once, long bodies are trimmed, bursts are capped")
     func deduplicatesTrimsAndCaps() {
         var planner = NotificationPlanner()
@@ -206,6 +311,9 @@ struct NotificationTests {
     private func snapshot(
         _ messages: [LiveMessageSnapshot],
         mutedChannel: Bool = false,
+        channelNotifications: Bool? = nil,
+        channelNotificationsDefault: Bool = false,
+        topicPolicies: [LiveTopicPolicy] = [],
         unread: [LiveUnreadBucket] = []
     ) -> LiveSnapshot {
         LiveSnapshot(
@@ -217,11 +325,14 @@ struct NotificationTests {
                     streamID: 5,
                     name: "engineering",
                     colorHex: "#76ce90",
-                    isMuted: mutedChannel
+                    isMuted: mutedChannel,
+                    desktopNotifications: channelNotifications
                 ),
             ],
             messages: messages,
-            unread: unread
+            unread: unread,
+            topicPolicies: topicPolicies,
+            channelNotificationsDefault: channelNotificationsDefault
         )
     }
 

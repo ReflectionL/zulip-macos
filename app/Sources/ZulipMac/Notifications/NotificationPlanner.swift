@@ -93,8 +93,10 @@ struct MessageNotification: Equatable, Sendable {
 
 /// Decides which newly arrived messages deserve a local notification.
 ///
-/// Direct messages and @-mentions notify; everything else, the user's own
-/// messages, already-read messages and muted channels do not. The first
+/// Direct messages and @-mentions notify, as do all messages in channels the
+/// user asked Zulip to notify about (their own channel setting, or the
+/// account-wide default) and in followed topics. Muted channels and topics,
+/// the user's own messages and already-read messages do not. The first
 /// snapshot only records what already exists.
 struct NotificationPlanner {
     static let maximumPerBatch = 5
@@ -127,7 +129,7 @@ struct NotificationPlanner {
             .sorted { $0.messageID < $1.messageID }
         knownMessageIDs.formUnion(fresh.map(\.messageID))
 
-        let mutedChannels = Set(snapshot.channels.filter(\.isMuted).map(\.streamID))
+        let settings = ChannelNotificationSettings(snapshot: snapshot)
         let channelNames = Dictionary(
             snapshot.channels.map { ($0.streamID, $0.name) },
             uniquingKeysWith: { first, _ in first }
@@ -140,7 +142,11 @@ struct NotificationPlanner {
                     return false
                 }
                 if let streamID = message.streamID {
-                    return !mutedChannels.contains(streamID) && Self.isMention(message)
+                    return settings.notifies(
+                        streamID: streamID,
+                        topic: message.topic,
+                        isMention: Self.isMention(message)
+                    )
                 }
                 return true
             }

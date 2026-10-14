@@ -54,17 +54,28 @@ roadmap lives in [`PLAN.md`](PLAN.md).
 **Writing and actions**
 
 - Send, edit, delete, react, star, mark read/unread, quote and reply, and
-  forward, each with visible pending, rollback and retry states.
+  forward, each with visible pending, rollback and retry states. Edited
+  messages carry a gray "(edited)" label.
+- Emoji reactions: a quick row of ten recommended emoji plus a searchable list
+  of all standard emoji (type a word or paste an emoji). Existing reactions
+  show their counts, highlight your own, and toggle on click. Custom (realm)
+  emoji appear as `:name:` text and cannot be picked yet.
 - `@` mention suggestions in the composer, Shift/Option+Return for a line
-  break, file upload up to 25 MiB with authenticated media caching.
+  break, file upload up to 25 MiB (attach button or drag files from Finder
+  onto the conversation) with authenticated media caching.
 - Topic workflows: start a topic, rename a topic, move a message. Channels can
   be created and renamed.
 
 **Notifications**
 
-- Local notifications for direct messages and @-mentions (including wildcard
-  mentions in channels); clicking one opens the message. The Dock badge shows
-  unread direct messages plus unread mentions in unmuted channels.
+- Local notifications follow your Zulip settings: direct messages and
+  @-mentions (including wildcard mentions in channels), every message in
+  channels you turned desktop notifications on for (or that follow your
+  account default), and followed topics. Muted channels and muted topics stay
+  quiet. Turn a channel's notifications on or off from its context menu in
+  the sidebar, or use "Notify for All Channel Messages" in the gear menu; both
+  are saved to Zulip, so the web app agrees. Clicking a notification opens the message. The Dock badge shows
+  unread direct messages plus unread mentions in unmuted channels and topics.
 
 **Keyboard and appearance**
 
@@ -101,9 +112,8 @@ file. Do not disable Gatekeeper globally.
 - One active account; no browser SSO, self-signed certificates, Intel Macs,
   App Store distribution or administration.
 - Offline use is read-only; failed writes are retried by hand, not replayed.
-- Muted topics are not read from the server, so a muted topic still counts as
-  unread and notifies on a mention. Per-channel notification settings are not
-  read; channels notify only for @-mentions.
+- A message that was moved to another topic or channel shows "(edited)", like
+  an edited one.
 - Custom (image) emoji appear as `:name:`; complex formulas and tables are not
   rendered.
 - The live snapshot keeps every message received since launch and the media

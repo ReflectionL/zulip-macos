@@ -33,12 +33,42 @@ public struct LiveChannelSnapshot: Equatable, Sendable {
     public let name: String
     public let colorHex: String
     public let isMuted: Bool
+    /// The channel's own desktop-notification choice; nil follows the
+    /// account-wide default.
+    public let desktopNotifications: Bool?
 
-    public init(streamID: Int64, name: String, colorHex: String, isMuted: Bool) {
+    public init(
+        streamID: Int64,
+        name: String,
+        colorHex: String,
+        isMuted: Bool,
+        desktopNotifications: Bool? = nil
+    ) {
         self.streamID = streamID
         self.name = name
         self.colorHex = colorHex
         self.isMuted = isMuted
+        self.desktopNotifications = desktopNotifications
+    }
+}
+
+/// How the account treats one topic, overriding its channel's setting.
+public enum LiveTopicVisibility: Equatable, Sendable {
+    case muted
+    case unmuted
+    case followed
+}
+
+/// A personal visibility choice for one topic.
+public struct LiveTopicPolicy: Equatable, Sendable {
+    public let streamID: Int64
+    public let topic: String
+    public let visibility: LiveTopicVisibility
+
+    public init(streamID: Int64, topic: String, visibility: LiveTopicVisibility) {
+        self.streamID = streamID
+        self.topic = topic
+        self.visibility = visibility
     }
 }
 
@@ -67,6 +97,8 @@ public struct LiveMessageSnapshot: Equatable, Sendable {
     public let recipientIDs: [Int64]
     public let flags: [String]
     public let reactions: [LiveReactionSnapshot]
+    /// When the content was last edited; nil for a message never edited.
+    public let lastEditDate: Date?
 
     public init(
         messageID: Int64,
@@ -78,7 +110,8 @@ public struct LiveMessageSnapshot: Equatable, Sendable {
         topic: String?,
         recipientIDs: [Int64],
         flags: [String] = [],
-        reactions: [LiveReactionSnapshot] = []
+        reactions: [LiveReactionSnapshot] = [],
+        lastEditDate: Date? = nil
     ) {
         self.messageID = messageID
         self.senderID = senderID
@@ -90,15 +123,27 @@ public struct LiveMessageSnapshot: Equatable, Sendable {
         self.recipientIDs = recipientIDs
         self.flags = flags
         self.reactions = reactions
+        self.lastEditDate = lastEditDate
     }
 }
 
 public struct LiveReactionSnapshot: Equatable, Sendable {
     public let emojiName: String
+    /// Dash-joined hexadecimal code points of a Unicode emoji; empty when unknown.
+    public let emojiCode: String
+    /// `unicode_emoji`, `realm_emoji` or `zulip_extra_emoji`; empty when unknown.
+    public let reactionType: String
     public let userID: Int64
 
-    public init(emojiName: String, userID: Int64) {
+    public init(
+        emojiName: String,
+        emojiCode: String = "",
+        reactionType: String = "",
+        userID: Int64
+    ) {
         self.emojiName = emojiName
+        self.emojiCode = emojiCode
+        self.reactionType = reactionType
         self.userID = userID
     }
 }
@@ -156,6 +201,10 @@ public struct LiveSnapshot: Equatable, Sendable {
     public let recentDirectConversations: [LiveRecentDirectConversation]
     /// Unread messages counted per conversation.
     public let unread: [LiveUnreadBucket]
+    /// Muted, unmuted and followed topics.
+    public let topicPolicies: [LiveTopicPolicy]
+    /// Whether channels without their own choice notify for every message.
+    public let channelNotificationsDefault: Bool
 
     public init(
         revision: UInt64,
@@ -166,7 +215,9 @@ public struct LiveSnapshot: Equatable, Sendable {
         messages: [LiveMessageSnapshot],
         realmIconURL: String? = nil,
         recentDirectConversations: [LiveRecentDirectConversation] = [],
-        unread: [LiveUnreadBucket] = []
+        unread: [LiveUnreadBucket] = [],
+        topicPolicies: [LiveTopicPolicy] = [],
+        channelNotificationsDefault: Bool = false
     ) {
         self.revision = revision
         self.lastEventID = lastEventID
@@ -177,6 +228,8 @@ public struct LiveSnapshot: Equatable, Sendable {
         self.realmIconURL = realmIconURL
         self.recentDirectConversations = recentDirectConversations
         self.unread = unread
+        self.topicPolicies = topicPolicies
+        self.channelNotificationsDefault = channelNotificationsDefault
     }
 }
 
@@ -445,6 +498,14 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
         memberIDs: [Int64]
     )
     case renameChannel(requestID: UInt64, accountID: String, streamID: Int64, newName: String)
+    /// Turns notifications for every message on or off: for one channel, or as
+    /// the account-wide default when `streamID` is nil.
+    case setNotificationSetting(
+        requestID: UInt64,
+        accountID: String,
+        streamID: Int64?,
+        enabled: Bool
+    )
     case disconnect(requestID: UInt64)
     case loadCachedSession(requestID: UInt64, accountID: String)
     case saveDraft(requestID: UInt64, key: ConversationKey, content: String)
@@ -482,6 +543,7 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
              let .fetchMessageSource(requestID, _, _),
              let .createChannel(requestID, _, _, _, _, _),
              let .renameChannel(requestID, _, _, _),
+             let .setNotificationSetting(requestID, _, _, _),
              let .disconnect(requestID),
              let .loadCachedSession(requestID, _),
              let .saveDraft(requestID, _, _),
@@ -542,6 +604,8 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
             "BridgeCommand.createChannel"
         case .renameChannel:
             "BridgeCommand.renameChannel"
+        case .setNotificationSetting:
+            "BridgeCommand.setNotificationSetting"
         case .disconnect:
             "BridgeCommand.disconnect"
         case .loadCachedSession:
@@ -719,6 +783,13 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
                 streamId: streamID,
                 newName: newName
             )
+        case let .setNotificationSetting(requestID, accountID, streamID, enabled):
+            .setNotificationSetting(
+                requestId: requestID,
+                accountId: accountID,
+                streamId: streamID,
+                enabled: enabled
+            )
         case let .fetchMessageSource(requestID, accountID, messageID):
             .fetchMessageSource(
                 requestId: requestID,
@@ -793,6 +864,7 @@ public enum BridgeEvent:
     case messageSourceLoaded(requestID: UInt64, messageID: Int64, content: String)
     case channelCreated(requestID: UInt64, name: String)
     case channelRenamed(requestID: UInt64, streamID: Int64, name: String)
+    case notificationSettingSaved(requestID: UInt64)
     case retryScheduled(accountID: String, delayMilliseconds: UInt64)
     case syncResumed(accountID: String)
     case presenceUpdated(accountID: String, presences: [LivePresence])
@@ -833,6 +905,7 @@ public enum BridgeEvent:
              let .messageSourceLoaded(requestID, _, _),
              let .channelCreated(requestID, _),
              let .channelRenamed(requestID, _, _),
+             let .notificationSettingSaved(requestID),
              let .disconnected(requestID):
             requestID
         case let .failed(requestID, _):
@@ -889,6 +962,8 @@ public enum BridgeEvent:
             "Channel created"
         case .channelRenamed:
             "Channel renamed"
+        case .notificationSettingSaved:
+            "Notification setting saved"
         case .retryScheduled:
             "Retry scheduled"
         case .syncResumed:
@@ -1052,6 +1127,27 @@ private extension LiveSnapshot {
                 mentionCount: Int($0.mentionCount)
             )
         }
+        topicPolicies = snapshot.topicPolicies.map {
+            LiveTopicPolicy(
+                streamID: $0.streamId,
+                topic: $0.topic,
+                visibility: LiveTopicVisibility($0.visibility)
+            )
+        }
+        channelNotificationsDefault = snapshot.channelNotificationsDefault
+    }
+}
+
+private extension LiveTopicVisibility {
+    init(_ visibility: CoreTopicVisibility) {
+        switch visibility {
+        case .muted:
+            self = .muted
+        case .unmuted:
+            self = .unmuted
+        case .followed:
+            self = .followed
+        }
     }
 }
 
@@ -1072,6 +1168,7 @@ private extension LiveChannelSnapshot {
         name = channel.name
         colorHex = channel.color
         isMuted = channel.isMuted
+        desktopNotifications = channel.desktopNotifications
     }
 }
 
@@ -1095,7 +1192,15 @@ private extension LiveMessageSnapshot {
         recipientIDs = message.recipientIds
         flags = message.flags
         reactions = message.reactions.map {
-            LiveReactionSnapshot(emojiName: $0.emojiName, userID: $0.userId)
+            LiveReactionSnapshot(
+                emojiName: $0.emojiName,
+                emojiCode: $0.emojiCode,
+                reactionType: $0.reactionType,
+                userID: $0.userId
+            )
+        }
+        lastEditDate = message.lastEditTimestamp.map {
+            Date(timeIntervalSince1970: TimeInterval($0))
         }
     }
 }
@@ -1360,6 +1465,8 @@ private extension BridgeEvent {
             self = .channelCreated(requestID: requestID, name: name)
         case let .channelRenamed(requestID, streamId, name):
             self = .channelRenamed(requestID: requestID, streamID: streamId, name: name)
+        case let .notificationSettingSaved(requestId):
+            self = .notificationSettingSaved(requestID: requestId)
         case let .messageSourceLoaded(requestID, messageID, content):
             self = .messageSourceLoaded(
                 requestID: requestID,

@@ -8,7 +8,10 @@ use thiserror::Error;
 
 use crate::{
     messages::TopicSummary,
-    sync::{ChannelSummary, MessageSummary, RecentDirectConversation, UnreadBucket, UserSummary},
+    sync::{
+        ChannelSummary, MessageSummary, RecentDirectConversation, TopicPolicy, UnreadBucket,
+        UserSummary,
+    },
 };
 
 const ACCOUNT_STATE_KEY: &str = "account";
@@ -218,6 +221,12 @@ pub struct CachedSnapshot {
     /// Unread messages per conversation, so counts show before the first sync.
     #[serde(default)]
     pub unread: Vec<UnreadBucket>,
+    /// Muted, unmuted and followed topics.
+    #[serde(default)]
+    pub topic_policies: Vec<TopicPolicy>,
+    /// Whether channels without their own choice notify for every message.
+    #[serde(default)]
+    pub channel_notifications_default: bool,
 }
 
 /// One conversation as last fetched from the server.
@@ -702,7 +711,9 @@ mod tests {
         AccountRecord, CacheDatabase, CachedAccount, CachedConversation, CachedSnapshot,
         DatabaseError, DraftRecord, MessageRecord, SCHEMA_VERSION, apply_migrations,
     };
-    use crate::sync::{MessageSummary, RecentDirectConversation, UnreadBucket};
+    use crate::sync::{
+        MessageSummary, RecentDirectConversation, TopicPolicy, TopicVisibility, UnreadBucket,
+    };
 
     #[test]
     fn drafts_list_delete_and_stay_account_scoped() {
@@ -770,6 +781,7 @@ mod tests {
                 recipient_ids: Vec::new(),
                 flags: vec!["read".to_owned()],
                 reactions: Vec::new(),
+                last_edit_timestamp: None,
             })
             .collect::<Vec<_>>();
         let snapshot = CachedSnapshot {
@@ -789,6 +801,12 @@ mod tests {
                 count: 3,
                 mention_count: 1,
             }],
+            topic_policies: vec![TopicPolicy {
+                stream_id: 5,
+                topic: "macOS".to_owned(),
+                visibility: TopicVisibility::Muted,
+            }],
+            channel_notifications_default: true,
         };
         assert!(database.account_cache("acme|maya").expect("read").is_none());
         database
@@ -803,6 +821,8 @@ mod tests {
         assert_eq!(cached_snapshot.messages.last().map(|m| m.id), Some(400));
         assert_eq!(cached_snapshot.messages.first().map(|m| m.id), Some(101));
         assert_eq!(cached_snapshot.unread, snapshot.unread);
+        assert_eq!(cached_snapshot.topic_policies, snapshot.topic_policies);
+        assert!(cached_snapshot.channel_notifications_default);
 
         for index in 0..45_i64 {
             database

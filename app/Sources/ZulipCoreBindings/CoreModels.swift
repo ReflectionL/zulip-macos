@@ -80,6 +80,9 @@ public struct ChannelSnapshot: Identifiable, Equatable, Sendable {
     public let unreadCount: Int
     public let isMuted: Bool
     public let topics: [TopicSnapshot]
+    /// Whether every message in the channel raises a notification: its own
+    /// Zulip setting, or the account-wide default when it has none.
+    public let notifiesForAllMessages: Bool
 
     public var id: Int64 { streamID }
 
@@ -89,8 +92,10 @@ public struct ChannelSnapshot: Identifiable, Equatable, Sendable {
         colorHex: String,
         unreadCount: Int = 0,
         isMuted: Bool = false,
+        notifiesForAllMessages: Bool = false,
         topics: [TopicSnapshot] = []
     ) {
+        self.notifiesForAllMessages = notifiesForAllMessages
         self.streamID = streamID
         self.name = name
         self.colorHex = colorHex
@@ -250,6 +255,74 @@ public enum MessageActionState: Equatable, Sendable {
     case failed(MessageActionKind, message: String)
 }
 
+/// An emoji a reaction can be added with or removed by.
+public struct ReactionTarget: Equatable, Sendable {
+    public let name: String
+    /// Dash-joined hexadecimal code points; empty when the emoji is known only by name.
+    public let code: String
+    public let type: String
+
+    public init(name: String, code: String = "", type: String = "unicode_emoji") {
+        self.name = name
+        self.code = code
+        self.type = type
+    }
+
+    /// Puts a code in one spelling: Zulip pads code points to four digits
+    /// ("00a9") while emoji tables do not ("a9").
+    public static func normalizedCode(_ code: String) -> String {
+        code.lowercased().split(separator: "-").map { part in
+            UInt32(part, radix: 16).map { String($0, radix: 16) } ?? String(part)
+        }.joined(separator: "-")
+    }
+
+    /// Whether `reaction` is this emoji: same code and kind when both have a
+    /// code (two names can share one emoji), otherwise the same name.
+    public func matches(_ reaction: MessageReaction) -> Bool {
+        if !code.isEmpty, !reaction.emojiCode.isEmpty {
+            return Self.normalizedCode(code) == Self.normalizedCode(reaction.emojiCode)
+                && (type.isEmpty || reaction.reactionType.isEmpty || type == reaction.reactionType)
+        }
+        return name == reaction.emojiName
+    }
+}
+
+/// One emoji shown under a message with how many people used it.
+public struct MessageReaction: Identifiable, Equatable, Sendable {
+    /// The name the current user reacted with, or the first name used.
+    public let emojiName: String
+    /// Dash-joined hexadecimal code points of a Unicode emoji; empty when unknown.
+    public let emojiCode: String
+    /// `unicode_emoji`, `realm_emoji` or `zulip_extra_emoji`; empty when unknown.
+    public let reactionType: String
+    public var count: Int
+    public var includesMe: Bool
+
+    public init(
+        emojiName: String,
+        emojiCode: String = "",
+        reactionType: String = "",
+        count: Int = 1,
+        includesMe: Bool = false
+    ) {
+        self.emojiName = emojiName
+        self.emojiCode = emojiCode
+        self.reactionType = reactionType
+        self.count = count
+        self.includesMe = includesMe
+    }
+
+    public var id: String {
+        emojiCode.isEmpty
+            ? "name:\(emojiName)"
+            : "\(reactionType):\(ReactionTarget.normalizedCode(emojiCode))"
+    }
+
+    public var target: ReactionTarget {
+        ReactionTarget(name: emojiName, code: emojiCode, type: reactionType)
+    }
+}
+
 public struct MessageViewData: Identifiable, Equatable, Sendable {
     public let id: Int64
     public let accountID: String
@@ -263,8 +336,8 @@ public struct MessageViewData: Identifiable, Equatable, Sendable {
     public let sourceStreamID: Int64?
     public let sourceTopic: String?
     public var isStarred: Bool
-    public var reactionCount: Int
-    public var hasOwnThumbsUp: Bool
+    /// Emoji reactions in the order they first appeared, one entry per emoji name.
+    public var reactions: [MessageReaction]
     public var isRead: Bool
     public var deliveryState: MessageDeliveryState
     public var actionState: MessageActionState
@@ -276,6 +349,8 @@ public struct MessageViewData: Identifiable, Equatable, Sendable {
     /// A local echo whose final rendering belongs to the server (the text uses
     /// Markdown), so the timeline shows a placeholder until the server copy arrives.
     public var isProvisional: Bool
+    /// When the content was last edited; nil for a message never edited.
+    public var editedAt: Date?
 
     public init(
         id: Int64,
@@ -290,13 +365,13 @@ public struct MessageViewData: Identifiable, Equatable, Sendable {
         sourceStreamID: Int64? = nil,
         sourceTopic: String? = nil,
         isStarred: Bool = false,
-        reactionCount: Int = 0,
-        hasOwnThumbsUp: Bool = false,
+        reactions: [MessageReaction] = [],
         isRead: Bool = true,
         deliveryState: MessageDeliveryState = .sent,
         actionState: MessageActionState = .idle,
         senderAvatarURL: String? = nil,
-        isProvisional: Bool = false
+        isProvisional: Bool = false,
+        editedAt: Date? = nil
     ) {
         self.id = id
         self.rowID = id
@@ -312,16 +387,49 @@ public struct MessageViewData: Identifiable, Equatable, Sendable {
         self.sourceStreamID = sourceStreamID
         self.sourceTopic = sourceTopic
         self.isStarred = isStarred
-        self.reactionCount = reactionCount
-        self.hasOwnThumbsUp = hasOwnThumbsUp
+        self.reactions = reactions
         self.isRead = isRead
         self.deliveryState = deliveryState
         self.actionState = actionState
         self.senderAvatarURL = senderAvatarURL
+        self.editedAt = editedAt
     }
 
     public var plainText: String {
         content.map(\.plainText).joined(separator: "\n")
+    }
+
+    /// The reaction group `target` belongs to, if the message has one.
+    public func reaction(matching target: ReactionTarget) -> MessageReaction? {
+        reactions.first { target.matches($0) }
+    }
+
+    /// Adds or removes the current user's use of `target`, keeping the counts in step.
+    public mutating func applyReaction(_ target: ReactionTarget, add: Bool) {
+        if let index = reactions.firstIndex(where: { target.matches($0) }) {
+            if add {
+                guard !reactions[index].includesMe else { return }
+                reactions[index].count += 1
+                reactions[index].includesMe = true
+            } else {
+                guard reactions[index].includesMe else { return }
+                reactions[index].includesMe = false
+                reactions[index].count -= 1
+                if reactions[index].count <= 0 {
+                    reactions.remove(at: index)
+                }
+            }
+        } else if add {
+            reactions.append(
+                MessageReaction(
+                    emojiName: target.name,
+                    emojiCode: target.code,
+                    reactionType: target.type,
+                    count: 1,
+                    includesMe: true
+                )
+            )
+        }
     }
 }
 

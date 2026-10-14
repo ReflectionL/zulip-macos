@@ -357,7 +357,10 @@ private struct NativeImageBlock: View {
                     } else if let failure {
                         VStack(spacing: AppTheme.Spacing.small) {
                             Image(systemName: "exclamationmark.triangle")
-                            Text(failure).lineLimit(2)
+                            Text(failure)
+                                .lineLimit(3)
+                                .multilineTextAlignment(.center)
+                                .help(failure)
                             Button("Retry") { retryMedia?(url) }
                                 .buttonStyle(.borderless)
                         }

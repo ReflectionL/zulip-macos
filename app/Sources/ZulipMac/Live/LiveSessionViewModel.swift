@@ -98,14 +98,14 @@ struct ComposerAttachmentInsertion: Equatable, Sendable {
 private enum MessageAction: Equatable, Sendable {
     case edit(messageID: Int64, content: String)
     case delete(messageID: Int64)
-    case reaction(messageID: Int64, add: Bool)
+    case reaction(messageID: Int64, target: ReactionTarget, add: Bool)
     case flag(messageID: Int64, flag: LiveMessageFlag, add: Bool)
 
     var messageID: Int64 {
         switch self {
         case let .edit(messageID, _),
              let .delete(messageID),
-             let .reaction(messageID, _),
+             let .reaction(messageID, _, _),
              let .flag(messageID, _, _):
             messageID
         }
@@ -190,6 +190,9 @@ final class LiveSessionViewModel {
     var secret = ""
     var connectionState = LiveConnectionState.signedOut
     var notice: String?
+    /// Zulip's account-wide default: whether channels without a setting of their
+    /// own notify for every message.
+    private(set) var channelNotificationsDefault = false
     private(set) var identity: LiveSessionIdentity?
     private(set) var sidebarSnapshot: SidebarSnapshot?
     private(set) var navigationDirectory = NavigationDirectory(destinations: [])
@@ -261,6 +264,16 @@ final class LiveSessionViewModel {
     private var requestID: UInt64 = 1
     private var activeSelection: ConversationKey?
     private var pendingOlderRequestID: UInt64?
+    /// Conversation opens the user asked for that have not produced a page yet.
+    private var openRequests: [UInt64: ConversationKey] = [:]
+    /// Notification setting writes awaiting the server's answer.
+    private var notificationSettingRequests = Set<UInt64>()
+    /// Refreshes and mark-read requests: when one fails the screen stays as it
+    /// is and the connection is not reported as failed.
+    private var quietRequestIDs = Set<UInt64>()
+    /// Newest open request already shown per conversation, so a slow older
+    /// response cannot replace a newer page.
+    private var lastShownOpenRequestID: [ConversationKey: UInt64] = [:]
     private var pendingSearchRequestID: UInt64?
     private var pendingSearchQuery: String?
     private var issuedSearchRequestIDs = Set<UInt64>()
@@ -284,6 +297,7 @@ final class LiveSessionViewModel {
     private var confirmedEchoes: [Int64: Int64] = [:]
     private var attachmentUploadsByRequestID: [UInt64: PendingAttachmentUpload] = [:]
     private var failedAttachmentUpload: PendingAttachmentUpload?
+    private var queuedAttachmentUploads: [(URL, ConversationKey)] = []
     private var mediaRequestsByRequestID: [UInt64: String] = [:]
     private var pendingMediaURLs = Set<String>()
     /// Media wanted while only cached data is shown; the core has no account
@@ -715,13 +729,23 @@ final class LiveSessionViewModel {
             cachedPlaceholderKey = nil
         }
         client.submit(.loadCachedConversation(requestID: nextRequestID(), key: key))
+        let openID = nextRequestID()
+        openRequests[openID] = key
         client.submit(
             .openConversation(
-                requestID: nextRequestID(),
+                requestID: openID,
                 key: key,
                 limit: Self.conversationPageSize
             )
         )
+    }
+
+    /// Asks for the open conversation's first page again after a failure.
+    func retryOpenConversation() {
+        guard let activeSelection else {
+            return
+        }
+        openConversation(activeSelection)
     }
 
     func searchMessages(_ query: String) {
@@ -970,10 +994,15 @@ final class LiveSessionViewModel {
         submitMessageAction(.delete(messageID: message.id))
     }
 
+    /// Reacts with `target`, or withdraws the user's own reaction when they already
+    /// used it. Joining an existing group reuses that group's emoji name.
     @discardableResult
-    func toggleThumbsUp(_ message: MessageViewData) -> Bool {
-        submitMessageAction(
-            .reaction(messageID: message.id, add: !message.hasOwnThumbsUp)
+    func toggleReaction(_ message: MessageViewData, _ target: ReactionTarget) -> Bool {
+        let existing = message.reaction(matching: target)
+        let add = existing?.includesMe != true
+        let chosen = existing.map(\.target) ?? target
+        return submitMessageAction(
+            .reaction(messageID: message.id, target: chosen, add: add)
         )
     }
 
@@ -1185,6 +1214,35 @@ final class LiveSessionViewModel {
         )
     }
 
+    /// Turns notifications for every message of one channel on or off, in Zulip
+    /// itself, so the web app and other clients agree. The sidebar follows once
+    /// the server's update arrives with the next snapshot.
+    func setChannelNotifications(streamID: Int64, enabled: Bool) {
+        submitNotificationSetting(streamID: streamID, enabled: enabled)
+    }
+
+    /// Sets Zulip's account-wide default for channels without a setting of their own.
+    func setChannelNotificationsDefault(_ enabled: Bool) {
+        submitNotificationSetting(streamID: nil, enabled: enabled)
+    }
+
+    private func submitNotificationSetting(streamID: Int64?, enabled: Bool) {
+        guard let identity, hasLiveSession else {
+            notice = "Notification settings can be changed once you are connected."
+            return
+        }
+        let id = nextRequestID()
+        notificationSettingRequests.insert(id)
+        client.submit(
+            .setNotificationSetting(
+                requestID: id,
+                accountID: identity.accountID,
+                streamID: streamID,
+                enabled: enabled
+            )
+        )
+    }
+
     func resetChannelRename() {
         channelRenameRequestID = nil
         channelRenameState = .idle
@@ -1392,6 +1450,37 @@ final class LiveSessionViewModel {
         )
     }
 
+    /// Entry point for files dropped on the conversation. The first file uploads
+    /// now and the rest follow one at a time, because the composer tracks a
+    /// single upload; a failure drops whatever is still queued.
+    func uploadDroppedFiles(_ urls: [URL], to key: ConversationKey) {
+        let files = urls.filter { url in
+            guard url.isFileURL else { return false }
+            let values = try? url.resourceValues(forKeys: [.isDirectoryKey])
+            return values?.isDirectory != true
+        }
+        guard let first = files.first else {
+            notice = "Only files can be uploaded. Drag a file from Finder onto the conversation."
+            return
+        }
+        guard !attachmentUploadState.isUploading else {
+            notice = "Wait for the current upload to finish before adding more files."
+            return
+        }
+        queuedAttachmentUploads = files.dropFirst().map { ($0, key) }
+        uploadAttachment(first, to: key)
+    }
+
+    private func startNextQueuedUpload() {
+        guard !queuedAttachmentUploads.isEmpty else { return }
+        let next = queuedAttachmentUploads.removeFirst()
+        guard activeSelection == next.1 else {
+            queuedAttachmentUploads = []
+            return
+        }
+        uploadAttachment(next.0, to: next.1)
+    }
+
     func retryAttachmentUpload() {
         guard let failedAttachmentUpload else { return }
         uploadAttachment(failedAttachmentUpload.fileURL, to: failedAttachmentUpload.key)
@@ -1500,12 +1589,16 @@ final class LiveSessionViewModel {
                 refreshConversation(activeSelection)
             }
 
-        case let .conversationOpened(_, page):
+        case let .conversationOpened(requestID, page):
+            openRequests[requestID] = nil
+            quietRequestIDs.remove(requestID)
             guard pendingFocusedMessageRequestID == nil,
-                  activeSelection == page.key
+                  activeSelection == page.key,
+                  requestID > (lastShownOpenRequestID[page.key] ?? 0)
             else {
                 return
             }
+            lastShownOpenRequestID[page.key] = requestID
             rememberTopics(from: page.messages)
             let existing = cachedPlaceholderKey == page.key ? nil : loadedPage(for: page.key)
             cachedPlaceholderKey = nil
@@ -1522,13 +1615,7 @@ final class LiveSessionViewModel {
             if !messageIDs.isEmpty, let identity, isApplicationActive(),
                Self.marksMessagesRead(in: page.key)
             {
-                client.submit(
-                    .markRead(
-                        requestID: nextRequestID(),
-                        accountID: identity.accountID,
-                        messageIDs: messageIDs
-                    )
-                )
+                submitMarkRead(accountID: identity.accountID, messageIDs: messageIDs)
             }
 
         case let .cachedConversationLoaded(_, page):
@@ -1593,13 +1680,7 @@ final class LiveSessionViewModel {
             )
             let messageIDs = page.messages.map(\.messageID)
             if !messageIDs.isEmpty, let identity, Self.marksMessagesRead(in: page.key) {
-                client.submit(
-                    .markRead(
-                        requestID: nextRequestID(),
-                        accountID: identity.accountID,
-                        messageIDs: messageIDs
-                    )
-                )
+                submitMarkRead(accountID: identity.accountID, messageIDs: messageIDs)
             }
 
         case let .messageSent(requestID, _, messageID):
@@ -1624,6 +1705,7 @@ final class LiveSessionViewModel {
                 filename: attachment.filename,
                 markdown: attachment.markdown
             )
+            startNextQueuedUpload()
 
         case let .mediaReady(requestID, media):
             guard let requestedURL = mediaRequestsByRequestID.removeValue(forKey: requestID) else {
@@ -1688,6 +1770,9 @@ final class LiveSessionViewModel {
             channelRenameState = .renamed(name: name)
             notice = "Renamed the channel to “\(name)”."
 
+        case let .notificationSettingSaved(requestID):
+            notificationSettingRequests.remove(requestID)
+
         case let .messageSourceLoaded(requestID, _, source):
             guard let pending = messageSourceRequests.removeValue(forKey: requestID),
                   identity?.accountID == pending.message.accountID
@@ -1715,7 +1800,10 @@ final class LiveSessionViewModel {
                 }
             }
 
-        case .messagesMarkedRead, .pong:
+        case let .messagesMarkedRead(requestID, _):
+            quietRequestIDs.remove(requestID)
+
+        case .pong:
             break
 
         case let .retryScheduled(_, delayMilliseconds):
@@ -1759,13 +1847,22 @@ final class LiveSessionViewModel {
             connectionState = .signedOut
 
         case let .failed(requestID, message):
-            if let requestID, requestID == cachedSessionRequestID {
+            let failedOpenKey = requestID.flatMap { openRequests.removeValue(forKey: $0) }
+            let wasQuietRequest = requestID.map { quietRequestIDs.remove($0) != nil } ?? false
+            if wasQuietRequest {
+                // A refresh or mark-read that did not go through: what is on screen
+                // stays, and the next snapshot or visit tries again.
+                sessionLog.error("background request failed: \(message, privacy: .public)")
+            } else if let requestID, notificationSettingRequests.remove(requestID) != nil {
+                notice = "The notification setting could not be saved: \(message)"
+            } else if let requestID, requestID == cachedSessionRequestID {
                 // No cached data yet (first run); the live connection continues.
                 cachedSessionRequestID = nil
             } else if let requestID,
                let pending = attachmentUploadsByRequestID.removeValue(forKey: requestID)
             {
                 stopSecurityScope(for: pending)
+                queuedAttachmentUploads = []
                 failedAttachmentUpload = pending.withoutSecurityScope()
                 attachmentUploadState = .failed(filename: pending.filename, message: message)
                 notice = "Attachment upload failed. You can retry it."
@@ -1854,6 +1951,18 @@ final class LiveSessionViewModel {
             {
                 // Offline with a cached session on screen: keep reading and retry.
                 scheduleReconnect()
+            } else if let failedOpenKey {
+                // The first page of a conversation the user opened could not be
+                // fetched. Say so instead of leaving the loading placeholder up.
+                guard activeSelection == failedOpenKey, case .loading = conversationState else {
+                    return
+                }
+                let destination = navigationDirectory.destination(for: failedOpenKey)
+                conversationState = .failure(
+                    title: destination?.title ?? "Conversation",
+                    subtitle: destination?.subtitle ?? organizationName,
+                    message: message
+                )
             } else if requestID == nil, identity != nil {
                 // The Rust core ended the live session (for example after the
                 // server rejected the stored key). Return to the login surface
@@ -1910,6 +2019,11 @@ final class LiveSessionViewModel {
         navigationDirectory = NavigationDirectory(destinations: [])
         activeSelection = nil
         pendingOlderRequestID = nil
+        openRequests = [:]
+        notificationSettingRequests = []
+        channelNotificationsDefault = false
+        quietRequestIDs = []
+        lastShownOpenRequestID = [:]
         pendingSearchRequestID = nil
         pendingSearchQuery = nil
         issuedSearchRequestIDs = []
@@ -1923,6 +2037,7 @@ final class LiveSessionViewModel {
         confirmedEchoes = [:]
         attachmentUploadsByRequestID = [:]
         failedAttachmentUpload = nil
+        queuedAttachmentUploads = []
         attachmentUploadState = .idle
         attachmentInsertion = nil
         mediaRequestsByRequestID = [:]
@@ -2092,10 +2207,12 @@ final class LiveSessionViewModel {
                 )
             }
         replaceKnownTopics(from: snapshot)
+        channelNotificationsDefault = snapshot.channelNotificationsDefault
         unreadSummary = UnreadSummary(
             buckets: snapshot.unread,
             selfUserID: identity.userID,
-            mutedChannels: Set(snapshot.channels.filter(\.isMuted).map(\.streamID))
+            mutedChannels: Set(snapshot.channels.filter(\.isMuted).map(\.streamID)),
+            settings: ChannelNotificationSettings(snapshot: snapshot)
         )
         notifier?.setBadge(unreadSummary.badge)
         sidebarSnapshot = Self.makeSidebar(
@@ -2152,9 +2269,48 @@ final class LiveSessionViewModel {
         )
     }
 
+    /// One entry per emoji, in the order each first appeared. The name shown to
+    /// the action is the current user's own when they reacted, otherwise the first used.
+    static func groupReactions(
+        _ reactions: [LiveReactionSnapshot],
+        me: Int64?
+    ) -> [MessageReaction] {
+        var groups: [MessageReaction] = []
+        for reaction in reactions {
+            let target = ReactionTarget(
+                name: reaction.emojiName,
+                code: reaction.emojiCode,
+                type: reaction.reactionType
+            )
+            let isMine = reaction.userID == me
+            if let index = groups.firstIndex(where: { target.matches($0) }) {
+                groups[index].count += 1
+                if isMine, !groups[index].includesMe {
+                    groups[index] = MessageReaction(
+                        emojiName: reaction.emojiName,
+                        emojiCode: groups[index].emojiCode,
+                        reactionType: groups[index].reactionType,
+                        count: groups[index].count,
+                        includesMe: true
+                    )
+                }
+            } else {
+                groups.append(
+                    MessageReaction(
+                        emojiName: reaction.emojiName,
+                        emojiCode: reaction.emojiCode,
+                        reactionType: reaction.reactionType,
+                        count: 1,
+                        includesMe: isMine
+                    )
+                )
+            }
+        }
+        return groups
+    }
+
     private func makeMessages(_ livePage: LiveConversationPage) -> [MessageViewData] {
         livePage.messages.map { message in
-            let thumbsUp = message.reactions.filter { $0.emojiName == "thumbs_up" }
             return MessageViewData(
                 id: message.messageID,
                 accountID: livePage.key.accountID,
@@ -2168,10 +2324,10 @@ final class LiveSessionViewModel {
                 sourceStreamID: message.streamID,
                 sourceTopic: message.topic,
                 isStarred: message.flags.contains("starred"),
-                reactionCount: thumbsUp.count,
-                hasOwnThumbsUp: thumbsUp.contains { $0.userID == identity?.userID },
+                reactions: Self.groupReactions(message.reactions, me: identity?.userID),
                 isRead: message.flags.contains("read"),
-                senderAvatarURL: avatarURLs[message.senderID]
+                senderAvatarURL: avatarURLs[message.senderID],
+                editedAt: message.lastEditDate
             )
         }
     }
@@ -2218,13 +2374,13 @@ final class LiveSessionViewModel {
                     messageID: messageID
                 )
             )
-        case let .reaction(messageID, add):
+        case let .reaction(messageID, target, add):
             client.submit(
                 .updateReaction(
                     requestID: id,
                     accountID: identity.accountID,
                     messageID: messageID,
-                    emojiName: "thumbs_up",
+                    emojiName: target.name,
                     add: add
                 )
             )
@@ -2248,11 +2404,11 @@ final class LiveSessionViewModel {
             switch action {
             case let .edit(_, content):
                 message.content = [.paragraph([.text(content)])]
+                message.editedAt = Date()
             case .delete:
                 break
-            case let .reaction(_, add):
-                message.hasOwnThumbsUp = add
-                message.reactionCount = max(0, message.reactionCount + (add ? 1 : -1))
+            case let .reaction(_, target, add):
+                message.applyReaction(target, add: add)
             case let .flag(_, flag, add):
                 if flag == .starred {
                     message.isStarred = add
@@ -2548,12 +2704,22 @@ final class LiveSessionViewModel {
         guard identity?.accountID == key.accountID else {
             return
         }
+        let refreshID = nextRequestID()
+        quietRequestIDs.insert(refreshID)
         client.submit(
             .openConversation(
-                requestID: nextRequestID(),
+                requestID: refreshID,
                 key: key,
                 limit: Self.conversationPageSize
             )
+        )
+    }
+
+    private func submitMarkRead(accountID: String, messageIDs: [Int64]) {
+        let id = nextRequestID()
+        quietRequestIDs.insert(id)
+        client.submit(
+            .markRead(requestID: id, accountID: accountID, messageIDs: messageIDs)
         )
     }
 
@@ -2677,6 +2843,7 @@ final class LiveSessionViewModel {
                 colorHex: channel.colorHex,
                 unreadCount: channel.unreadCount,
                 isMuted: channel.isMuted,
+                notifiesForAllMessages: channel.notifiesForAllMessages,
                 topics: topics
                     .filter { $0.streamID == channel.streamID }
                     .sorted {
@@ -2900,6 +3067,8 @@ final class LiveSessionViewModel {
                     colorHex: channel.colorHex,
                     unreadCount: unread.unreadCount(streamID: channel.streamID),
                     isMuted: channel.isMuted,
+                    notifiesForAllMessages: channel.desktopNotifications
+                        ?? snapshot.channelNotificationsDefault,
                     topics: channelTopics
                         .sorted { $0.maxMessageID > $1.maxMessageID }
                         .map {
