@@ -506,6 +506,14 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
         streamID: Int64?,
         enabled: Bool
     )
+    /// Follows, mutes or resets one topic (its own `TopicNotificationLevel`).
+    case setTopicNotification(
+        requestID: UInt64,
+        accountID: String,
+        streamID: Int64,
+        topic: String,
+        level: TopicNotificationLevel
+    )
     case disconnect(requestID: UInt64)
     case loadCachedSession(requestID: UInt64, accountID: String)
     case saveDraft(requestID: UInt64, key: ConversationKey, content: String)
@@ -544,6 +552,7 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
              let .createChannel(requestID, _, _, _, _, _),
              let .renameChannel(requestID, _, _, _),
              let .setNotificationSetting(requestID, _, _, _),
+             let .setTopicNotification(requestID, _, _, _, _),
              let .disconnect(requestID),
              let .loadCachedSession(requestID, _),
              let .saveDraft(requestID, _, _),
@@ -606,6 +615,8 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
             "BridgeCommand.renameChannel"
         case .setNotificationSetting:
             "BridgeCommand.setNotificationSetting"
+        case .setTopicNotification:
+            "BridgeCommand.setTopicNotification"
         case .disconnect:
             "BridgeCommand.disconnect"
         case .loadCachedSession:
@@ -789,6 +800,14 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
                 accountId: accountID,
                 streamId: streamID,
                 enabled: enabled
+            )
+        case let .setTopicNotification(requestID, accountID, streamID, topic, level):
+            .setTopicVisibility(
+                requestId: requestID,
+                accountId: accountID,
+                streamId: streamID,
+                topic: topic,
+                visibility: CoreTopicVisibilityChoice(level)
             )
         case let .fetchMessageSource(requestID, accountID, messageID):
             .fetchMessageSource(
@@ -1135,6 +1154,21 @@ private extension LiveSnapshot {
             )
         }
         channelNotificationsDefault = snapshot.channelNotificationsDefault
+    }
+}
+
+private extension CoreTopicVisibilityChoice {
+    init(_ level: TopicNotificationLevel) {
+        switch level {
+        case .standard:
+            self = .inherit
+        case .muted:
+            self = .muted
+        case .unmuted:
+            self = .unmuted
+        case .followed:
+            self = .followed
+        }
     }
 }
 

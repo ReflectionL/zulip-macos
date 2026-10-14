@@ -761,11 +761,14 @@ private struct MessageRow: View {
                         mediaLocalURLs: mediaLocalURLs,
                         mediaFailures: mediaFailures,
                         requestMedia: requestMedia,
-                        retryMedia: retryMedia
+                        retryMedia: retryMedia,
+                        trailingNote: editedContinuesText ? "(edited)" : nil
                     )
                 }
 
-                if let editedAt = message.editedAt, !showsPlaceholder {
+                // Content that does not end in a paragraph (a picture, code, a list)
+                // has no line to continue, so the label gets a line of its own.
+                if let editedAt = message.editedAt, !showsPlaceholder, !editedContinuesText {
                     Text("(edited)")
                         .font(AppTheme.Typography.metadata)
                         .foregroundStyle(AppTheme.Colors.tertiaryText)
@@ -901,6 +904,11 @@ private struct MessageRow: View {
     /// its raw source, which would flash when the rendered copy replaces it.
     private var showsPlaceholder: Bool {
         message.isProvisional && message.deliveryState != .failed
+    }
+
+    /// "(edited)" follows the last paragraph of the message on the same line.
+    private var editedContinuesText: Bool {
+        message.editedAt != nil && MessageContentView.canInlineTrailingNote(message.content)
     }
 
     private var hasStatus: Bool {

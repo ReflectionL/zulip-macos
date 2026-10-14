@@ -94,13 +94,16 @@ struct NotificationTests {
 
         let mutedTopic = planner.plan(
             snapshot: snapshot(
-                [message(id: 2, direct: false, flags: ["mentioned"])],
+                [
+                    message(id: 2, direct: false),
+                    message(id: 3, direct: false, flags: ["wildcard_mentioned"]),
+                ],
                 channelNotifications: true,
                 topicPolicies: [LiveTopicPolicy(streamID: 5, topic: "MACOS", visibility: .muted)]
             ),
             identity: identity
         )
-        #expect(mutedTopic.isEmpty, "topic names compare without case")
+        #expect(mutedTopic.isEmpty, "topic names compare without case; @all does not break through")
 
         let mutedChannel = planner.plan(
             snapshot: snapshot(
@@ -175,18 +178,56 @@ struct NotificationTests {
         #expect(planner.plan(snapshot: snapshot(burst), identity: identity).isEmpty)
     }
 
-    @Test("Muted channels stay silent even when mentioned")
-    func mutedChannelsAreRespected() {
+    @Test("Muted channels and topics still announce a personal @-mention, but not @all")
+    func mentionsInMutedPlaces() {
         var planner = NotificationPlanner()
         planner.prime(with: snapshot([]))
-        let notifications = planner.plan(
+        let mutedChannel = planner.plan(
             snapshot: snapshot(
-                [message(id: 2, direct: false, flags: ["mentioned"])],
+                [
+                    message(id: 2, direct: false, flags: ["mentioned"]),
+                    message(id: 3, direct: false, flags: ["wildcard_mentioned"]),
+                ],
                 mutedChannel: true
             ),
             identity: identity
         )
-        #expect(notifications.isEmpty)
+        #expect(mutedChannel.map(\.route.messageID) == [2])
+
+        let mutedTopic = planner.plan(
+            snapshot: snapshot(
+                [
+                    message(id: 4, direct: false, flags: ["mentioned"]),
+                    message(id: 5, direct: false, flags: ["wildcard_mentioned"]),
+                    message(id: 6, direct: false, flags: ["mentioned"]),
+                ],
+                topicPolicies: [LiveTopicPolicy(streamID: 5, topic: "macOS", visibility: .muted)]
+            ),
+            identity: identity
+        )
+        #expect(mutedTopic.map(\.route.messageID) == [4, 6])
+    }
+
+    @Test("A topic reports Zulip's own choice: followed, default, muted or unmuted")
+    func topicNotificationLevels() {
+        let settings = ChannelNotificationSettings(
+            snapshot: snapshot(
+                [],
+                mutedChannel: true,
+                topicPolicies: [
+                    LiveTopicPolicy(streamID: 5, topic: "Releases", visibility: .followed),
+                    LiveTopicPolicy(streamID: 5, topic: "noise", visibility: .muted),
+                    LiveTopicPolicy(streamID: 5, topic: "Plans", visibility: .unmuted),
+                ]
+            )
+        )
+        #expect(settings.level(streamID: 5, topic: "releases") == .followed)
+        #expect(settings.level(streamID: 5, topic: "Noise") == .muted)
+        #expect(settings.level(streamID: 5, topic: "plans") == .unmuted)
+        #expect(settings.level(streamID: 5, topic: "other") == .standard)
+        #expect(!settings.isMuted(streamID: 5, topic: "Releases"), "following unmutes")
+        #expect(settings.isMuted(streamID: 5, topic: "other"), "default follows the muted channel")
+        #expect(settings.notifies(streamID: 5, topic: "Releases", isPersonalMention: false))
     }
 
     @Test("Notification routes survive the userInfo round trip")

@@ -21,6 +21,7 @@ const STREAMS_PATH_PREFIX: &str = "api/v1/streams";
 const SUBSCRIPTIONS_PATH: &str = "api/v1/users/me/subscriptions";
 const SUBSCRIPTION_PROPERTIES_PATH: &str = "api/v1/users/me/subscriptions/properties";
 const SETTINGS_PATH: &str = "api/v1/settings";
+const USER_TOPICS_PATH: &str = "api/v1/user_topics";
 const MAX_CHANNEL_NAME_CHARS: usize = 60;
 const MAX_CHANNEL_DESCRIPTION_CHARS: usize = 1_024;
 const MAX_CHANNEL_MEMBERS: usize = 1_000;
@@ -143,6 +144,31 @@ pub enum TopicPropagation {
     ChangeOne,
     /// Rename every message in the selected message's current topic.
     ChangeAll,
+}
+
+/// What the account wants for one topic, overriding its channel (Zulip's
+/// `visibility_policy`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TopicVisibilityChoice {
+    /// Follow the channel: no choice of its own ("Default").
+    Inherit,
+    /// Hide the topic and silence its notifications.
+    Muted,
+    /// Show the topic although its channel is muted.
+    Unmuted,
+    /// Notify about every message and keep the topic prominent.
+    Followed,
+}
+
+impl TopicVisibilityChoice {
+    const fn policy(self) -> &'static str {
+        match self {
+            Self::Inherit => "0",
+            Self::Muted => "1",
+            Self::Unmuted => "2",
+            Self::Followed => "3",
+        }
+    }
 }
 
 /// A conversation the account may be typing in.
@@ -796,6 +822,44 @@ impl MessageClient {
         document.validate_result()
     }
 
+    /// Mutes, unmutes or follows one topic, or returns it to its channel's
+    /// behavior (`POST /user_topics`, Zulip 7.0 / feature level 134 and later).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageApiError`] for an invalid channel identifier or topic,
+    /// transport, rejection (including servers too old for the endpoint), size,
+    /// or response failures.
+    pub async fn set_topic_visibility(
+        &self,
+        stream_id: i64,
+        topic: &str,
+        choice: TopicVisibilityChoice,
+    ) -> Result<(), MessageApiError> {
+        if stream_id <= 0
+            || topic.trim().is_empty()
+            || topic.len() > MAX_TOPIC_NAME_BYTES
+            || topic.chars().any(char::is_control)
+        {
+            return Err(MessageApiError::InvalidInput);
+        }
+        let response = self
+            .http
+            .post(self.base_url.endpoint(USER_TOPICS_PATH))
+            .basic_auth(&self.email, Some(self.api_key.expose_secret()))
+            .form(&[
+                ("stream_id", stream_id.to_string()),
+                ("topic", topic.to_owned()),
+                ("visibility_policy", choice.policy().to_owned()),
+            ])
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let document: ApiResultDocument =
+            decode_response(response, MAX_WRITE_RESPONSE_BYTES).await?;
+        document.validate_result()
+    }
+
     /// Sets the account-wide default for desktop notifications about every
     /// message in channels that have no setting of their own
     /// (`enable_stream_desktop_notifications`).
@@ -1425,7 +1489,8 @@ mod tests {
 
     use super::{
         ConversationTarget, MessageApiError, MessageClient, MessageFlag, MessageWriteOperation,
-        OutgoingMessage, PresenceStatus, ReadReceipts, TopicPropagation, TypingTarget,
+        OutgoingMessage, PresenceStatus, ReadReceipts, TopicPropagation, TopicVisibilityChoice,
+        TypingTarget,
     };
     use crate::auth::SecretString;
 
@@ -1722,6 +1787,58 @@ mod tests {
         );
         assert!(matches!(
             client.set_channel_desktop_notifications(0, true).await,
+            Err(MessageApiError::InvalidInput)
+        ));
+    }
+
+    #[tokio::test]
+    async fn topic_visibility_is_written_to_the_server() {
+        let responses = vec![
+            (
+                StatusCode::OK,
+                r#"{"result":"success","msg":""}"#.to_owned(),
+            ),
+            (
+                StatusCode::OK,
+                r#"{"result":"success","msg":""}"#.to_owned(),
+            ),
+            (
+                StatusCode::BAD_REQUEST,
+                r#"{"result":"error","code":"BAD_REQUEST","msg":"Invalid channel ID"}"#.to_owned(),
+            ),
+        ];
+        let (server, requests) = spawn_mock(responses);
+        let client = MessageClient::new(&server, "maya@example.com", SecretString::new(API_KEY))
+            .expect("message client");
+
+        client
+            .set_topic_visibility(5, "release plan", TopicVisibilityChoice::Followed)
+            .await
+            .expect("follow topic");
+        let request = requests.recv().expect("follow request");
+        assert!(request.starts_with("POST /api/v1/user_topics HTTP/1.1"));
+        assert!(request.contains("stream_id=5"));
+        assert!(request.contains("topic=release+plan") || request.contains("topic=release%20plan"));
+        assert!(request.contains("visibility_policy=3"));
+        assert!(!request.contains(API_KEY));
+
+        client
+            .set_topic_visibility(5, "release plan", TopicVisibilityChoice::Inherit)
+            .await
+            .expect("reset topic");
+        let request = requests.recv().expect("reset request");
+        assert!(request.contains("visibility_policy=0"));
+
+        assert!(
+            client
+                .set_topic_visibility(9, "x", TopicVisibilityChoice::Muted)
+                .await
+                .is_err()
+        );
+        assert!(matches!(
+            client
+                .set_topic_visibility(5, "  ", TopicVisibilityChoice::Muted)
+                .await,
             Err(MessageApiError::InvalidInput)
         ));
     }

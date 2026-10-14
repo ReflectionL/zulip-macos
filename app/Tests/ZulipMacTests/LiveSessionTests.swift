@@ -978,6 +978,34 @@ struct LiveSessionTests {
         #expect(model.connectionState == .connected)
     }
 
+    @Test("A topic's notification level is sent to Zulip")
+    func topicNotificationLevel() async {
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(client: core, credentialStore: MemoryCredentialStore())
+        model.startObserving()
+        let accountID = "account-1"
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: accountID),
+                credential: StoredAPICredential(accountID: accountID, apiKey: "key"),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.connectionState == .connected }
+
+        model.setTopicNotification(streamID: 5, topic: "macOS", level: .followed)
+        guard case let .setTopicNotification(requestID, commandAccountID, 5, "macOS", .followed) =
+            core.commands.last
+        else {
+            Issue.record("Expected a topic notification command")
+            return
+        }
+        #expect(commandAccountID == accountID)
+        core.emit(.notificationSettingSaved(requestID: requestID))
+        #expect(model.connectionState == .connected)
+    }
+
     @Test("A conversation whose first page cannot be fetched offers a retry instead of loading forever")
     func failedFirstPageShowsFailure() async {
         let core = RecordingCoreClient()
@@ -1013,6 +1041,35 @@ struct LiveSessionTests {
         if case .loading = model.conversationState {} else {
             Issue.record("Retrying shows the loading state again")
         }
+    }
+
+    @Test("A conversation that never answers turns into a failure with Try Again")
+    func silentFirstPageTimesOut() async {
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(client: core, credentialStore: MemoryCredentialStore())
+        model.openTimeout = .milliseconds(50)
+        model.startObserving()
+        let accountID = "account-1"
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: accountID),
+                credential: StoredAPICredential(accountID: accountID, apiKey: "key"),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.connectionState == .connected }
+
+        model.openConversation(.channel(accountID: accountID, streamID: 5))
+        // `eventually` only yields; the watchdog needs real time to elapse.
+        for _ in 0..<100 {
+            if case .failure = model.conversationState { break }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        if case .failure = model.conversationState {} else {
+            Issue.record("A silent first page must become a failure")
+        }
+        #expect(model.connectionState == .connected)
     }
 
     @Test("Reopening a conversation seen this session paints at once without a loading state")

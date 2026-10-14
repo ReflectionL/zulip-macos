@@ -1,6 +1,7 @@
 #![doc = "Swift-facing actor boundary for the native Zulip macOS client."]
 
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -25,7 +26,8 @@ use zulip_core::{
     media::MediaClient,
     messages::{
         ConversationTarget, MessageClient, MessageFlag, MessageWriteOperation, OutgoingMessage,
-        PresenceStatus, ReadReceipts, TopicPropagation, TopicSummary, TypingTarget,
+        PresenceStatus, ReadReceipts, TopicPropagation, TopicSummary, TopicVisibilityChoice,
+        TypingTarget,
     },
     sync::{
         EventQueueClient, MessageSummary, RecentDirectConversation, RecoveryPolicy, SyncCycle,
@@ -486,6 +488,20 @@ pub enum CoreCommand {
         /// Whether every message should notify.
         enabled: bool,
     },
+    /// Mutes, unmutes or follows one topic, or returns it to its channel's
+    /// behavior. The change comes back through the sync snapshot.
+    SetTopicVisibility {
+        /// Correlates the response.
+        request_id: u64,
+        /// Client-owned account partition.
+        account_id: String,
+        /// Channel identifier.
+        stream_id: i64,
+        /// Topic name.
+        topic: String,
+        /// The wanted behavior.
+        visibility: CoreTopicVisibilityChoice,
+    },
     /// Fetches the original Markdown of one message so it can be quoted or forwarded.
     FetchMessageSource {
         /// Correlates the response.
@@ -591,6 +607,7 @@ impl CoreCommand {
             | Self::CreateChannel { request_id, .. }
             | Self::RenameChannel { request_id, .. }
             | Self::SetNotificationSetting { request_id, .. }
+            | Self::SetTopicVisibility { request_id, .. }
             | Self::Disconnect { request_id } => *request_id,
         }
     }
@@ -700,6 +717,19 @@ pub enum CoreTopicVisibility {
     /// The topic is unmuted inside a muted channel.
     Unmuted,
     /// The topic is followed.
+    Followed,
+}
+
+/// What the account can ask for one topic (Zulip's `visibility_policy`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum CoreTopicVisibilityChoice {
+    /// Follow the channel; remove the topic's own choice.
+    Inherit,
+    /// Mute the topic.
+    Muted,
+    /// Unmute the topic inside a muted channel.
+    Unmuted,
+    /// Follow the topic.
     Followed,
 }
 
@@ -1346,13 +1376,24 @@ struct AccountSession {
     media: Arc<MediaClient>,
     sync: SyncSession,
     topics: Vec<TopicSummary>,
+    /// Sequence number of the newest topic-list fetch applied per channel, so a
+    /// slow older fetch cannot overwrite a newer one.
+    topic_versions: HashMap<i64, u64>,
     cache: CacheHandle,
     last_snapshot_cache_seconds: AtomicU64,
+}
+
+/// Topic lists a background fetch brought back for the actor to apply.
+struct TopicRefresh {
+    account_id: String,
+    version: u64,
+    lists: Vec<(i64, Vec<TopicSummary>)>,
 }
 
 enum ActorInput {
     Command(Option<CoreCommand>),
     Sync(SyncCycle),
+    Topics(Option<TopicRefresh>),
 }
 
 async fn run_actor(
@@ -1364,6 +1405,10 @@ async fn run_actor(
     let mut account: Option<AccountSession> = None;
     let mut poll_not_before = Instant::now();
     let mut retrying = false;
+    // Topic lists are fetched beside the actor: a slow or stalled request must
+    // not hold up commands such as opening a conversation.
+    let (topic_sender, mut topic_receiver) = unbounded_channel::<TopicRefresh>();
+    let mut topic_version = 0_u64;
 
     loop {
         let input = if let Some(session) = account.as_mut() {
@@ -1375,9 +1420,13 @@ async fn run_actor(
             tokio::select! {
                 command = receiver.recv() => ActorInput::Command(command),
                 cycle = &mut sync_advance => ActorInput::Sync(cycle),
+                refresh = topic_receiver.recv() => ActorInput::Topics(refresh),
             }
         } else {
-            ActorInput::Command(receiver.recv().await)
+            tokio::select! {
+                command = receiver.recv() => ActorInput::Command(command),
+                refresh = topic_receiver.recv() => ActorInput::Topics(refresh),
+            }
         };
 
         match input {
@@ -1418,13 +1467,23 @@ async fn run_actor(
                     _ => retrying = false,
                 }
                 if let Some(session) = account.as_mut() {
-                    refresh_changed_topics(session, &cycle).await;
+                    topic_version += 1;
+                    request_changed_topics(session, &cycle, topic_version, &topic_sender);
                 }
                 poll_not_before = handle_sync_cycle(cycle, account.as_ref(), &event_sink);
                 if terminal {
                     account = None;
                 }
             }
+            ActorInput::Topics(Some(refresh)) => {
+                if let Some(session) = account
+                    .as_mut()
+                    .filter(|session| session.account_id == refresh.account_id)
+                {
+                    apply_topic_refresh(session, refresh, &event_sink);
+                }
+            }
+            ActorInput::Topics(None) => {}
         }
     }
 }
@@ -1757,6 +1816,21 @@ async fn handle_command(
             account.as_ref(),
             event_sink,
         ),
+        CoreCommand::SetTopicVisibility {
+            request_id,
+            account_id,
+            stream_id,
+            topic,
+            visibility,
+        } => set_topic_visibility(
+            request_id,
+            &account_id,
+            stream_id,
+            topic,
+            visibility,
+            account.as_ref(),
+            event_sink,
+        ),
         CoreCommand::SetNotificationSetting {
             request_id,
             account_id,
@@ -1909,6 +1983,38 @@ fn set_notification_setting(
             None => messages.set_default_channel_notifications(enabled).await,
         };
         match result {
+            Ok(()) => event_sink.handle_event(CoreEvent::NotificationSettingSaved { request_id }),
+            Err(error) => emit_error(Some(request_id), error, &event_sink),
+        }
+    });
+}
+
+fn set_topic_visibility(
+    request_id: u64,
+    account_id: &str,
+    stream_id: i64,
+    topic: String,
+    visibility: CoreTopicVisibilityChoice,
+    account: Option<&AccountSession>,
+    event_sink: &Arc<dyn CoreEventSink>,
+) {
+    let Some(session) = account.filter(|item| item.account_id == account_id) else {
+        emit_no_session(request_id, event_sink);
+        return;
+    };
+    let choice = match visibility {
+        CoreTopicVisibilityChoice::Inherit => TopicVisibilityChoice::Inherit,
+        CoreTopicVisibilityChoice::Muted => TopicVisibilityChoice::Muted,
+        CoreTopicVisibilityChoice::Unmuted => TopicVisibilityChoice::Unmuted,
+        CoreTopicVisibilityChoice::Followed => TopicVisibilityChoice::Followed,
+    };
+    let messages = Arc::clone(&session.messages);
+    let event_sink = Arc::clone(event_sink);
+    tokio::spawn(async move {
+        match messages
+            .set_topic_visibility(stream_id, &topic, choice)
+            .await
+        {
             Ok(()) => event_sink.handle_event(CoreEvent::NotificationSettingSaved { request_id }),
             Err(error) => emit_error(Some(request_id), error, &event_sink),
         }
@@ -2338,14 +2444,21 @@ fn conversation_key_for_message(
     }
 }
 
-/// How long the first attempt to fetch a conversation may take before it is
-/// abandoned and repeated once. A connection the server or network silently
-/// dropped while the app was idle otherwise hangs until the full request
-/// timeout, and the visible conversation would sit in its loading state.
+/// How long the first attempt to fetch a conversation runs alone before a
+/// second identical request is started beside it. A connection the server or
+/// network silently dropped while the app was idle otherwise hangs until the
+/// full request timeout, and the visible conversation would sit in its
+/// loading state. The first request is not cancelled: on a slow but working
+/// network it may well be the one that answers first.
+#[cfg(not(test))]
 const FIRST_CONVERSATION_FETCH_ATTEMPT: Duration = Duration::from_secs(6);
+#[cfg(test)]
+const FIRST_CONVERSATION_FETCH_ATTEMPT: Duration = Duration::from_millis(300);
 
-/// Fetches the newest messages of a conversation, repeating the request once
-/// on a transport failure or a stalled first attempt.
+/// Fetches the newest messages of a conversation. A transport failure is
+/// repeated once; a request still running after
+/// [`FIRST_CONVERSATION_FETCH_ATTEMPT`] is joined by a second one and the
+/// first answer wins.
 async fn fetch_conversation_with_retry(
     messages: &MessageClient,
     key: &CoreConversationKey,
@@ -2353,17 +2466,33 @@ async fn fetch_conversation_with_retry(
 ) -> Result<zulip_core::messages::ConversationMessages, zulip_core::messages::MessageApiError> {
     use zulip_core::messages::MessageApiError;
 
-    match tokio::time::timeout(
-        FIRST_CONVERSATION_FETCH_ATTEMPT,
-        messages.fetch_conversation(key.target(), limit),
-    )
-    .await
-    {
-        Ok(Ok(page)) => return Ok(page),
-        Ok(Err(error)) if !matches!(error, MessageApiError::Transport { .. }) => return Err(error),
-        Ok(Err(_)) | Err(_) => {}
+    let mut first = Box::pin(messages.fetch_conversation(key.target(), limit));
+    let mut early = None;
+    tokio::select! {
+        result = &mut first => early = Some(result),
+        () = tokio::time::sleep(FIRST_CONVERSATION_FETCH_ATTEMPT) => {}
     }
-    messages.fetch_conversation(key.target(), limit).await
+    match early {
+        Some(Ok(page)) => return Ok(page),
+        Some(Err(error)) if !matches!(error, MessageApiError::Transport { .. }) => {
+            return Err(error);
+        }
+        // Failed on the wire: one plain repeat.
+        Some(Err(_)) => return messages.fetch_conversation(key.target(), limit).await,
+        None => {}
+    }
+    // Still waiting: race a second request against the first.
+    let mut second = Box::pin(messages.fetch_conversation(key.target(), limit));
+    tokio::select! {
+        result = &mut first => match result {
+            Ok(page) => Ok(page),
+            Err(_) => second.await,
+        },
+        result = &mut second => match result {
+            Ok(page) => Ok(page),
+            Err(_) => first.await,
+        },
+    }
 }
 
 fn open_conversation(
@@ -2550,9 +2679,15 @@ async fn update_topic(
     }
 }
 
-/// Re-reads the topic lists a sync cycle may have invalidated: channels with a
-/// renamed, moved or emptied topic, or every channel after a full reload.
-async fn refresh_changed_topics(session: &mut AccountSession, cycle: &SyncCycle) {
+/// Starts re-reading the topic lists a sync cycle may have invalidated: channels
+/// with a renamed, moved or emptied topic, or every channel after a full reload.
+/// The lists come back through `sender` and are applied by [`apply_topic_refresh`].
+fn request_changed_topics(
+    session: &mut AccountSession,
+    cycle: &SyncCycle,
+    version: u64,
+    sender: &UnboundedSender<TopicRefresh>,
+) {
     let stream_ids: Vec<i64> = match cycle {
         SyncCycle::Events(outcome) => outcome.topic_changed_streams.clone(),
         SyncCycle::Resynchronized { snapshot, .. } => {
@@ -2564,7 +2699,68 @@ async fn refresh_changed_topics(session: &mut AccountSession, cycle: &SyncCycle)
         }
         _ => return,
     };
-    refresh_topics(session, &stream_ids).await;
+    if stream_ids.is_empty() {
+        return;
+    }
+    let messages = Arc::clone(&session.messages);
+    let account_id = session.account_id.clone();
+    let sender = sender.clone();
+    tokio::spawn(async move {
+        let mut lists = Vec::new();
+        for chunk in stream_ids.chunks(TOPIC_FETCH_CONCURRENCY) {
+            let mut tasks = JoinSet::new();
+            for &stream_id in chunk {
+                let messages = Arc::clone(&messages);
+                tasks.spawn(async move { (stream_id, messages.fetch_topics(stream_id).await) });
+            }
+            while let Some(result) = tasks.join_next().await {
+                // A channel whose request fails keeps its previous topics.
+                if let Ok((stream_id, Ok(fresh))) = result {
+                    lists.push((stream_id, fresh));
+                }
+            }
+        }
+        if !lists.is_empty() {
+            let _ = sender.send(TopicRefresh {
+                account_id,
+                version,
+                lists,
+            });
+        }
+    });
+}
+
+/// Replaces the stored topics of the refreshed channels (unless a newer fetch
+/// already did) and publishes the sidebar's new topic list.
+fn apply_topic_refresh(
+    session: &mut AccountSession,
+    refresh: TopicRefresh,
+    event_sink: &Arc<dyn CoreEventSink>,
+) {
+    let mut changed = false;
+    for (stream_id, fresh) in refresh.lists {
+        if session
+            .topic_versions
+            .get(&stream_id)
+            .is_some_and(|applied| *applied > refresh.version)
+        {
+            continue;
+        }
+        session.topic_versions.insert(stream_id, refresh.version);
+        session.topics.retain(|topic| topic.stream_id != stream_id);
+        session.topics.extend(fresh);
+        changed = true;
+    }
+    if !changed {
+        return;
+    }
+    normalize_topics(&mut session.topics);
+    let snapshot = session.sync.snapshot();
+    cache_snapshot_throttled(session, &snapshot);
+    event_sink.handle_event(CoreEvent::SnapshotUpdated {
+        account_id: session.account_id.clone(),
+        snapshot: CoreSnapshot::from_sync(snapshot, &session.topics),
+    });
 }
 
 /// Replaces the stored topics of `stream_ids` with the server's current lists.
@@ -2846,6 +3042,7 @@ async fn start_session(
                 media,
                 sync,
                 topics,
+                topic_versions: HashMap::new(),
                 cache: cache.clone(),
                 last_snapshot_cache_seconds: AtomicU64::new(now_seconds()),
             });
@@ -3237,7 +3434,11 @@ mod tests {
     use std::{
         io::{Read, Write},
         net::TcpListener,
-        sync::{Arc, Mutex, mpsc},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicU64, Ordering},
+            mpsc,
+        },
         thread,
         time::{Duration, Instant as StdInstant},
     };
@@ -4205,6 +4406,178 @@ mod tests {
         assert!(paths[0].starts_with("POST /api/v1/fetch_api_key"));
         assert!(paths[1].starts_with("GET /api/v1/users/me"));
         assert!(paths[2].starts_with("POST /api/v1/register"));
+    }
+
+    #[test]
+    fn slow_topic_refresh_does_not_hold_up_opening_a_conversation() {
+        let (server, topic_requests) = spawn_slow_topics_mock(false);
+        let (signal_sender, signal_receiver) = mpsc::channel();
+        let sink = Arc::new(RecordingSink {
+            events: Mutex::new(Vec::new()),
+            notifier: Mutex::new(Some(signal_sender)),
+        });
+        let client = RustCoreClient::new(sink.clone(), "/tmp/zulip-ffi-tests".to_owned(), None);
+        client.submit(CoreCommand::StartApiKeySession {
+            request_id: 60,
+            account_id: "account-slow".to_owned(),
+            server_url: server,
+            email: "maya@example.com".to_owned(),
+            api_key: "fixture-key-do-not-log".to_owned(),
+        });
+        let _ = wait_for_event(&signal_receiver, &sink, |event| {
+            matches!(event, CoreEvent::SessionStarted { request_id: 60, .. })
+        });
+
+        // The startup fetch is quick; the one a deleted message triggers stalls.
+        let _startup = topic_requests
+            .recv_timeout(Duration::from_secs(3))
+            .expect("startup topic request");
+        let _refresh = topic_requests
+            .recv_timeout(Duration::from_secs(5))
+            .expect("topic refresh request");
+
+        let asked = StdInstant::now();
+        client.submit(CoreCommand::OpenConversation {
+            request_id: 61,
+            key: CoreConversationKey::DirectMessage {
+                account_id: "account-slow".to_owned(),
+                recipient_ids: vec![9, 22],
+            },
+            limit: 50,
+        });
+        let _ = wait_for_event(&signal_receiver, &sink, |event| {
+            matches!(event, CoreEvent::ConversationOpened { request_id: 61, .. })
+        });
+        assert!(
+            asked.elapsed() < Duration::from_millis(1500),
+            "opening waited behind the topic refresh: {:?}",
+            asked.elapsed()
+        );
+
+        // The refreshed list still reaches the sidebar once the fetch ends.
+        let _ = wait_for_event(&signal_receiver, &sink, |event| {
+            matches!(
+                event,
+                CoreEvent::SnapshotUpdated { snapshot, .. }
+                    if snapshot.topics.iter().any(|topic| topic.name == "after-delete")
+            )
+        });
+    }
+
+    #[test]
+    fn stalled_first_page_request_is_raced_by_a_second_one() {
+        let (server, _topic_requests) = spawn_slow_topics_mock(true);
+        let (signal_sender, signal_receiver) = mpsc::channel();
+        let sink = Arc::new(RecordingSink {
+            events: Mutex::new(Vec::new()),
+            notifier: Mutex::new(Some(signal_sender)),
+        });
+        let client = RustCoreClient::new(sink.clone(), "/tmp/zulip-ffi-tests".to_owned(), None);
+        client.submit(CoreCommand::StartApiKeySession {
+            request_id: 70,
+            account_id: "account-slow".to_owned(),
+            server_url: server,
+            email: "maya@example.com".to_owned(),
+            api_key: "fixture-key-do-not-log".to_owned(),
+        });
+        let _ = wait_for_event(&signal_receiver, &sink, |event| {
+            matches!(event, CoreEvent::SessionStarted { request_id: 70, .. })
+        });
+
+        let asked = StdInstant::now();
+        client.submit(CoreCommand::OpenConversation {
+            request_id: 71,
+            key: CoreConversationKey::DirectMessage {
+                account_id: "account-slow".to_owned(),
+                recipient_ids: vec![9, 22],
+            },
+            limit: 50,
+        });
+        let _ = wait_for_event(&signal_receiver, &sink, |event| {
+            matches!(event, CoreEvent::ConversationOpened { request_id: 71, .. })
+        });
+        assert!(
+            asked.elapsed() < Duration::from_secs(2),
+            "the second request did not answer first: {:?}",
+            asked.elapsed()
+        );
+    }
+
+    /// A server whose second topic-list request takes three seconds while every
+    /// other request is answered at once; each connection has its own thread.
+    fn spawn_slow_topics_mock(slow_first_page: bool) -> (String, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let address = listener.local_addr().expect("listener address");
+        let (sender, receiver) = mpsc::channel();
+        let topic_calls = Arc::new(AtomicU64::new(0));
+        let event_calls = Arc::new(AtomicU64::new(0));
+        let page_calls = Arc::new(AtomicU64::new(0));
+        thread::spawn(move || {
+            while let Ok((mut stream, _)) = listener.accept() {
+                let sender = sender.clone();
+                let topic_calls = Arc::clone(&topic_calls);
+                let event_calls = Arc::clone(&event_calls);
+                let page_calls = Arc::clone(&page_calls);
+                thread::spawn(move || {
+                    let request = read_request(&mut stream);
+                    let request_line = request.lines().next().unwrap_or_default().to_owned();
+                    if request_line.is_empty() {
+                        return;
+                    }
+                    let body = if request_line.starts_with("GET /api/v1/users/me HTTP") {
+                        r#"{"result":"success","email":"maya@example.com","full_name":"Maya Chen","user_id":9}"#.to_owned()
+                    } else if request_line.starts_with("POST /api/v1/register HTTP") {
+                        r##"{
+                            "result":"success",
+                            "queue_id":"queue-slow",
+                            "last_event_id":10,
+                            "event_queue_longpoll_timeout_seconds":5,
+                            "zulip_feature_level":481,
+                            "realm_users":[],
+                            "subscriptions":[{"stream_id":5,"name":"engineering","color":"#76ce90","is_muted":false}]
+                        }"##
+                        .to_owned()
+                    } else if request_line.starts_with("GET /api/v1/users/me/5/topics?") {
+                        let call = topic_calls.fetch_add(1, Ordering::SeqCst);
+                        let _ = sender.send(request_line.clone());
+                        if call == 0 {
+                            r#"{"result":"success","topics":[{"max_id":50,"name":"macOS"}]}"#
+                                .to_owned()
+                        } else {
+                            thread::sleep(Duration::from_secs(3));
+                            r#"{"result":"success","topics":[{"max_id":51,"name":"after-delete"}]}"#
+                                .to_owned()
+                        }
+                    } else if request_line.starts_with("GET /api/v1/events?") {
+                        let call = event_calls.fetch_add(1, Ordering::SeqCst);
+                        if call == 0 {
+                            thread::sleep(Duration::from_millis(300));
+                            r#"{"result":"success","events":[{"id":11,"type":"delete_message","message_ids":[999],"stream_id":5}]}"#.to_owned()
+                        } else {
+                            thread::sleep(Duration::from_millis(200));
+                            format!(
+                                r#"{{"result":"success","events":[{{"id":{},"type":"heartbeat"}}]}}"#,
+                                11 + call
+                            )
+                        }
+                    } else if request_line.starts_with("GET /api/v1/messages?") {
+                        if slow_first_page && page_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                            thread::sleep(Duration::from_secs(3));
+                        }
+                        r#"{"result":"success","found_oldest":true,"found_newest":true,"messages":[]}"#.to_owned()
+                    } else {
+                        r#"{"result":"success"}"#.to_owned()
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                });
+            }
+        });
+        (format!("http://{address}/"), receiver)
     }
 
     fn spawn_register_mock() -> (String, mpsc::Receiver<String>) {

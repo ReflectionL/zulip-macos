@@ -55,7 +55,7 @@ roadmap lives in [`PLAN.md`](PLAN.md).
 
 - Send, edit, delete, react, star, mark read/unread, quote and reply, and
   forward, each with visible pending, rollback and retry states. Edited
-  messages carry a gray "(edited)" label.
+  messages end with a small gray "(edited)" on the same line as the text.
 - Emoji reactions: a quick row of ten recommended emoji plus a searchable list
   of all standard emoji (type a word or paste an emoji). Existing reactions
   show their counts, highlight your own, and toggle on click. Custom (realm)
@@ -69,12 +69,18 @@ roadmap lives in [`PLAN.md`](PLAN.md).
 **Notifications**
 
 - Local notifications follow your Zulip settings: direct messages and
-  @-mentions (including wildcard mentions in channels), every message in
-  channels you turned desktop notifications on for (or that follow your
-  account default), and followed topics. Muted channels and muted topics stay
-  quiet. Turn a channel's notifications on or off from its context menu in
-  the sidebar, or use "Notify for All Channel Messages" in the gear menu; both
-  are saved to Zulip, so the web app agrees. Clicking a notification opens the message. The Dock badge shows
+  @-mentions, every message in channels you turned desktop notifications on
+  for (or that follow your account default), and every message in **followed**
+  topics. Muted channels and topics stay quiet, except that an @-mention of you
+  still notifies (an @all does not). Turn a channel's notifications on or off
+  from its context menu in the sidebar, or use "Notify for All Channel
+  Messages" in the gear menu.
+- Topics have Zulip's three levels: right-click a topic for **Follow Topic**
+  (a small bell appears and every message notifies), **Default** (the topic
+  behaves like its channel) or **Mute Topic** (dimmed, no notifications or
+  unread counts); inside a muted channel there is also **Unmute Topic**. All
+  of this is saved to Zulip (per-topic levels need Zulip 7.0), so the web app
+  agrees. Clicking a notification opens the message. The Dock badge shows
   unread direct messages plus unread mentions in unmuted channels and topics.
 
 **Keyboard and appearance**

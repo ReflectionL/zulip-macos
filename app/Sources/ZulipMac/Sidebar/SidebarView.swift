@@ -42,6 +42,9 @@ struct SidebarView: View {
     var renameChannel: ((ChannelSnapshot) -> Void)?
     /// Turns notifications for every message of a channel on or off.
     var setChannelNotifications: ((ChannelSnapshot, Bool) -> Void)?
+    /// Sets one topic to Followed, Default or Muted (or Unmuted, inside a
+    /// muted channel).
+    var setTopicNotification: ((ChannelSnapshot, TopicSnapshot, TopicNotificationLevel) -> Void)?
     /// The account-wide default for channels without a setting of their own,
     /// and the way to change it.
     var notifiesForAllChannels = false
@@ -51,6 +54,33 @@ struct SidebarView: View {
     var mediaLocalURLs: [String: String] = [:]
     var requestMedia: ((String) -> Void)?
     @Environment(UpdateController.self) private var updates: UpdateController?
+
+    /// Zulip's three levels for a topic. Inside a muted channel a topic is
+    /// either left muted with its channel or unmuted.
+    @ViewBuilder
+    private func topicNotificationMenu(
+        channel: ChannelSnapshot,
+        topic: TopicSnapshot,
+        set: @escaping (ChannelSnapshot, TopicSnapshot, TopicNotificationLevel) -> Void
+    ) -> some View {
+        Button(topic.notification == .followed ? "✓ Follow Topic" : "Follow Topic") {
+            set(channel, topic, .followed)
+        }
+        Button(
+            topic.notification == .standard
+                ? "✓ Default" : "Default"
+        ) {
+            set(channel, topic, .standard)
+        }
+        if channel.isMuted {
+            Button(topic.notification == .unmuted ? "✓ Unmute Topic" : "Unmute Topic") {
+                set(channel, topic, .unmuted)
+            }
+        }
+        Button(topic.notification == .muted ? "✓ Mute Topic" : "Mute Topic") {
+            set(channel, topic, .muted)
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -190,9 +220,22 @@ struct SidebarView: View {
                                         title: TopicName.display(topic.name),
                                         systemImage: "text.bubble",
                                         unreadCount: topic.unreadCount,
-                                        isSelected: selection == topicKey
+                                        isSelected: selection == topicKey,
+                                        isMuted: topic.notification == .muted
+                                            || (channel.isMuted && topic.notification != .unmuted
+                                                && topic.notification != .followed),
+                                        isFollowed: topic.notification == .followed
                                     ) {
                                         selection = topicKey
+                                    }
+                                    .contextMenu {
+                                        if let setTopicNotification {
+                                            topicNotificationMenu(
+                                                channel: channel,
+                                                topic: topic,
+                                                set: setTopicNotification
+                                            )
+                                        }
                                     }
                                     .padding(.leading, 22)
                                 }
@@ -405,6 +448,7 @@ private struct SidebarRow<Leading: View>: View {
     var unreadCount = 0
     let isSelected: Bool
     var isMuted = false
+    var isFollowed = false
     @ViewBuilder var leading: () -> Leading
     let action: () -> Void
 
@@ -416,6 +460,7 @@ private struct SidebarRow<Leading: View>: View {
         unreadCount: Int = 0,
         isSelected: Bool,
         isMuted: Bool = false,
+        isFollowed: Bool = false,
         @ViewBuilder leading: @escaping () -> Leading,
         action: @escaping () -> Void
     ) {
@@ -424,6 +469,7 @@ private struct SidebarRow<Leading: View>: View {
         self.unreadCount = unreadCount
         self.isSelected = isSelected
         self.isMuted = isMuted
+        self.isFollowed = isFollowed
         self.leading = leading
         self.action = action
     }
@@ -449,6 +495,13 @@ private struct SidebarRow<Leading: View>: View {
                     .lineLimit(1)
 
                 Spacer(minLength: AppTheme.Spacing.extraSmall)
+
+                if isFollowed {
+                    Image(systemName: "bell.fill")
+                        .font(AppTheme.Typography.scaled(9, weight: .medium))
+                        .foregroundStyle(AppTheme.Colors.secondaryText)
+                        .accessibilityLabel("Followed")
+                }
 
                 if unreadCount > 0 {
                     Text("\(unreadCount)")
@@ -500,6 +553,8 @@ private extension SidebarRow where Leading == EmptyView {
         systemImage: String,
         unreadCount: Int = 0,
         isSelected: Bool,
+        isMuted: Bool = false,
+        isFollowed: Bool = false,
         action: @escaping () -> Void
     ) {
         self.init(
@@ -507,6 +562,8 @@ private extension SidebarRow where Leading == EmptyView {
             systemImage: systemImage,
             unreadCount: unreadCount,
             isSelected: isSelected,
+            isMuted: isMuted,
+            isFollowed: isFollowed,
             leading: { EmptyView() },
             action: action
         )
