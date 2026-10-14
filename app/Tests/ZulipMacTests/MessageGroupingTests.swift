@@ -64,6 +64,29 @@ struct MessageGroupingTests {
         #expect(MessageGrouping.continuationIDs(in: messages, calendar: calendar).isEmpty)
     }
 
+    @Test("A date separator opens the timeline and each new calendar day")
+    func dayStarts() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try #require(TimeZone(secondsFromGMT: 0))
+        let beforeMidnight = Date(timeIntervalSince1970: 1_700_006_390)
+        let messages = [
+            message(1, sender: 9, date: beforeMidnight.addingTimeInterval(-3_600)),
+            message(2, sender: 22, date: beforeMidnight),
+            message(3, sender: 22, date: beforeMidnight.addingTimeInterval(20)),
+            message(4, sender: 9, date: beforeMidnight.addingTimeInterval(60)),
+            message(5, sender: 9, date: beforeMidnight.addingTimeInterval(2 * 86_400)),
+        ]
+        #expect(MessageGrouping.dayStartIDs(in: messages, calendar: calendar) == [1, 3, 5])
+        #expect(MessageGrouping.dayStartIDs(in: [], calendar: calendar).isEmpty)
+    }
+
+    @Test("A sender keeps the same name color")
+    func senderColors() {
+        #expect(SenderColor.index(for: 22) == SenderColor.index(for: 22))
+        #expect(SenderColor.index(for: 22) != SenderColor.index(for: 23))
+        #expect((0..<SenderColor.palette.count).contains(SenderColor.index(for: -5)))
+    }
+
     private func message(
         _ id: Int64,
         sender: Int64,

@@ -69,7 +69,11 @@ final class SystemMessageNotifier: NSObject, MessageNotifier, UNUserNotification
             case .denied:
                 self?.reportDisabled()
             default:
-                break
+                // Allowed, but set to show nothing: the user would never see one.
+                if settings.alertSetting == .disabled || settings.alertStyle == .none {
+                    notificationLog.info("notification alerts are switched off")
+                    self?.reportDisabled()
+                }
             }
         }
     }
@@ -93,12 +97,23 @@ final class SystemMessageNotifier: NSObject, MessageNotifier, UNUserNotification
             content: content,
             trigger: nil
         )
-        UNUserNotificationCenter.current().add(request) { error in
+        UNUserNotificationCenter.current().add(request) { [weak self] error in
             if let error {
                 notificationLog.error(
                     "could not post notification: \(error.localizedDescription, privacy: .public)"
                 )
+                self?.signalUndeliveredNotification()
             }
+        }
+    }
+
+    /// When the system refuses a notification, a Dock bounce and the alert sound
+    /// still tell the user something arrived instead of failing silently.
+    private nonisolated func signalUndeliveredNotification() {
+        Task { @MainActor in
+            guard !NSApplication.shared.isActive else { return }
+            NSApplication.shared.requestUserAttention(.informationalRequest)
+            NSSound.beep()
         }
     }
 

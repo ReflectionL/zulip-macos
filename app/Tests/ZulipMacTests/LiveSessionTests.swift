@@ -112,9 +112,12 @@ struct LiveSessionTests {
                 )?
                 .title == "macOS"
         )
-        let savedCredential = await credentials.savedCredential()
+        await eventually {
+            await credentials.savedCredential()
+                == StoredAPICredential(accountID: accountID, apiKey: "derived-api-key")
+        }
         #expect(
-            savedCredential
+            await credentials.savedCredential()
                 == StoredAPICredential(accountID: accountID, apiKey: "derived-api-key")
         )
     }
@@ -242,6 +245,7 @@ struct LiveSessionTests {
             )
         )
         await eventually { model.connectionState == .connected }
+        await eventually { await credentials.savedCredential() != nil }
         #expect(await credentials.savedCredential() != nil)
 
         core.emit(.failed(requestID: nil, message: "sign in again"))

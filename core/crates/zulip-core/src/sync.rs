@@ -23,6 +23,8 @@ const MAX_REGISTER_RESPONSE_BYTES: usize = 16 * 1_048_576;
 const MAX_EVENTS_RESPONSE_BYTES: usize = 8 * 1_048_576;
 const DEFAULT_LONGPOLL_TIMEOUT: Duration = Duration::from_secs(90);
 const MIN_LONGPOLL_TIMEOUT_SECONDS: u64 = 5;
+/// How much longer than the server's long-poll timeout the client waits.
+const LONGPOLL_GRACE: Duration = Duration::from_secs(20);
 const MAX_LONGPOLL_TIMEOUT_SECONDS: u64 = 600;
 const EVENT_TYPES_JSON: &str = concat!(
     r#"["message","subscription","realm_user","update_message","#,
@@ -675,7 +677,10 @@ impl EventQueueClient {
         let response = self
             .http
             .get(self.base_url.endpoint(EVENTS_PATH))
-            .timeout(queue.longpoll_timeout)
+            // The server answers an idle poll with a heartbeat at its own timeout;
+            // giving up at exactly that moment would race the heartbeat and turn
+            // a quiet queue into a retry with back-off (and late notifications).
+            .timeout(queue.longpoll_timeout + LONGPOLL_GRACE)
             .basic_auth(&self.email, Some(self.api_key.expose_secret()))
             .query(&[
                 ("queue_id", queue.id.clone()),
@@ -946,6 +951,20 @@ impl SyncSession {
         self.reducer.typing_preferences()
     }
 
+    /// Returns the newest message identifier this session knows of, read or
+    /// unread, or 0 when it knows none.
+    #[must_use]
+    pub fn newest_message_id(&self) -> i64 {
+        self.reducer.newest_message_id()
+    }
+
+    /// Adds messages fetched outside the event queue, such as those that arrived
+    /// while a lost queue was being replaced. Returns the new snapshot when any
+    /// of them was not already known.
+    pub fn add_fetched_messages(&mut self, messages: Vec<MessageSummary>) -> Option<SyncSnapshot> {
+        self.reducer.add_fetched_messages(messages)
+    }
+
     /// Polls or continues a pending full resynchronization.
     ///
     /// Queue expiry and fresh `restart` events immediately attempt an atomic
@@ -1154,6 +1173,33 @@ impl SyncReducer {
     #[must_use]
     pub const fn typing_preferences(&self) -> TypingPreferences {
         self.typing_preferences
+    }
+
+    /// Returns the newest known message identifier, read or unread, or 0.
+    #[must_use]
+    pub fn newest_message_id(&self) -> i64 {
+        let message = self.messages.last_key_value().map_or(0, |(id, _)| *id);
+        let unread = self.unread.last_key_value().map_or(0, |(id, _)| *id);
+        message.max(unread)
+    }
+
+    /// Stores messages that did not come through the event queue. Messages
+    /// already known are left as they are, so a late fetch cannot undo an edit
+    /// or flag change the queue delivered first.
+    pub fn add_fetched_messages(&mut self, messages: Vec<MessageSummary>) -> Option<SyncSnapshot> {
+        let mut changed = false;
+        for message in messages {
+            if self.messages.contains_key(&message.id) {
+                continue;
+            }
+            self.track_unread(&message);
+            self.messages.insert(message.id, message);
+            changed = true;
+        }
+        changed.then(|| {
+            self.revision = self.revision.saturating_add(1);
+            self.snapshot()
+        })
     }
 
     /// Reduces one poll response and publishes no more than one new snapshot.
@@ -3196,6 +3242,45 @@ mod tests {
                 .apply_batch(vec![SyncEvent::Heartbeat { event_id: 5 }])
                 .topic_changed_streams
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn messages_fetched_after_a_queue_gap_join_the_snapshot_once() {
+        let mut reducer = SyncReducer::new(
+            0,
+            BootstrapState {
+                messages: vec![fixture_message(1, "<p>a</p>")],
+                unread: vec![super::UnreadMessage {
+                    id: 3,
+                    stream_id: Some(5),
+                    topic: Some("Rust core".to_owned()),
+                    user_ids: Vec::new(),
+                    mentioned: false,
+                }],
+                ..BootstrapState::default()
+            },
+        );
+        assert_eq!(reducer.newest_message_id(), 3);
+
+        let snapshot = reducer
+            .add_fetched_messages(vec![
+                fixture_message(1, "<p>stale</p>"),
+                fixture_message(3, "<p>c</p>"),
+            ])
+            .expect("a new message");
+        assert_eq!(snapshot.revision, 2);
+        let contents: Vec<_> = snapshot
+            .messages
+            .iter()
+            .map(|message| message.content_html.as_str())
+            .collect();
+        assert_eq!(contents, vec!["<p>a</p>", "<p>c</p>"]);
+        assert_eq!(snapshot.unread[0].count, 1);
+        assert!(
+            reducer
+                .add_fetched_messages(vec![fixture_message(3, "<p>c</p>")])
+                .is_none()
         );
     }
 

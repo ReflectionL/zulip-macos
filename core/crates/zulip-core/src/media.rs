@@ -218,7 +218,13 @@ impl MediaClient {
             .url
             .or(document.uri)
             .ok_or(MediaError::InvalidResponse)?;
-        let url = self.validated_uploaded_route(&remote_url)?;
+        let validated = self.validated_uploaded_route(&remote_url)?;
+        // The link must reach the message exactly as the server wrote it. Zulip
+        // finds the uploads a message refers to (to show their previews and to
+        // let the recipients open them) by matching the raw path, so a name
+        // re-encoded by the URL parser, such as a screenshot called
+        // "截屏2026-10-14 15.13.06.png", would leave the picture without a preview.
+        let url = verbatim_upload_route(&remote_url).unwrap_or(validated);
         let filename = match document.filename {
             Some(server_filename) => validated_filename(&server_filename)?,
             None => filename,
@@ -262,37 +268,21 @@ impl MediaClient {
             }
         }
 
-        let api_path = format!(
-            "{UPLOAD_API_PATH_PREFIX}{}",
-            remote_url.trim_start_matches(UPLOAD_ROUTE_PREFIX)
-        );
-        let response = self
-            .http
-            .get(self.base_url.endpoint(&api_path))
-            .timeout(DEFAULT_REQUEST_TIMEOUT)
-            .basic_auth(&self.email, Some(self.api_key.expose_secret()))
-            .send()
-            .await
-            .map_err(transport_error)?;
-        let document: TemporaryUrlDocument = decode_json(response)
-            .await
-            .map_err(|error| MediaError::LinkUnavailable(error.to_string()))?;
-        document
-            .validate_result()
-            .map_err(|error| MediaError::LinkUnavailable(error.to_string()))?;
-        let temporary_url = self
-            .validated_temporary_url(&document.url)
-            .map_err(|error| MediaError::LinkUnavailable(error.to_string()))?;
-        let response = self
-            .http
-            .get(temporary_url)
-            .timeout(TRANSFER_DEADLINE)
-            .send()
-            .await
-            .map_err(transport_error)?;
-        if !response.status().is_success() {
-            return Err(MediaError::DownloadRefused(response.status().as_u16()));
-        }
+        let response = match self.temporary_download(&remote_url).await {
+            Ok(response) => response,
+            // Zulip also serves an upload straight to an API-authenticated
+            // request (an S3-backed server redirects to storage, and the
+            // client drops the credentials when it follows the redirect).
+            Err(
+                error @ (MediaError::LinkUnavailable(_)
+                | MediaError::DownloadRefused(_)
+                | MediaError::Transport { .. }),
+            ) => self
+                .authenticated_download(&remote_url)
+                .await
+                .ok_or(error)?,
+            Err(error) => return Err(error),
+        };
         if response
             .content_length()
             .is_some_and(|length| length > MAX_DOWNLOAD_BYTES as u64)
@@ -358,6 +348,55 @@ impl MediaClient {
             .write_download_atomically(response, &final_path, &digest, MAX_PUBLIC_IMAGE_BYTES)
             .await?;
         cached_media(key, final_path, content_type, byte_count, false)
+    }
+
+    /// Asks the server for a short-lived download link and opens it.
+    async fn temporary_download(&self, remote_url: &str) -> Result<Response, MediaError> {
+        let api_path = format!(
+            "{UPLOAD_API_PATH_PREFIX}{}",
+            remote_url.trim_start_matches(UPLOAD_ROUTE_PREFIX)
+        );
+        let response = self
+            .http
+            .get(self.base_url.endpoint(&api_path))
+            .timeout(DEFAULT_REQUEST_TIMEOUT)
+            .basic_auth(&self.email, Some(self.api_key.expose_secret()))
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let document: TemporaryUrlDocument = decode_json(response)
+            .await
+            .map_err(|error| MediaError::LinkUnavailable(error.to_string()))?;
+        document
+            .validate_result()
+            .map_err(|error| MediaError::LinkUnavailable(error.to_string()))?;
+        let temporary_url = self
+            .validated_temporary_url(&document.url)
+            .map_err(|error| MediaError::LinkUnavailable(error.to_string()))?;
+        let response = self
+            .http
+            .get(temporary_url)
+            .timeout(TRANSFER_DEADLINE)
+            .send()
+            .await
+            .map_err(transport_error)?;
+        if !response.status().is_success() {
+            return Err(MediaError::DownloadRefused(response.status().as_u16()));
+        }
+        Ok(response)
+    }
+
+    /// Downloads an upload with the account's credentials on the request itself.
+    async fn authenticated_download(&self, remote_url: &str) -> Option<Response> {
+        let response = self
+            .http
+            .get(self.base_url.endpoint(remote_url.trim_start_matches('/')))
+            .timeout(TRANSFER_DEADLINE)
+            .basic_auth(&self.email, Some(self.api_key.expose_secret()))
+            .send()
+            .await
+            .ok()?;
+        response.status().is_success().then_some(response)
     }
 
     fn validated_public_image(&self, input: &str) -> Option<Url> {
@@ -677,7 +716,17 @@ fn markdown_label(filename: &str) -> String {
 }
 
 fn markdown_url(url: &str) -> String {
-    url.replace('(', "%28").replace(')', "%29")
+    url.replace('(', "%28")
+        .replace(')', "%29")
+        .replace(' ', "%20")
+}
+
+/// The server's own spelling of a same-origin upload route (`/user_uploads/…`),
+/// for routes already checked by `validated_uploaded_route`.
+fn verbatim_upload_route(remote_url: &str) -> Option<String> {
+    let route = remote_url.trim();
+    (route.starts_with(UPLOAD_ROUTE_PREFIX) && !route.contains(['?', '#']))
+        .then(|| route.to_owned())
 }
 
 /// Maps a picture preview route to the uploaded file it was made from.
@@ -825,6 +874,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn uploaded_screenshot_links_keep_the_server_spelling() {
+        let responses = vec![MockResponse::json(
+            StatusCode::OK,
+            r#"{"result":"success","filename":"截屏2026-10-14 15.13.06.png","url":"/user_uploads/1/ab/xy/截屏2026-10-14-15.13.06.png"}"#,
+        )];
+        let (server, requests) = spawn_mock(responses);
+        let fixture = TempDir::new().expect("fixture directory");
+        let selected_file = fixture.path().join("shot.png");
+        tokio::fs::write(&selected_file, b"png")
+            .await
+            .expect("write selected file");
+        let client = media_client(&server, &fixture, "account-a");
+
+        let uploaded = client
+            .upload_file(&selected_file, "截屏2026-10-14 15.13.06.png")
+            .await
+            .expect("upload screenshot");
+
+        assert_eq!(
+            uploaded.url,
+            "/user_uploads/1/ab/xy/截屏2026-10-14-15.13.06.png"
+        );
+        assert_eq!(
+            uploaded.markdown,
+            "[截屏2026-10-14 15.13.06.png](/user_uploads/1/ab/xy/截屏2026-10-14-15.13.06.png)"
+        );
+        let _ = requests.recv().expect("upload request");
+    }
+
+    #[tokio::test]
     async fn rejects_oversized_and_unsafe_uploads_before_network_access() {
         let fixture = TempDir::new().expect("fixture directory");
         let selected_file = fixture.path().join("large.bin");
@@ -891,6 +970,35 @@ mod tests {
         assert_eq!(
             tokio::fs::read(local_path).await.expect("cached bytes"),
             b"fixture-png"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_upload_without_a_download_link_is_fetched_with_credentials() {
+        let responses = vec![
+            MockResponse::json(
+                StatusCode::NOT_FOUND,
+                r#"{"result":"error","code":"BAD_REQUEST","msg":"File not found"}"#,
+            ),
+            MockResponse::bytes(StatusCode::OK, "image/png", b"fixture-png".to_vec()),
+        ];
+        let (server, requests) = spawn_mock(responses);
+        let fixture = TempDir::new().expect("fixture directory");
+        let client = media_client(&server, &fixture, "account-a");
+
+        let media = client
+            .load_media("/user_uploads/1/ab/截屏.png")
+            .await
+            .expect("direct download");
+
+        assert_eq!(media.byte_count, 11);
+        let _ = requests.recv().expect("temporary URL request");
+        let direct = requests.recv().expect("direct request");
+        assert!(direct.starts_with("GET /user_uploads/1/ab/%E6%88%AA%E5%B1%8F.png HTTP/1.1"));
+        assert!(
+            direct
+                .to_ascii_lowercase()
+                .contains("authorization: basic ")
         );
     }
 

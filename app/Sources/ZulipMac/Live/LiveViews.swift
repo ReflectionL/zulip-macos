@@ -470,6 +470,11 @@ private struct LiveWindowView: View {
                 readReceipts: session.readReceiptDisplay(for: page),
                 pollReadReceipts: { session.pollReadReceipts(messageID: $0, key: page.key) }
             )
+            // A fresh surface per conversation: switching straight from one loaded
+            // chat to another used to reuse the old scroll view (which could stay
+            // scrolled past the new, shorter timeline and show nothing) and its
+            // composer text.
+            .id(page.key)
         case let .offline(page):
             ConversationSurface(
                 page: page,
@@ -481,6 +486,7 @@ private struct LiveWindowView: View {
                 initialDraft: session.draft(for: page.key),
                 draftChanged: { session.updateDraft($0, for: page.key) }
             )
+            .id(page.key)
         case let .loading(title, subtitle):
             DelayedLoadingPlaceholder(title: title, subtitle: subtitle)
         case let .empty(title, subtitle, message):

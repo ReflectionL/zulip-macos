@@ -12,8 +12,11 @@ use std::{
 
 use tokio::{
     runtime::Runtime,
-    sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
-    task::JoinSet,
+    sync::{
+        Mutex as AsyncMutex,
+        mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
+    },
+    task::{JoinHandle, JoinSet},
     time::Instant,
 };
 use zulip_core::{
@@ -38,7 +41,7 @@ use zulip_core::{
 
 uniffi::setup_scaffolding!();
 
-/// Channels whose topic lists are fetched in parallel while a session starts.
+/// Channels whose topic lists are fetched in parallel.
 const TOPIC_FETCH_CONCURRENCY: usize = 12;
 
 /// Minimum spacing between full-snapshot cache writes during busy event streams.
@@ -1381,6 +1384,31 @@ struct AccountSession {
     topic_versions: HashMap<i64, u64>,
     cache: CacheHandle,
     last_snapshot_cache_seconds: AtomicU64,
+    /// Held by each send while it runs, so messages reach the server in order.
+    send_order: Arc<AsyncMutex<()>>,
+    /// The newest message the event queue has delivered, so that messages
+    /// arriving while a lost queue was replaced can be fetched and notified.
+    newest_message_id: i64,
+}
+
+/// A session that finished signing in and registering beside the actor.
+struct StartedSession {
+    session: AccountSession,
+    /// The `SessionStarted` event, emitted once the actor owns the session.
+    started: CoreEvent,
+}
+
+/// What a background sign-in reports back to the actor.
+struct SessionStart {
+    generation: u64,
+    started: Option<StartedSession>,
+}
+
+/// A sign-in still running beside the actor, with the commands that wait for it.
+struct PendingStart {
+    generation: u64,
+    task: JoinHandle<()>,
+    deferred: Vec<CoreCommand>,
 }
 
 /// Topic lists a background fetch brought back for the actor to apply.
@@ -1390,12 +1418,37 @@ struct TopicRefresh {
     lists: Vec<(i64, Vec<TopicSummary>)>,
 }
 
+/// Unread messages that arrived while the event queue was being replaced.
+struct MissedMessages {
+    account_id: String,
+    messages: Vec<MessageSummary>,
+}
+
+/// How many messages that arrived during a queue gap are fetched at most.
+const MISSED_MESSAGE_LIMIT: u16 = 50;
+
 enum ActorInput {
     Command(Option<CoreCommand>),
     Sync(SyncCycle),
     Topics(Option<TopicRefresh>),
+    Session(Option<Box<SessionStart>>),
+    Missed(Option<MissedMessages>),
 }
 
+/// Whether a command needs the live session, and so waits while one is starting.
+/// Reading the cache, drafts and the health check never wait.
+const fn waits_for_session(command: &CoreCommand) -> bool {
+    !matches!(
+        command,
+        CoreCommand::Ping { .. }
+            | CoreCommand::LoadCachedSession { .. }
+            | CoreCommand::LoadCachedConversation { .. }
+            | CoreCommand::SaveDraft { .. }
+            | CoreCommand::LoadDrafts { .. }
+    )
+}
+
+#[allow(clippy::too_many_lines)]
 async fn run_actor(
     mut receiver: UnboundedReceiver<CoreCommand>,
     event_sink: Arc<dyn CoreEventSink>,
@@ -1409,6 +1462,14 @@ async fn run_actor(
     // not hold up commands such as opening a conversation.
     let (topic_sender, mut topic_receiver) = unbounded_channel::<TopicRefresh>();
     let mut topic_version = 0_u64;
+    // So is signing in: while it runs, cached conversations and drafts are
+    // still served, and commands that need the session wait for it.
+    let (session_sender, mut session_receiver) = unbounded_channel::<SessionStart>();
+    let mut starting: Option<PendingStart> = None;
+    let mut start_generation = 0_u64;
+    // Messages that arrived while a lost event queue was replaced never come
+    // through the new queue; they are fetched beside the actor.
+    let (missed_sender, mut missed_receiver) = unbounded_channel::<MissedMessages>();
 
     loop {
         let input = if let Some(session) = account.as_mut() {
@@ -1421,37 +1482,96 @@ async fn run_actor(
                 command = receiver.recv() => ActorInput::Command(command),
                 cycle = &mut sync_advance => ActorInput::Sync(cycle),
                 refresh = topic_receiver.recv() => ActorInput::Topics(refresh),
+                start = session_receiver.recv() => ActorInput::Session(start.map(Box::new)),
+                missed = missed_receiver.recv() => ActorInput::Missed(missed),
             }
         } else {
             tokio::select! {
                 command = receiver.recv() => ActorInput::Command(command),
                 refresh = topic_receiver.recv() => ActorInput::Topics(refresh),
+                start = session_receiver.recv() => ActorInput::Session(start.map(Box::new)),
             }
         };
 
         match input {
-            ActorInput::Command(Some(command)) => {
-                let resets_poll = matches!(
-                    &command,
-                    CoreCommand::StartApiKeySession { .. }
-                        | CoreCommand::StartPasswordSession { .. }
-                        | CoreCommand::Disconnect { .. }
-                );
-                let previous_account = account.as_ref().map(|session| session.account_id.clone());
-                handle_command(
+            ActorInput::Command(Some(
+                command @ (CoreCommand::StartApiKeySession { .. }
+                | CoreCommand::StartPasswordSession { .. }),
+            )) => {
+                // A newer sign-in replaces one still running; what waited for
+                // the old one waits for the new one.
+                let deferred = starting.take().map_or_else(Vec::new, |previous| {
+                    previous.task.abort();
+                    previous.deferred
+                });
+                start_generation += 1;
+                let task = spawn_session_start(
                     command,
-                    &mut account,
-                    &event_sink,
-                    &media_cache_root,
-                    &cache,
-                )
-                .await;
+                    start_generation,
+                    Arc::clone(&event_sink),
+                    media_cache_root.clone(),
+                    cache.clone(),
+                    session_sender.clone(),
+                );
+                starting = Some(PendingStart {
+                    generation: start_generation,
+                    task,
+                    deferred,
+                });
+            }
+            ActorInput::Command(Some(command)) => {
+                if let Some(pending) = starting.as_mut()
+                    && waits_for_session(&command)
+                    && !matches!(command, CoreCommand::Disconnect { .. })
+                {
+                    pending.deferred.push(command);
+                    continue;
+                }
+                let resets_poll = matches!(&command, CoreCommand::Disconnect { .. });
+                if resets_poll && let Some(pending) = starting.take() {
+                    // Signing out cancels a sign-in that has not finished.
+                    pending.task.abort();
+                    for waiting in pending.deferred {
+                        handle_command(waiting, &mut account, &event_sink, &cache).await;
+                    }
+                }
+                let previous_account = account.as_ref().map(|session| session.account_id.clone());
+                handle_command(command, &mut account, &event_sink, &cache).await;
                 let current_account = account.as_ref().map(|session| session.account_id.as_str());
                 if resets_poll || previous_account.as_deref() != current_account {
                     poll_not_before = Instant::now();
                 }
             }
             ActorInput::Command(None) => break,
+            ActorInput::Session(Some(start)) => {
+                let Some(pending) =
+                    starting.take_if(|pending| pending.generation == start.generation)
+                else {
+                    continue;
+                };
+                if let Some(started) = start.started {
+                    account = Some(started.session);
+                    poll_not_before = Instant::now();
+                    retrying = false;
+                    event_sink.handle_event(started.started);
+                    if let Some(session) = account.as_mut() {
+                        // The sidebar starts from the cached topic lists; the
+                        // server's arrive in the background.
+                        topic_version += 1;
+                        let channels = session
+                            .sync
+                            .snapshot()
+                            .channels
+                            .iter()
+                            .map(|channel| channel.id)
+                            .collect();
+                        request_topic_lists(session, channels, topic_version, &topic_sender);
+                    }
+                }
+                for command in pending.deferred {
+                    handle_command(command, &mut account, &event_sink, &cache).await;
+                }
+            }
             ActorInput::Sync(cycle) => {
                 let terminal = matches!(&cycle, SyncCycle::Fatal { .. });
                 match &cycle {
@@ -1469,6 +1589,12 @@ async fn run_actor(
                 if let Some(session) = account.as_mut() {
                     topic_version += 1;
                     request_changed_topics(session, &cycle, topic_version, &topic_sender);
+                    if matches!(cycle, SyncCycle::Resynchronized { .. }) {
+                        request_missed_messages(session, &missed_sender);
+                    }
+                    session.newest_message_id = session
+                        .newest_message_id
+                        .max(session.sync.newest_message_id());
                 }
                 poll_not_before = handle_sync_cycle(cycle, account.as_ref(), &event_sink);
                 if terminal {
@@ -1483,9 +1609,84 @@ async fn run_actor(
                     apply_topic_refresh(session, refresh, &event_sink);
                 }
             }
-            ActorInput::Topics(None) => {}
+            ActorInput::Missed(Some(missed)) => {
+                if let Some(session) = account
+                    .as_mut()
+                    .filter(|session| session.account_id == missed.account_id)
+                    && let Some(snapshot) = session.sync.add_fetched_messages(missed.messages)
+                {
+                    session.newest_message_id = session
+                        .newest_message_id
+                        .max(session.sync.newest_message_id());
+                    cache_snapshot_throttled(session, &snapshot);
+                    event_sink.handle_event(CoreEvent::SnapshotUpdated {
+                        account_id: session.account_id.clone(),
+                        snapshot: CoreSnapshot::from_sync(snapshot, &session.topics),
+                    });
+                }
+            }
+            ActorInput::Topics(None) | ActorInput::Session(None) | ActorInput::Missed(None) => {}
         }
     }
+}
+
+/// Signs in, registers the event queue and builds the session beside the
+/// actor, then hands the result back to it.
+fn spawn_session_start(
+    command: CoreCommand,
+    generation: u64,
+    event_sink: Arc<dyn CoreEventSink>,
+    media_cache_root: PathBuf,
+    cache: CacheHandle,
+    sender: UnboundedSender<SessionStart>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let started = match command {
+            CoreCommand::StartApiKeySession {
+                request_id,
+                account_id,
+                server_url,
+                email,
+                api_key,
+            } => {
+                start_api_key_session(
+                    request_id,
+                    account_id,
+                    server_url,
+                    email,
+                    api_key,
+                    &event_sink,
+                    &media_cache_root,
+                    &cache,
+                )
+                .await
+            }
+            CoreCommand::StartPasswordSession {
+                request_id,
+                account_id,
+                server_url,
+                username,
+                password,
+            } => {
+                start_password_session(
+                    request_id,
+                    account_id,
+                    server_url,
+                    username,
+                    password,
+                    &event_sink,
+                    &media_cache_root,
+                    &cache,
+                )
+                .await
+            }
+            _ => None,
+        };
+        let _ = sender.send(SessionStart {
+            generation,
+            started,
+        });
+    })
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1493,7 +1694,6 @@ async fn handle_command(
     command: CoreCommand,
     account: &mut Option<AccountSession>,
     event_sink: &Arc<dyn CoreEventSink>,
-    media_cache_root: &Path,
     cache: &CacheHandle,
 ) {
     match command {
@@ -1501,46 +1701,8 @@ async fn handle_command(
             request_id,
             payload,
         } => emit_pong(request_id, &payload, event_sink),
-        CoreCommand::StartApiKeySession {
-            request_id,
-            account_id,
-            server_url,
-            email,
-            api_key,
-        } => {
-            start_api_key_session(
-                request_id,
-                account_id,
-                server_url,
-                email,
-                api_key,
-                account,
-                event_sink,
-                media_cache_root,
-                cache,
-            )
-            .await;
-        }
-        CoreCommand::StartPasswordSession {
-            request_id,
-            account_id,
-            server_url,
-            username,
-            password,
-        } => {
-            start_password_session(
-                request_id,
-                account_id,
-                server_url,
-                username,
-                password,
-                account,
-                event_sink,
-                media_cache_root,
-                cache,
-            )
-            .await;
-        }
+        // Signing in runs beside the actor (`spawn_session_start`).
+        CoreCommand::StartApiKeySession { .. } | CoreCommand::StartPasswordSession { .. } => {}
         CoreCommand::LoadCachedSession {
             request_id,
             account_id,
@@ -1626,8 +1788,7 @@ async fn handle_command(
                 local_id,
                 account.as_ref(),
                 event_sink,
-            )
-            .await;
+            );
         }
         CoreCommand::SendDirectMessage {
             request_id,
@@ -1646,8 +1807,7 @@ async fn handle_command(
                 local_id,
                 account.as_ref(),
                 event_sink,
-            )
-            .await;
+            );
         }
         CoreCommand::EditMessage {
             request_id,
@@ -1662,8 +1822,7 @@ async fn handle_command(
                 content,
                 account.as_ref(),
                 event_sink,
-            )
-            .await;
+            );
         }
         CoreCommand::DeleteMessage {
             request_id,
@@ -1676,8 +1835,7 @@ async fn handle_command(
                 message_id,
                 account.as_ref(),
                 event_sink,
-            )
-            .await;
+            );
         }
         CoreCommand::UpdateReaction {
             request_id,
@@ -1694,8 +1852,7 @@ async fn handle_command(
                 add,
                 account.as_ref(),
                 event_sink,
-            )
-            .await;
+            );
         }
         CoreCommand::UpdateMessageFlag {
             request_id,
@@ -1712,8 +1869,7 @@ async fn handle_command(
                 add,
                 account.as_ref(),
                 event_sink,
-            )
-            .await;
+            );
         }
         CoreCommand::RenameTopic {
             request_id,
@@ -2179,7 +2335,7 @@ fn load_media(
     });
 }
 
-async fn edit_message(
+fn edit_message(
     request_id: u64,
     account_id: &str,
     message_id: i64,
@@ -2191,21 +2347,21 @@ async fn edit_message(
         emit_no_session(request_id, event_sink);
         return;
     };
-    match session
-        .messages
-        .update_message_content(message_id, &content)
-        .await
-    {
-        Ok(()) => event_sink.handle_event(CoreEvent::MessageEdited {
-            request_id,
-            message_id,
-            content,
-        }),
-        Err(error) => emit_error(Some(request_id), error, event_sink),
-    }
+    let messages = Arc::clone(&session.messages);
+    let event_sink = Arc::clone(event_sink);
+    tokio::spawn(async move {
+        match messages.update_message_content(message_id, &content).await {
+            Ok(()) => event_sink.handle_event(CoreEvent::MessageEdited {
+                request_id,
+                message_id,
+                content,
+            }),
+            Err(error) => emit_error(Some(request_id), error, &event_sink),
+        }
+    });
 }
 
-async fn delete_message(
+fn delete_message(
     request_id: u64,
     account_id: &str,
     message_id: i64,
@@ -2216,17 +2372,21 @@ async fn delete_message(
         emit_no_session(request_id, event_sink);
         return;
     };
-    match session.messages.delete_message(message_id).await {
-        Ok(()) => event_sink.handle_event(CoreEvent::MessageDeleted {
-            request_id,
-            message_id,
-        }),
-        Err(error) => emit_error(Some(request_id), error, event_sink),
-    }
+    let messages = Arc::clone(&session.messages);
+    let event_sink = Arc::clone(event_sink);
+    tokio::spawn(async move {
+        match messages.delete_message(message_id).await {
+            Ok(()) => event_sink.handle_event(CoreEvent::MessageDeleted {
+                request_id,
+                message_id,
+            }),
+            Err(error) => emit_error(Some(request_id), error, &event_sink),
+        }
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn update_reaction(
+fn update_reaction(
     request_id: u64,
     account_id: &str,
     message_id: i64,
@@ -2244,23 +2404,26 @@ async fn update_reaction(
     } else {
         MessageWriteOperation::Remove
     };
-    match session
-        .messages
-        .update_reaction(message_id, &emoji_name, operation)
-        .await
-    {
-        Ok(()) => event_sink.handle_event(CoreEvent::ReactionUpdated {
-            request_id,
-            message_id,
-            emoji_name,
-            added: add,
-        }),
-        Err(error) => emit_error(Some(request_id), error, event_sink),
-    }
+    let messages = Arc::clone(&session.messages);
+    let event_sink = Arc::clone(event_sink);
+    tokio::spawn(async move {
+        match messages
+            .update_reaction(message_id, &emoji_name, operation)
+            .await
+        {
+            Ok(()) => event_sink.handle_event(CoreEvent::ReactionUpdated {
+                request_id,
+                message_id,
+                emoji_name,
+                added: add,
+            }),
+            Err(error) => emit_error(Some(request_id), error, &event_sink),
+        }
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn update_message_flag(
+fn update_message_flag(
     request_id: u64,
     account_id: &str,
     message_ids: Vec<i64>,
@@ -2278,19 +2441,22 @@ async fn update_message_flag(
     } else {
         MessageWriteOperation::Remove
     };
-    match session
-        .messages
-        .update_message_flag(&message_ids, flag.into(), operation)
-        .await
-    {
-        Ok(()) => event_sink.handle_event(CoreEvent::MessageFlagUpdated {
-            request_id,
-            message_ids,
-            flag,
-            added: add,
-        }),
-        Err(error) => emit_error(Some(request_id), error, event_sink),
-    }
+    let messages = Arc::clone(&session.messages);
+    let event_sink = Arc::clone(event_sink);
+    tokio::spawn(async move {
+        match messages
+            .update_message_flag(&message_ids, flag.into(), operation)
+            .await
+        {
+            Ok(()) => event_sink.handle_event(CoreEvent::MessageFlagUpdated {
+                request_id,
+                message_ids,
+                flag,
+                added: add,
+            }),
+            Err(error) => emit_error(Some(request_id), error, &event_sink),
+        }
+    });
 }
 
 fn disconnect(
@@ -2582,7 +2748,7 @@ fn emit_cached_conversation(
     true
 }
 
-async fn send_message(
+fn send_message(
     request_id: u64,
     account_id: &str,
     outgoing: OutgoingMessage,
@@ -2595,11 +2761,18 @@ async fn send_message(
         return;
     };
     let queue_id = session.sync.queue().id.clone();
-    let result = session
-        .messages
-        .send_message(outgoing, Some((&queue_id, &local_id)))
-        .await;
-    emit_send_result(result, request_id, local_id, event_sink);
+    let messages = Arc::clone(&session.messages);
+    let send_order = Arc::clone(&session.send_order);
+    let event_sink = Arc::clone(event_sink);
+    // Sends leave the actor so a slow one cannot hold up opening a
+    // conversation, but they still reach the server in the order typed.
+    tokio::spawn(async move {
+        let _turn = send_order.lock().await;
+        let result = messages
+            .send_message(outgoing, Some((&queue_id, &local_id)))
+            .await;
+        emit_send_result(result, request_id, local_id, &event_sink);
+    });
 }
 
 async fn update_topic(
@@ -2699,6 +2872,44 @@ fn request_changed_topics(
         }
         _ => return,
     };
+    request_topic_lists(session, stream_ids, version, sender);
+}
+
+/// After the event queue was replaced, fetches the unread messages newer than
+/// the last one the old queue delivered: the new queue only reports what comes
+/// after it, so without this they would never notify.
+fn request_missed_messages(session: &AccountSession, sender: &UnboundedSender<MissedMessages>) {
+    let after = session.newest_message_id;
+    if after <= 0 {
+        return;
+    }
+    let messages = Arc::clone(&session.messages);
+    let account_id = session.account_id.clone();
+    let sender = sender.clone();
+    tokio::spawn(async move {
+        // A failed fetch only costs those notifications; the unread counts
+        // and the conversations themselves are already right.
+        if let Ok(messages) = messages
+            .fetch_unread_after(after, MISSED_MESSAGE_LIMIT)
+            .await
+            && !messages.is_empty()
+        {
+            let _ = sender.send(MissedMessages {
+                account_id,
+                messages,
+            });
+        }
+    });
+}
+
+/// Fetches the topic lists of `stream_ids` beside the actor, which applies
+/// them when they arrive.
+fn request_topic_lists(
+    session: &AccountSession,
+    stream_ids: Vec<i64>,
+    version: u64,
+    sender: &UnboundedSender<TopicRefresh>,
+) {
     if stream_ids.is_empty() {
         return;
     }
@@ -2756,7 +2967,8 @@ fn apply_topic_refresh(
     }
     normalize_topics(&mut session.topics);
     let snapshot = session.sync.snapshot();
-    cache_snapshot_throttled(session, &snapshot);
+    // Topic lists change rarely; the next launch's sidebar starts from them.
+    cache_snapshot_now(session, &snapshot);
     event_sink.handle_event(CoreEvent::SnapshotUpdated {
         account_id: session.account_id.clone(),
         snapshot: CoreSnapshot::from_sync(snapshot, &session.topics),
@@ -2840,16 +3052,15 @@ async fn start_api_key_session(
     server_url: String,
     email: String,
     api_key: String,
-    account: &mut Option<AccountSession>,
     event_sink: &Arc<dyn CoreEventSink>,
     media_cache_root: &Path,
     cache: &CacheHandle,
-) {
+) -> Option<StartedSession> {
     let authentication = match AuthenticationClient::new() {
         Ok(client) => client,
         Err(error) => {
             emit_error(Some(request_id), error, event_sink);
-            return;
+            return None;
         }
     };
     let authenticated = match authentication
@@ -2859,19 +3070,18 @@ async fn start_api_key_session(
         Ok(authenticated) => authenticated,
         Err(error) => {
             emit_error(Some(request_id), error, event_sink);
-            return;
+            return None;
         }
     };
     start_authenticated_session(
         request_id,
         account_id,
         authenticated,
-        account,
         event_sink,
         media_cache_root,
         cache,
     )
-    .await;
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2881,16 +3091,15 @@ async fn start_password_session(
     server_url: String,
     username: String,
     password: String,
-    account: &mut Option<AccountSession>,
     event_sink: &Arc<dyn CoreEventSink>,
     media_cache_root: &Path,
     cache: &CacheHandle,
-) {
+) -> Option<StartedSession> {
     let authentication = match AuthenticationClient::new() {
         Ok(client) => client,
         Err(error) => {
             emit_error(Some(request_id), error, event_sink);
-            return;
+            return None;
         }
     };
     let authenticated = match authentication
@@ -2900,30 +3109,28 @@ async fn start_password_session(
         Ok(authenticated) => authenticated,
         Err(error) => {
             emit_error(Some(request_id), error, event_sink);
-            return;
+            return None;
         }
     };
     start_authenticated_session(
         request_id,
         account_id,
         authenticated,
-        account,
         event_sink,
         media_cache_root,
         cache,
     )
-    .await;
+    .await
 }
 
 async fn start_authenticated_session(
     request_id: u64,
     account_id: String,
     authenticated: AuthenticatedAccount,
-    account: &mut Option<AccountSession>,
     event_sink: &Arc<dyn CoreEventSink>,
     media_cache_root: &Path,
     cache: &CacheHandle,
-) {
+) -> Option<StartedSession> {
     let api_key = authenticated.api_key.expose_secret().to_owned();
     start_session(
         request_id,
@@ -2933,12 +3140,11 @@ async fn start_authenticated_session(
         authenticated.user_id,
         authenticated.full_name,
         api_key,
-        account,
         event_sink,
         media_cache_root,
         cache,
     )
-    .await;
+    .await
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -2950,17 +3156,16 @@ async fn start_session(
     user_id: i64,
     full_name: String,
     api_key: String,
-    account: &mut Option<AccountSession>,
     event_sink: &Arc<dyn CoreEventSink>,
     media_cache_root: &Path,
     cache: &CacheHandle,
-) {
+) -> Option<StartedSession> {
     if account_id.trim().is_empty() || user_id <= 0 {
         event_sink.handle_event(CoreEvent::Failed {
             request_id: Some(request_id),
             message: "enter valid account details".to_owned(),
         });
-        return;
+        return None;
     }
     let sync_client = match EventQueueClient::new(
         &server_url,
@@ -2970,7 +3175,7 @@ async fn start_session(
         Ok(client) => client,
         Err(error) => {
             emit_error(Some(request_id), error, event_sink);
-            return;
+            return None;
         }
     };
     let messages = match MessageClient::new(
@@ -2981,7 +3186,7 @@ async fn start_session(
         Ok(client) => Arc::new(client),
         Err(error) => {
             emit_error(Some(request_id), error, event_sink);
-            return;
+            return None;
         }
     };
     let media = match MediaClient::new(
@@ -2994,34 +3199,23 @@ async fn start_session(
         Ok(client) => Arc::new(client),
         Err(error) => {
             emit_error(Some(request_id), error, event_sink);
-            return;
+            return None;
         }
     };
     match SyncSession::start(sync_client, RecoveryPolicy::default(), request_id).await {
         Ok((sync, snapshot)) => {
-            let mut topics = Vec::new();
-            for channels in snapshot.channels.chunks(TOPIC_FETCH_CONCURRENCY) {
-                let mut topic_tasks = JoinSet::new();
-                for channel in channels {
-                    let messages = Arc::clone(&messages);
-                    let stream_id = channel.id;
-                    topic_tasks.spawn(async move { messages.fetch_topics(stream_id).await });
-                }
-                while let Some(result) = topic_tasks.join_next().await {
-                    if let Ok(Ok(mut channel_topics)) = result {
-                        topics.append(&mut channel_topics);
-                    }
-                }
-            }
-            topics.sort_by(|left, right| {
-                left.stream_id
-                    .cmp(&right.stream_id)
-                    .then_with(|| right.max_message_id.cmp(&left.max_message_id))
-                    .then_with(|| left.name.cmp(&right.name))
-            });
-            topics.dedup_by(|left, right| {
-                left.stream_id == right.stream_id && left.name == right.name
-            });
+            // The cached topic lists stand in until the server's arrive (the
+            // actor requests them once it owns the session), so that signing
+            // in waits for one registration and nothing else.
+            let channel_ids: Vec<i64> =
+                snapshot.channels.iter().map(|channel| channel.id).collect();
+            let mut topics = cache
+                .with(|database| database.account_cache(&account_id))
+                .flatten()
+                .map(|(_, cached)| cached.topics)
+                .unwrap_or_default();
+            topics.retain(|topic| channel_ids.contains(&topic.stream_id));
+            normalize_topics(&mut topics);
             cache_snapshot(
                 cache,
                 &account_id,
@@ -3035,29 +3229,37 @@ async fn start_session(
                 &topics,
             );
             let bridge_snapshot = CoreSnapshot::from_sync(snapshot, &topics);
-            *account = Some(AccountSession {
-                account_id: account_id.clone(),
-                own_user_id: user_id,
-                messages,
-                media,
-                sync,
-                topics,
-                topic_versions: HashMap::new(),
-                cache: cache.clone(),
-                last_snapshot_cache_seconds: AtomicU64::new(now_seconds()),
-            });
-            event_sink.handle_event(CoreEvent::SessionStarted {
-                request_id,
-                account_id,
-                server_url,
-                email,
-                user_id,
-                full_name,
-                credential: CoreSessionCredential { api_key },
-                snapshot: bridge_snapshot,
-            });
+            let newest_message_id = sync.newest_message_id();
+            Some(StartedSession {
+                session: AccountSession {
+                    account_id: account_id.clone(),
+                    own_user_id: user_id,
+                    messages,
+                    media,
+                    sync,
+                    topics,
+                    topic_versions: HashMap::new(),
+                    cache: cache.clone(),
+                    last_snapshot_cache_seconds: AtomicU64::new(now_seconds()),
+                    send_order: Arc::new(AsyncMutex::new(())),
+                    newest_message_id,
+                },
+                started: CoreEvent::SessionStarted {
+                    request_id,
+                    account_id,
+                    server_url,
+                    email,
+                    user_id,
+                    full_name,
+                    credential: CoreSessionCredential { api_key },
+                    snapshot: bridge_snapshot,
+                },
+            })
         }
-        Err(error) => emit_error(Some(request_id), error, event_sink),
+        Err(error) => {
+            emit_error(Some(request_id), error, event_sink);
+            None
+        }
     }
 }
 
@@ -3162,6 +3364,11 @@ fn cache_snapshot_throttled(account: &AccountSession, snapshot: &SyncSnapshot) {
     if now.saturating_sub(previous) < SNAPSHOT_CACHE_INTERVAL_SECONDS {
         return;
     }
+    cache_snapshot_now(account, snapshot);
+}
+
+fn cache_snapshot_now(account: &AccountSession, snapshot: &SyncSnapshot) {
+    let now = now_seconds();
     account
         .last_snapshot_cache_seconds
         .store(now, Ordering::Relaxed);
@@ -4135,13 +4342,11 @@ mod tests {
             email: "maya@example.com".to_owned(),
             api_key: "fixture-key-do-not-log".to_owned(),
         });
-        signal_receiver
-            .recv_timeout(Duration::from_secs(3))
-            .expect("session event");
-
-        let events = sink.events.lock().expect("event lock poisoned");
+        let started = wait_for_event(&signal_receiver, &sink, |event| {
+            matches!(event, CoreEvent::SessionStarted { .. })
+        });
         assert!(matches!(
-            &events[0],
+            &started,
             CoreEvent::SessionStarted {
                 request_id: 7,
                 account_id,
@@ -4149,7 +4354,16 @@ mod tests {
                 ..
             } if account_id == "account-1"
                 && snapshot.channels[0].name == "engineering"
-                && snapshot.topics[0].name == "macOS"
+        ));
+        // Topic lists follow the session instead of holding it up.
+        let refreshed = wait_for_event(
+            &signal_receiver,
+            &sink,
+            |event| matches!(event, CoreEvent::SnapshotUpdated { snapshot, .. } if !snapshot.topics.is_empty()),
+        );
+        assert!(matches!(
+            &refreshed,
+            CoreEvent::SnapshotUpdated { snapshot, .. } if snapshot.topics[0].name == "macOS"
         ));
         let own_user = request
             .recv_timeout(Duration::from_secs(1))
@@ -4410,7 +4624,7 @@ mod tests {
 
     #[test]
     fn slow_topic_refresh_does_not_hold_up_opening_a_conversation() {
-        let (server, topic_requests) = spawn_slow_topics_mock(false);
+        let (server, topic_requests) = spawn_slow_topics_mock(false, false);
         let (signal_sender, signal_receiver) = mpsc::channel();
         let sink = Arc::new(RecordingSink {
             events: Mutex::new(Vec::new()),
@@ -4465,8 +4679,79 @@ mod tests {
     }
 
     #[test]
+    fn signing_in_runs_beside_the_actor_and_held_commands_follow_it() {
+        let (server, _topic_requests) = spawn_slow_topics_mock(false, true);
+        let (signal_sender, signal_receiver) = mpsc::channel();
+        let sink = Arc::new(RecordingSink {
+            events: Mutex::new(Vec::new()),
+            notifier: Mutex::new(Some(signal_sender)),
+        });
+        let client = RustCoreClient::new(sink.clone(), "/tmp/zulip-ffi-tests".to_owned(), None);
+        client.submit(CoreCommand::StartApiKeySession {
+            request_id: 80,
+            account_id: "account-slow".to_owned(),
+            server_url: server,
+            email: "maya@example.com".to_owned(),
+            api_key: "fixture-key-do-not-log".to_owned(),
+        });
+        // Opening a conversation during sign-in waits for the session instead
+        // of failing for want of one.
+        client.submit(CoreCommand::OpenConversation {
+            request_id: 81,
+            key: CoreConversationKey::DirectMessage {
+                account_id: "account-slow".to_owned(),
+                recipient_ids: vec![22],
+            },
+            limit: 50,
+        });
+        // Commands that need no session are answered while registration runs.
+        let asked = StdInstant::now();
+        client.submit(CoreCommand::Ping {
+            request_id: 82,
+            payload: "still there?".to_owned(),
+        });
+        let _ = wait_for_event(&signal_receiver, &sink, |event| {
+            matches!(event, CoreEvent::Pong { request_id: 82, .. })
+        });
+        assert!(
+            asked.elapsed() < Duration::from_secs(1),
+            "the ping waited behind the sign-in: {:?}",
+            asked.elapsed()
+        );
+        assert!(
+            !sink
+                .events
+                .lock()
+                .expect("event lock poisoned")
+                .iter()
+                .any(|event| matches!(event, CoreEvent::SessionStarted { .. }))
+        );
+
+        let _ = wait_for_event(&signal_receiver, &sink, |event| {
+            matches!(event, CoreEvent::ConversationOpened { request_id: 81, .. })
+        });
+        let events = sink.events.lock().expect("event lock poisoned");
+        let started = events
+            .iter()
+            .position(|event| matches!(event, CoreEvent::SessionStarted { request_id: 80, .. }))
+            .expect("session started");
+        let opened = events
+            .iter()
+            .position(|event| matches!(event, CoreEvent::ConversationOpened { request_id: 81, .. }))
+            .expect("conversation opened");
+        assert!(started < opened);
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            CoreEvent::Failed {
+                request_id: Some(81),
+                ..
+            }
+        )));
+    }
+
+    #[test]
     fn stalled_first_page_request_is_raced_by_a_second_one() {
-        let (server, _topic_requests) = spawn_slow_topics_mock(true);
+        let (server, _topic_requests) = spawn_slow_topics_mock(true, false);
         let (signal_sender, signal_receiver) = mpsc::channel();
         let sink = Arc::new(RecordingSink {
             events: Mutex::new(Vec::new()),
@@ -4505,7 +4790,10 @@ mod tests {
 
     /// A server whose second topic-list request takes three seconds while every
     /// other request is answered at once; each connection has its own thread.
-    fn spawn_slow_topics_mock(slow_first_page: bool) -> (String, mpsc::Receiver<String>) {
+    fn spawn_slow_topics_mock(
+        slow_first_page: bool,
+        slow_register: bool,
+    ) -> (String, mpsc::Receiver<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
         let address = listener.local_addr().expect("listener address");
         let (sender, receiver) = mpsc::channel();
@@ -4527,6 +4815,9 @@ mod tests {
                     let body = if request_line.starts_with("GET /api/v1/users/me HTTP") {
                         r#"{"result":"success","email":"maya@example.com","full_name":"Maya Chen","user_id":9}"#.to_owned()
                     } else if request_line.starts_with("POST /api/v1/register HTTP") {
+                        if slow_register {
+                            thread::sleep(Duration::from_millis(1_500));
+                        }
                         r##"{
                             "result":"success",
                             "queue_id":"queue-slow",
@@ -4550,7 +4841,8 @@ mod tests {
                         }
                     } else if request_line.starts_with("GET /api/v1/events?") {
                         let call = event_calls.fetch_add(1, Ordering::SeqCst);
-                        if call == 0 {
+                        // Like Zulip, repeat events until a poll acknowledges them.
+                        if request_line.contains("last_event_id=10&") {
                             thread::sleep(Duration::from_millis(300));
                             r#"{"result":"success","events":[{"id":11,"type":"delete_message","message_ids":[999],"stream_id":5}]}"#.to_owned()
                         } else {
@@ -4585,28 +4877,38 @@ mod tests {
         let address = listener.local_addr().expect("listener address");
         let (sender, receiver) = mpsc::channel();
         thread::spawn(move || {
-            let bodies = [
-                r#"{"result":"success","email":"maya@example.com","full_name":"Maya Chen","user_id":9}"#,
-                r##"{
-                    "result":"success",
-                    "queue_id":"queue-1",
-                    "last_event_id":10,
-                    "event_queue_longpoll_timeout_seconds":5,
-                    "zulip_feature_level":481,
-                    "realm_users":[],
-                    "subscriptions":[{
-                        "stream_id":5,
-                        "name":"engineering",
-                        "color":"#76ce90",
-                        "is_muted":false
-                    }]
-                }"##,
-                r#"{"result":"success","topics":[{"max_id":44,"name":"macOS"}]}"#,
-            ];
-            for body in bodies {
-                let (mut stream, _) = listener.accept().expect("accept request");
+            // Event polls are left waiting, as a quiet server would.
+            let mut waiting_polls = Vec::new();
+            for incoming in listener.incoming() {
+                let Ok(mut stream) = incoming else {
+                    break;
+                };
                 let request = read_request(&mut stream);
+                let request_line = request.lines().next().unwrap_or_default().to_owned();
                 let _ = sender.send(request);
+                let body = if request_line.contains("/topics") {
+                    r#"{"result":"success","topics":[{"max_id":44,"name":"macOS"}]}"#
+                } else if request_line.starts_with("GET /api/v1/users/me") {
+                    r#"{"result":"success","email":"maya@example.com","full_name":"Maya Chen","user_id":9}"#
+                } else if request_line.starts_with("POST /api/v1/register") {
+                    r##"{
+                        "result":"success",
+                        "queue_id":"queue-1",
+                        "last_event_id":10,
+                        "event_queue_longpoll_timeout_seconds":5,
+                        "zulip_feature_level":481,
+                        "realm_users":[],
+                        "subscriptions":[{
+                            "stream_id":5,
+                            "name":"engineering",
+                            "color":"#76ce90",
+                            "is_muted":false
+                        }]
+                    }"##
+                } else {
+                    waiting_polls.push(stream);
+                    continue;
+                };
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                     body.len(),

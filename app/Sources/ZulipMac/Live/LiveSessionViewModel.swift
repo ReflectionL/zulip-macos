@@ -211,6 +211,12 @@ final class LiveSessionViewModel {
 
     @ObservationIgnored private let client: any CoreClientProtocol
     @ObservationIgnored private let credentialStore: any CredentialStore
+    /// The key last read from or written to the Keychain, so a session started from
+    /// it does not write the same key back.
+    @ObservationIgnored private var storedCredential: StoredAPICredential?
+    @ObservationIgnored private var credentialSave: Task<Void, Never>?
+    /// Keeps App Nap from throttling the app while it waits for new messages.
+    @ObservationIgnored private var listeningActivity: NSObjectProtocol?
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let notifier: (any MessageNotifier)?
     @ObservationIgnored private var notificationPlanner = NotificationPlanner()
@@ -679,6 +685,7 @@ final class LiveSessionViewModel {
         let accountID = Self.accountID(serverURL: trimmedServer, email: trimmedEmail)
         do {
             let credential = try await credentialStore.load(accountID: accountID)
+            storedCredential = credential
             authenticationMethod = .apiKey
             connectionState = .connecting
             notice = nil
@@ -1611,11 +1618,8 @@ final class LiveSessionViewModel {
             notifier?.requestAuthorization()
             loadDrafts(for: identity.accountID)
             startPresenceUpdates(accountID: identity.accountID)
-            do {
-                try await credentialStore.save(credential)
-            } catch {
-                notice = "Connected, but the API key could not be saved in Keychain."
-            }
+            saveCredential(credential)
+            keepListeningInBackground()
             connectionState = .connected
             if let activeSelection, activeSelection.accountID == identity.accountID {
                 // Keep the user's place when a cached session went live.
@@ -2023,6 +2027,8 @@ final class LiveSessionViewModel {
                 cancelReconnect()
                 resetSessionState()
                 if let rejectedAccountID {
+                    await credentialSave?.value
+                    storedCredential = nil
                     try? await credentialStore.delete(accountID: rejectedAccountID)
                 }
                 forgetLastAccount()
@@ -2033,8 +2039,47 @@ final class LiveSessionViewModel {
         }
     }
 
+    /// Writes a newly issued key to the Keychain beside the event loop. A Keychain
+    /// call can stall (an ad-hoc signed build may wait on a file-keychain access
+    /// prompt), and every later core event, including opened conversations and new
+    /// messages, used to queue behind it.
+    private func saveCredential(_ credential: StoredAPICredential) {
+        guard credential != storedCredential else {
+            return
+        }
+        storedCredential = credential
+        let store = credentialStore
+        let previous = credentialSave
+        credentialSave = Task { [weak self] in
+            await previous?.value
+            do {
+                try await store.save(credential)
+            } catch {
+                self?.storedCredential = nil
+                self?.notice = "Connected, but the API key could not be saved in Keychain."
+            }
+        }
+    }
+
+    /// A hidden window lets macOS put the app to sleep (App Nap), which can hold
+    /// up the event queue for minutes so a message notifies late or, once the
+    /// server drops the stalled queue, not at all. Idle system sleep stays allowed.
+    private func keepListeningInBackground() {
+        guard listeningActivity == nil else {
+            return
+        }
+        listeningActivity = ProcessInfo.processInfo.beginActivity(
+            options: .userInitiatedAllowingIdleSystemSleep,
+            reason: "Waiting for new Zulip messages"
+        )
+    }
+
     private func resetSessionState() {
         hasLiveSession = false
+        if let listeningActivity {
+            ProcessInfo.processInfo.endActivity(listeningActivity)
+            self.listeningActivity = nil
+        }
         snapshotMessages = [:]
         avatarURLs = [:]
         presenceTask?.cancel()
