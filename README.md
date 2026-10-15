@@ -6,6 +6,8 @@ Zulip's channel and topic model.
 
 > Experimental and not an official Zulip client.
 
+![Zulip Mac showing the Mentions view, the channel list and direct messages](docs/images/screenshot.png)
+
 ## Status
 
 Public pre-release, used daily by its author. It targets macOS 26 on Apple
