@@ -63,6 +63,9 @@ struct ConversationSurface: View {
     @State private var followsNewest = true
     /// How far the toolbar reaches into the timeline's top edge.
     @State private var toolbarInset: CGFloat = 0
+    /// How far below the composer's outer top edge the typing line's bottom sits:
+    /// just above the composer card, which starts after its own top padding.
+    private static let typingIndicatorDrop: CGFloat = 10
     @State private var editingMessage: MessageViewData?
     @State private var deletingMessage: MessageViewData?
     @State private var forwardingMessage: MessageViewData?
@@ -383,9 +386,11 @@ struct ConversationSurface: View {
             )
             .overlay(alignment: .topLeading) {
                 if let typingDescription {
+                    // Sits in the clear band between the faded timeline and the
+                    // composer, in line with the composer's left edge.
                     TypingIndicator(text: typingDescription)
-                        .alignmentGuide(.top) { $0[.bottom] }
-                        .padding(.leading, AppTheme.Spacing.large)
+                        .alignmentGuide(.top) { $0[.bottom] - Self.typingIndicatorDrop }
+                        .padding(.leading, AppTheme.Spacing.extraLarge + AppTheme.Spacing.small)
                         .transition(.opacity)
                 }
             }
@@ -1753,9 +1758,6 @@ private struct TypingIndicator: View {
             .font(AppTheme.Typography.metadata)
             .foregroundStyle(AppTheme.Colors.secondaryText)
             .lineLimit(1)
-            .padding(.horizontal, AppTheme.Spacing.medium)
-            .padding(.vertical, 3)
-            .background(.regularMaterial, in: Capsule())
             .allowsHitTesting(false)
             .accessibilityLabel(text)
     }
