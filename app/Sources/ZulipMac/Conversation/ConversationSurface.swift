@@ -296,17 +296,20 @@ struct ConversationSurface: View {
                         .frame(maxWidth: AppTheme.Metrics.messageMaximumWidth)
                         .frame(maxWidth: .infinity)
                         .padding(.horizontal, AppTheme.Spacing.extraLarge)
+                        // Keeps the newest message clear of the bottom fade.
+                        .padding(.bottom, TimelineEdgeFade.bottomLength)
                     }
                     .defaultScrollAnchor(.bottom, for: .initialOffset)
                     .defaultScrollAnchor(.bottom, for: .sizeChanges)
                     // The window has no title bar, so messages scroll under the
-                    // toolbar's breadcrumb; fade them out before they reach it.
+                    // toolbar's breadcrumb; fade them out before they reach it,
+                    // and before they meet the composer at the bottom.
                     .onGeometryChange(for: CGFloat.self) { geometry in
                         geometry.safeAreaInsets.top
                     } action: { inset in
                         toolbarInset = inset
                     }
-                    .mask { TimelineTopFade(toolbarInset: toolbarInset) }
+                    .mask { TimelineEdgeFade(toolbarInset: toolbarInset) }
                     .onScrollGeometryChange(for: Bool.self) { geometry in
                         let remaining = geometry.contentSize.height
                             - geometry.contentOffset.y
@@ -624,15 +627,17 @@ extension View {
     }
 }
 
-/// Hides the timeline behind the toolbar and fades it in just below, so a
-/// message scrolling up never overlaps the breadcrumb. Nothing fades at rest:
-/// the first message starts below the faded band.
-private struct TimelineTopFade: View {
+/// Hides the timeline behind the toolbar and fades it in just below, and fades
+/// it out above the composer, so messages never end in a hard edge. Nothing
+/// fades at rest: the first message starts below the top band and the timeline
+/// keeps `bottomLength` of empty space under the newest one.
+private struct TimelineEdgeFade: View {
     let toolbarInset: CGFloat
 
-    /// How far the fade starts above the toolbar's lower edge and ends below it.
+    /// How far the top fade starts above the toolbar's lower edge and ends below it.
     private static let leadIn: CGFloat = 6
-    private static let fadeLength: CGFloat = 18
+    private static let topLength: CGFloat = 18
+    static let bottomLength: CGFloat = 16
 
     var body: some View {
         VStack(spacing: 0) {
@@ -643,10 +648,16 @@ private struct TimelineTopFade: View {
                 startPoint: .top,
                 endPoint: .bottom
             )
-            .frame(height: Self.fadeLength)
+            .frame(height: Self.topLength)
             Color.black
+            LinearGradient(
+                colors: [.black, .clear],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .frame(height: Self.bottomLength)
         }
-        .ignoresSafeArea(.container, edges: .top)
+        .ignoresSafeArea(.container, edges: .vertical)
     }
 }
 
