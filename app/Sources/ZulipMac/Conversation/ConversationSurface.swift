@@ -60,6 +60,11 @@ struct ConversationSurface: View {
 
     @State private var messages: [MessageViewData]
     @State private var draft = ""
+    /// Whether a saved draft arriving later may still fill the composer. Cleared
+    /// by a send: re-evaluating this view right after submitting can pass the
+    /// just-sent text as `initialDraft` again, and restoring it would leave the
+    /// sent message in the box.
+    @State private var acceptsSavedDraft = true
     @State private var followsNewest = true
     /// How far the toolbar reaches into the timeline's top edge.
     @State private var toolbarInset: CGFloat = 0
@@ -465,7 +470,7 @@ struct ConversationSurface: View {
         }
         .onChange(of: initialDraft) {
             // Persisted drafts can arrive after the surface appears.
-            if draft.isEmpty {
+            if draft.isEmpty, acceptsSavedDraft {
                 draft = initialDraft
             }
         }
@@ -574,6 +579,10 @@ struct ConversationSurface: View {
             )
             )
         }
+        acceptsSavedDraft = false
+        // Forget the saved text now, not on the next change callback, so a
+        // re-evaluation in between cannot read the sent message back as a draft.
+        draftChanged?("")
         draft = ""
         followsNewest = true
     }
