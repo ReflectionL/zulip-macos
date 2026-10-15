@@ -26,6 +26,10 @@ use zulip_core::{
         InlineStyle as NativeInlineStyle, TableAlignment as NativeTableAlignment, parse_zulip_html,
     },
     database::{CacheDatabase, CachedAccount, CachedConversation, CachedSnapshot, DraftRecord},
+    math::{
+        MathAccent as NativeMathAccent, MathNode as NativeMathNode,
+        MatrixAlignment as NativeMatrixAlignment, SymbolClass as NativeSymbolClass,
+    },
     media::MediaClient,
     messages::{
         ConversationTarget, MessageClient, MessageFlag, MessageWriteOperation, OutgoingMessage,
@@ -883,6 +887,15 @@ pub enum CoreInlineContent {
         /// Readable fallback value.
         value: String,
     },
+    /// A formula that flows with the text around it.
+    Math {
+        /// The TeX source.
+        tex: String,
+        /// The formula as one line of Unicode text.
+        text: String,
+        /// Whether Zulip drew it as a display formula.
+        display: bool,
+    },
     /// Nested content with bold, italic, strikethrough or code styling.
     Styled {
         /// The applied emphasis.
@@ -935,6 +948,155 @@ pub struct CoreTableCell {
 pub struct CoreTableRow {
     /// The row's cells.
     pub cells: Vec<CoreTableCell>,
+}
+
+/// How a math symbol is spaced.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum CoreSymbolClass {
+    /// No extra space.
+    Ordinary,
+    /// Operator such as `+`.
+    Binary,
+    /// Relation such as `=`.
+    Relation,
+    /// Comma or semicolon.
+    Punctuation,
+    /// Large operator such as a sum sign.
+    Large,
+    /// Opening bracket.
+    Open,
+    /// Closing bracket.
+    Close,
+}
+
+/// A mark over or under a math group.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum CoreMathAccent {
+    /// A circumflex.
+    Hat,
+    /// A bar.
+    Bar,
+    /// An arrow.
+    Vector,
+    /// One dot.
+    Dot,
+    /// Two dots.
+    DoubleDot,
+    /// A tilde.
+    Tilde,
+    /// A line over the whole group.
+    Overline,
+    /// A line under the whole group.
+    Underline,
+}
+
+/// How a matrix's columns line up.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum CoreMatrixAlignment {
+    /// Centered columns.
+    Centered,
+    /// Left-aligned columns.
+    Leading,
+    /// Alternating right and left, for aligned equations.
+    Equations,
+}
+
+/// One element of a parsed formula.
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum CoreMathNode {
+    /// A variable, drawn in italics.
+    Ident {
+        /// The letter.
+        value: String,
+    },
+    /// A number.
+    Number {
+        /// Digits.
+        value: String,
+    },
+    /// An upright symbol.
+    Symbol {
+        /// The glyph.
+        value: String,
+        /// Spacing class.
+        spacing: CoreSymbolClass,
+    },
+    /// Upright text.
+    Text {
+        /// The text.
+        value: String,
+    },
+    /// A named function such as `sin`.
+    Function {
+        /// The name.
+        value: String,
+    },
+    /// Space in eighteenths of an em.
+    Space {
+        /// Width in 1/18 em.
+        width: u32,
+    },
+    /// Grouped nodes.
+    Group {
+        /// The nodes.
+        children: Vec<CoreMathNode>,
+    },
+    /// A fraction.
+    Fraction {
+        /// Top part.
+        numerator: Vec<CoreMathNode>,
+        /// Bottom part.
+        denominator: Vec<CoreMathNode>,
+        /// Whether the dividing line is drawn.
+        rule: bool,
+    },
+    /// A root.
+    Root {
+        /// Degree; empty for a square root.
+        index: Vec<CoreMathNode>,
+        /// Radicand.
+        body: Vec<CoreMathNode>,
+    },
+    /// A base with scripts.
+    Script {
+        /// The base.
+        base: Vec<CoreMathNode>,
+        /// Subscript.
+        sub: Vec<CoreMathNode>,
+        /// Superscript.
+        sup: Vec<CoreMathNode>,
+        /// Whether the scripts sit above and below.
+        limits: bool,
+    },
+    /// Content between delimiters.
+    Fenced {
+        /// Opening delimiter; empty for none.
+        open: String,
+        /// Closing delimiter; empty for none.
+        close: String,
+        /// Enclosed nodes.
+        body: Vec<CoreMathNode>,
+    },
+    /// A marked group.
+    Accent {
+        /// The mark.
+        accent: CoreMathAccent,
+        /// The marked nodes.
+        body: Vec<CoreMathNode>,
+    },
+    /// A matrix, cases or aligned block.
+    Matrix {
+        /// Column count.
+        columns: u32,
+        /// Cells in row-major order.
+        cells: Vec<Vec<CoreMathNode>>,
+        /// Opening delimiter; empty for none.
+        open: String,
+        /// Closing delimiter; empty for none.
+        close: String,
+        /// Column alignment.
+        alignment: CoreMatrixAlignment,
+    },
 }
 
 /// Sanitized native block content crossing the application bridge.
@@ -1003,6 +1165,13 @@ pub enum CoreContentBlock {
         header: Vec<CoreTableCell>,
         /// Body rows.
         rows: Vec<CoreTableRow>,
+    },
+    /// A formula on its own line.
+    Math {
+        /// The TeX source.
+        tex: String,
+        /// The parsed formula.
+        nodes: Vec<CoreMathNode>,
     },
     /// Readable unsupported/unsafe fallback.
     Unsupported {
@@ -3770,6 +3939,7 @@ impl From<NativeInlineContent> for CoreInlineContent {
                 user_id,
             },
             NativeInlineContent::Emoji { name, value } => Self::Emoji { name, value },
+            NativeInlineContent::Math { tex, text, display } => Self::Math { tex, text, display },
             NativeInlineContent::Styled { style, content } => Self::Styled {
                 style: match style {
                     NativeInlineStyle::Strong => CoreInlineStyle::Strong,
@@ -3856,7 +4026,100 @@ impl From<NativeContentBlock> for CoreContentBlock {
                         .collect(),
                 }
             }
+            NativeContentBlock::Math { tex, nodes } => Self::Math {
+                tex,
+                nodes: nodes.into_iter().map(CoreMathNode::from).collect(),
+            },
             NativeContentBlock::Unsupported { summary } => Self::Unsupported { summary },
+        }
+    }
+}
+
+impl From<NativeMathNode> for CoreMathNode {
+    fn from(node: NativeMathNode) -> Self {
+        fn many(nodes: Vec<NativeMathNode>) -> Vec<CoreMathNode> {
+            nodes.into_iter().map(CoreMathNode::from).collect()
+        }
+        match node {
+            NativeMathNode::Ident(value) => Self::Ident { value },
+            NativeMathNode::Number(value) => Self::Number { value },
+            NativeMathNode::Symbol { text, class } => Self::Symbol {
+                value: text,
+                spacing: match class {
+                    NativeSymbolClass::Ordinary => CoreSymbolClass::Ordinary,
+                    NativeSymbolClass::Binary => CoreSymbolClass::Binary,
+                    NativeSymbolClass::Relation => CoreSymbolClass::Relation,
+                    NativeSymbolClass::Punctuation => CoreSymbolClass::Punctuation,
+                    NativeSymbolClass::Large => CoreSymbolClass::Large,
+                    NativeSymbolClass::Open => CoreSymbolClass::Open,
+                    NativeSymbolClass::Close => CoreSymbolClass::Close,
+                },
+            },
+            NativeMathNode::Text(value) => Self::Text { value },
+            NativeMathNode::Function(value) => Self::Function { value },
+            NativeMathNode::Space(width) => Self::Space { width },
+            NativeMathNode::Group(children) => Self::Group {
+                children: many(children),
+            },
+            NativeMathNode::Fraction {
+                numerator,
+                denominator,
+                rule,
+            } => Self::Fraction {
+                numerator: many(numerator),
+                denominator: many(denominator),
+                rule,
+            },
+            NativeMathNode::Root { index, body } => Self::Root {
+                index: many(index),
+                body: many(body),
+            },
+            NativeMathNode::Script {
+                base,
+                sub,
+                sup,
+                limits,
+            } => Self::Script {
+                base: many(base),
+                sub: many(sub),
+                sup: many(sup),
+                limits,
+            },
+            NativeMathNode::Fenced { open, close, body } => Self::Fenced {
+                open,
+                close,
+                body: many(body),
+            },
+            NativeMathNode::Accent { accent, body } => Self::Accent {
+                accent: match accent {
+                    NativeMathAccent::Hat => CoreMathAccent::Hat,
+                    NativeMathAccent::Bar => CoreMathAccent::Bar,
+                    NativeMathAccent::Vector => CoreMathAccent::Vector,
+                    NativeMathAccent::Dot => CoreMathAccent::Dot,
+                    NativeMathAccent::DoubleDot => CoreMathAccent::DoubleDot,
+                    NativeMathAccent::Tilde => CoreMathAccent::Tilde,
+                    NativeMathAccent::Overline => CoreMathAccent::Overline,
+                    NativeMathAccent::Underline => CoreMathAccent::Underline,
+                },
+                body: many(body),
+            },
+            NativeMathNode::Matrix {
+                columns,
+                cells,
+                open,
+                close,
+                alignment,
+            } => Self::Matrix {
+                columns: u32::try_from(columns).unwrap_or(1),
+                cells: cells.into_iter().map(many).collect(),
+                open,
+                close,
+                alignment: match alignment {
+                    NativeMatrixAlignment::Centered => CoreMatrixAlignment::Centered,
+                    NativeMatrixAlignment::Leading => CoreMatrixAlignment::Leading,
+                    NativeMatrixAlignment::Equations => CoreMatrixAlignment::Equations,
+                },
+            },
         }
     }
 }
@@ -3955,6 +4218,22 @@ mod tests {
                 let _ = sender.send(());
             }
         }
+    }
+
+    #[test]
+    fn formulas_cross_the_bridge_as_a_tree() {
+        let blocks = zulip_core::content::parse_zulip_html(
+            r#"<p><span class="katex-display"><span class="katex"><span class="katex-mathml"><math><semantics><mrow></mrow><annotation encoding="application/x-tex">\frac{a}{b}</annotation></semantics></math></span></span></span></p>"#,
+        );
+        let mapped: Vec<CoreContentBlock> = blocks.into_iter().map(Into::into).collect();
+        let [CoreContentBlock::Math { tex, nodes }] = mapped.as_slice() else {
+            panic!("expected one formula, got {mapped:?}");
+        };
+        assert_eq!(tex, "\\frac{a}{b}");
+        assert!(matches!(
+            nodes.as_slice(),
+            [crate::CoreMathNode::Fraction { rule: true, .. }]
+        ));
     }
 
     #[test]

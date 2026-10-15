@@ -4,6 +4,8 @@ use ego_tree::NodeRef;
 use scraper::{CaseSensitivity, Html, Node, node::Element};
 use url::Url;
 
+use crate::math::{self, MAX_TEX_BYTES, MathNode};
+
 const MAX_INPUT_BYTES: usize = 1_048_576;
 const MAX_OUTPUT_TEXT_BYTES: usize = 262_144;
 const MAX_VISITED_NODES: usize = 8_192;
@@ -68,6 +70,15 @@ pub enum InlineContent {
         name: String,
         /// Readable fallback value, normally `:name:`.
         value: String,
+    },
+    /// A formula that flows with the text around it.
+    Math {
+        /// The TeX source Zulip rendered the formula from.
+        tex: String,
+        /// The formula as one line of Unicode text.
+        text: String,
+        /// Whether Zulip drew it as a display (own-line) formula.
+        display: bool,
     },
     /// Nested content with bold, italic, strikethrough or code styling.
     Styled {
@@ -139,6 +150,13 @@ pub enum ContentBlock {
         header: Vec<Vec<InlineContent>>,
         /// The body rows, each padded to the table's width.
         rows: Vec<Vec<Vec<InlineContent>>>,
+    },
+    /// A formula on its own line (Zulip's `math` fence or a `$$` paragraph).
+    Math {
+        /// The TeX source Zulip rendered the formula from.
+        tex: String,
+        /// The parsed formula, ready for native layout.
+        nodes: Vec<MathNode>,
     },
     /// Readable fallback for unsupported or unsafe block markup.
     Unsupported {
@@ -246,7 +264,7 @@ impl ContentParser {
                 | "math" => self.block(unsafe_block()),
                 "p" => {
                     let inline = self.parse_inline_children(node, depth + 1);
-                    self.block(ContentBlock::Paragraph(inline))
+                    self.paragraph_blocks(inline)
                 }
                 "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
                     let level = element.name().as_bytes()[1] - b'0';
@@ -328,6 +346,92 @@ impl ContentParser {
             }
         }
         self.block(ContentBlock::List { items, ordered })
+    }
+
+    /// A paragraph, with each display formula lifted out as a block of its own.
+    fn paragraph_blocks(&mut self, inline: Vec<InlineContent>) -> Vec<ContentBlock> {
+        let has_display = inline
+            .iter()
+            .any(|item| matches!(item, InlineContent::Math { display: true, .. }));
+        if !has_display {
+            return self.block(ContentBlock::Paragraph(inline));
+        }
+        let mut blocks = Vec::new();
+        let mut run: Vec<InlineContent> = Vec::new();
+        for item in inline {
+            if let InlineContent::Math {
+                tex, display: true, ..
+            } = item
+            {
+                if !run.iter().all(is_blank_text) {
+                    blocks.extend(self.block(ContentBlock::Paragraph(std::mem::take(&mut run))));
+                }
+                run.clear();
+                let nodes = math::parse_tex(&tex);
+                blocks.extend(self.block(ContentBlock::Math { tex, nodes }));
+            } else {
+                run.push(item);
+            }
+        }
+        if !run.iter().all(is_blank_text) {
+            blocks.extend(self.block(ContentBlock::Paragraph(run)));
+        }
+        blocks
+    }
+
+    /// A `KaTeX` span as the TeX it was rendered from, which Zulip keeps in an
+    /// `annotation`. Without one, the visible text stands in.
+    fn parse_math(
+        &mut self,
+        node: NodeRef<'_, Node>,
+        element: &Element,
+        depth: usize,
+    ) -> Vec<InlineContent> {
+        let display = has_class(element, "katex-display");
+        let mut tex = None;
+        let mut visible = None;
+        for descendant in node.descendants() {
+            self.visited_nodes = self.visited_nodes.saturating_add(1);
+            if self.exhausted() {
+                self.limit_exceeded = true;
+                return Vec::new();
+            }
+            let Some(inner) = descendant.value().as_element() else {
+                continue;
+            };
+            if inner.name() == "annotation" && inner.attr("encoding") == Some("application/x-tex") {
+                // `descendant_text` skips everything under `<math>`, so read the
+                // annotation's own text.
+                let source: String = descendant
+                    .children()
+                    .filter_map(|child| child.value().as_text().map(|text| text.to_string()))
+                    .collect();
+                tex = Some(source);
+                break;
+            }
+            if visible.is_none() && has_class(inner, "katex-html") {
+                visible = Some(self.descendant_text(descendant, depth + 1));
+            }
+        }
+        let Some(tex) = tex
+            .map(|tex| tex.trim().to_owned())
+            .filter(|tex| !tex.is_empty())
+        else {
+            let text = visible.unwrap_or_default();
+            self.record_text(&text);
+            return if text.trim().is_empty() {
+                Vec::new()
+            } else {
+                vec![InlineContent::Text(text)]
+            };
+        };
+        self.record_text(&tex);
+        if tex.len() > MAX_TEX_BYTES {
+            return vec![InlineContent::Text(tex)];
+        }
+        let text = math::to_linear(&math::parse_tex(&tex));
+        self.record_text(&text);
+        vec![InlineContent::Math { tex, text, display }]
     }
 
     /// Readable text of markup the app cannot draw.
@@ -593,6 +697,9 @@ impl ContentParser {
                 "br" => {
                     self.record_text("\n");
                     vec![InlineContent::Text("\n".to_owned())]
+                }
+                "span" if has_class(element, "katex-display") || has_class(element, "katex") => {
+                    self.parse_math(node, element, depth + 1)
                 }
                 "a" => {
                     let label = self.descendant_text(node, depth + 1);
@@ -1058,6 +1165,10 @@ fn trim_inline(mut content: Vec<InlineContent>) -> Vec<InlineContent> {
     content
 }
 
+fn is_blank_text(item: &InlineContent) -> bool {
+    matches!(item, InlineContent::Text(text) if text.trim().is_empty())
+}
+
 fn has_class(element: &Element, class: &str) -> bool {
     element.has_class(class, CaseSensitivity::AsciiCaseInsensitive)
 }
@@ -1114,6 +1225,7 @@ fn block_is_empty(block: &ContentBlock) -> bool {
         ContentBlock::Table { header, rows, .. } => header.is_empty() && rows.is_empty(),
         ContentBlock::Image { .. }
         | ContentBlock::LinkPreview { .. }
+        | ContentBlock::Math { .. }
         | ContentBlock::Unsupported { .. } => false,
     }
 }
@@ -1680,6 +1792,78 @@ mod tests {
             vec![ContentBlock::Unsupported {
                 summary: "Message content exceeded safe display limits".to_owned(),
             }]
+        );
+    }
+
+    fn katex(tex: &str, display: bool) -> String {
+        let span = format!(
+            "<span class=\"katex\"><span class=\"katex-mathml\"><math xmlns=\"http://www.w3.org/1998/Math/MathML\"><semantics><mrow><mi>x</mi></mrow><annotation encoding=\"application/x-tex\">{tex}</annotation></semantics></math></span><span class=\"katex-html\" aria-hidden=\"true\"><span class=\"base\">x</span></span></span>"
+        );
+        if display {
+            format!("<span class=\"katex-display\">{span}</span>")
+        } else {
+            span
+        }
+    }
+
+    #[test]
+    fn inline_math_keeps_its_tex_and_reads_as_text() {
+        let html = format!("<p>Energy is {} here.</p>", katex("E = mc^2", false));
+        let blocks = parse_zulip_html(&html);
+        let [ContentBlock::Paragraph(inline)] = blocks.as_slice() else {
+            panic!("expected one paragraph, got {blocks:?}");
+        };
+        assert_eq!(
+            inline,
+            &vec![
+                InlineContent::Text("Energy is ".to_owned()),
+                InlineContent::Math {
+                    tex: "E = mc^2".to_owned(),
+                    text: "𝐸 = 𝑚𝑐²".to_owned(),
+                    display: false,
+                },
+                InlineContent::Text(" here.".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn display_math_becomes_its_own_block() {
+        let html = format!(
+            "<p>Before</p><p>{}</p><p>Then {} and after</p>",
+            katex(r"\int_0^1 x\,dx", true),
+            katex("y", true)
+        );
+        let blocks = parse_zulip_html(&html);
+        assert!(matches!(&blocks[0], ContentBlock::Paragraph(_)));
+        assert!(
+            matches!(&blocks[1], ContentBlock::Math { tex, nodes } if tex == r"\int_0^1 x\,dx" && !nodes.is_empty())
+        );
+        assert!(matches!(&blocks[2], ContentBlock::Paragraph(inline) if inline.len() == 1));
+        assert!(matches!(&blocks[3], ContentBlock::Math { tex, .. } if tex == "y"));
+        assert_eq!(blocks.len(), 5);
+        assert!(matches!(&blocks[4], ContentBlock::Paragraph(_)));
+    }
+
+    #[test]
+    fn math_without_an_annotation_falls_back_to_visible_text() {
+        let html = "<p><span class=\"katex\"><span class=\"katex-html\">x²</span></span></p>";
+        assert_eq!(
+            parse_zulip_html(html),
+            vec![ContentBlock::Paragraph(vec![InlineContent::Text(
+                "x²".to_owned()
+            )])]
+        );
+    }
+
+    #[test]
+    fn a_formula_error_stays_readable_text() {
+        let html = "<p><span class=\"tex-error\">$$\\frac{$$</span></p>";
+        assert_eq!(
+            parse_zulip_html(html),
+            vec![ContentBlock::Paragraph(vec![InlineContent::Text(
+                "$$\\frac{$$".to_owned()
+            )])]
         );
     }
 }

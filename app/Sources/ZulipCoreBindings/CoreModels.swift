@@ -209,6 +209,8 @@ public enum InlineContent: Equatable, Sendable {
     case link(label: String, url: String)
     case mention(displayName: String, userID: Int64)
     case emoji(name: String, value: String)
+    /// A formula inside a sentence: its TeX and a one-line Unicode reading.
+    case math(tex: String, text: String, display: Bool)
     case styled(InlineStyle, [InlineContent])
 
     public var plainText: String {
@@ -221,6 +223,8 @@ public enum InlineContent: Equatable, Sendable {
             "@\(displayName)"
         case let .emoji(_, value):
             value
+        case let .math(tex, _, _):
+            "$$\(tex)$$"
         case let .styled(_, content):
             content.map(\.plainText).joined()
         }
@@ -232,6 +236,46 @@ public enum TableColumnAlignment: Equatable, Sendable {
     case leading
     case center
     case trailing
+}
+
+/// How a math symbol is spaced.
+public enum MathSymbolClass: Equatable, Sendable {
+    case ordinary, binary, relation, punctuation, large, opening, closing
+}
+
+/// A mark over or under a math group.
+public enum MathAccentKind: Equatable, Sendable {
+    case hat, bar, vector, dot, doubleDot, tilde, overline, underline
+}
+
+/// How a matrix's columns line up.
+public enum MathMatrixAlignment: Equatable, Sendable {
+    case centered, leading, equations
+}
+
+/// One element of a parsed formula, ready for native layout.
+public indirect enum MathNode: Equatable, Sendable {
+    case ident(String)
+    case number(String)
+    case symbol(String, MathSymbolClass)
+    case text(String)
+    case function(String)
+    /// Horizontal space in eighteenths of an em.
+    case space(Int)
+    case group([MathNode])
+    case fraction(numerator: [MathNode], denominator: [MathNode], rule: Bool)
+    case root(index: [MathNode], body: [MathNode])
+    case script(base: [MathNode], sub: [MathNode], sup: [MathNode], limits: Bool)
+    case fenced(opening: String, closing: String, body: [MathNode])
+    case accent(MathAccentKind, [MathNode])
+    /// Cells are row-major, `columns` per row.
+    case matrix(
+        columns: Int,
+        cells: [[MathNode]],
+        opening: String,
+        closing: String,
+        alignment: MathMatrixAlignment
+    )
 }
 
 public indirect enum ContentBlock: Equatable, Sendable {
@@ -257,6 +301,8 @@ public indirect enum ContentBlock: Equatable, Sendable {
         header: [[InlineContent]],
         rows: [[[InlineContent]]]
     )
+    /// A formula on its own line.
+    case math(tex: String, nodes: [MathNode])
     case unsupported(summary: String)
 
     public var plainText: String {
@@ -280,6 +326,8 @@ public indirect enum ContentBlock: Equatable, Sendable {
                 .filter { !$0.isEmpty }
                 .map { $0.map { $0.map(\.plainText).joined() }.joined(separator: " | ") }
                 .joined(separator: "\n")
+        case let .math(tex, _):
+            "```math\n\(tex)\n```"
         case let .unsupported(summary):
             summary
         }

@@ -245,6 +245,9 @@ private struct ContentBlockView: View {
         case let .table(alignments, header, rows):
             MessageTableView(alignments: alignments, header: header, rows: rows)
 
+        case let .math(tex, nodes):
+            MathDisplayView(tex: tex, nodes: nodes)
+
         case let .unsupported(summary):
             Label(summary, systemImage: "doc.questionmark")
                 .font(AppTheme.Typography.body)
@@ -388,6 +391,9 @@ private struct InlineContentText: View {
                 }
             case .text, .emoji:
                 fragment = AttributedString(item.plainText)
+            case let .math(_, text, _):
+                fragment = AttributedString(text)
+                fragment.font = AppTheme.Typography.scaled(14.5, design: .serif)
             case let .link(label, url):
                 fragment = AttributedString(label)
                 fragment.link = URL(string: url)
@@ -667,6 +673,8 @@ enum ContentSnapshot {
         case let .table(alignments, header, rows):
             "table[\(alignments.count)](\(header.map(describe).joined(separator: ",")))"
                 + "{\(rows.map { $0.map(describe).joined(separator: ",") }.joined(separator: ";"))}"
+        case let .math(tex, _):
+            "math(\(tex))"
         case let .unsupported(summary):
             "unsupported(\(summary))"
         }
@@ -686,6 +694,8 @@ enum ContentSnapshot {
             "mention:\(displayName)#\(userID)"
         case let .emoji(name, value):
             "emoji:\(name)=\(value)"
+        case let .math(tex, text, display):
+            "math[\(display ? "display" : "inline")]:\(tex)=\(text)"
         case let .styled(style, content):
             "\(style)[\(content.map(describe).joined(separator: "|"))]"
         }

@@ -150,7 +150,13 @@ file. Do not disable Gatekeeper globally.
 - Offline use is read-only; failed writes are retried by hand, not replayed.
 - A message that was moved to another topic or channel shows "(edited)", like
   an edited one.
-- Custom (image) emoji appear as `:name:` (and are left out of status emoji); complex formulas are not rendered.
+- Custom (image) emoji appear as `:name:` (and are left out of status emoji).
+  LaTeX formulas (`$$…$$` and the `math` fence) are drawn natively: a
+  formula on its own line is laid out with stacked fractions, roots, limits,
+  matrices and stretchy brackets (right-click › Copy LaTeX); a formula inside
+  a sentence is shown as one line of Unicode text. Only common LaTeX is
+  understood (no custom macros or `\newcommand`, no column rules in `array`);
+  anything unknown is shown as written.
   Markdown tables are drawn as a native grid (header row, column alignment,
   sideways scrolling when wide); cells hold inline text, links and mentions
   only, and very large tables are cut to 200 rows and 24 columns.
