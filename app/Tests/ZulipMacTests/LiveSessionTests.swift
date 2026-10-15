@@ -39,6 +39,47 @@ struct LiveSessionTests {
         #expect(model.secret == "render-only-secret")
     }
 
+    @Test("The welcome screen renders signed out and while reconnecting, in both appearances")
+    func welcomeRenders() {
+        let model = LiveSessionViewModel(
+            client: RecordingCoreClient(),
+            credentialStore: MemoryCredentialStore()
+        )
+        model.serverURL = "https://acme.zulipchat.com"
+        model.email = "maya@example.com"
+        model.secret = "render-only-secret"
+
+        for colorScheme in [ColorScheme.light, .dark] {
+            for isRestoring in [false, true] {
+                let renderer = ImageRenderer(
+                    content: WelcomeView(session: model, isRestoring: isRestoring)
+                        .frame(width: 1_080, height: 720)
+                        .preferredColorScheme(colorScheme)
+                )
+                renderer.scale = 1
+
+                #expect(renderer.nsImage != nil)
+            }
+        }
+        #expect(model.secret == "render-only-secret")
+    }
+
+    @Test("A saved account is only reported once a run has signed in")
+    func savedAccountFlag() throws {
+        let defaults = try #require(UserDefaults(suiteName: "saved-\(UUID().uuidString)"))
+        let model = LiveSessionViewModel(
+            client: RecordingCoreClient(),
+            credentialStore: MemoryCredentialStore(),
+            defaults: defaults
+        )
+        #expect(!model.hasSavedAccount)
+
+        defaults.set("https://acme.zulipchat.com", forKey: "lastAccount.serverURL")
+        #expect(!model.hasSavedAccount)
+        defaults.set("maya@example.com", forKey: "lastAccount.email")
+        #expect(model.hasSavedAccount)
+    }
+
     @Test("Password login is redacted, persisted as an API key, and opens Mentions")
     func passwordLogin() async throws {
         let core = RecordingCoreClient()
