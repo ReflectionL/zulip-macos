@@ -1,18 +1,17 @@
 import AppKit
 import SwiftUI
 
-/// The window before an account is connected: the app icon and the sign-in
-/// form on the same canvas, type and control styles as the connected window.
+/// The window before an account is connected: the connected window's shell
+/// (sidebar, top bar, canvas) with the sign-in form in place of a conversation.
 struct WelcomeView: View {
     @Bindable var session: LiveSessionViewModel
     /// True while a saved account is being reconnected after launch.
     let isRestoring: Bool
 
     var body: some View {
-        ZStack(alignment: .top) {
-            AppTheme.Colors.canvas
-                .ignoresSafeArea()
-
+        WindowShellView {
+            WelcomeSidebar()
+        } content: {
             GeometryReader { proxy in
                 ScrollView {
                     content
@@ -20,16 +19,14 @@ struct WelcomeView: View {
                 }
                 .scrollBounceBehavior(.basedOnSize)
             }
-
-            // The title bar is hidden, so give the window something to drag by.
-            WindowDragStrip()
-                .frame(height: AppTheme.Metrics.headerHeight - AppTheme.Spacing.large)
-                .frame(maxWidth: .infinity)
+            .background(AppTheme.Colors.canvas)
+            .conversationToolbar(
+                title: isRestoring ? "Reconnecting" : "Sign in",
+                subtitle: AppIdentity.displayName,
+                isOffline: false,
+                showsDetails: false
+            )
         }
-        .frame(
-            minWidth: AppTheme.Metrics.minimumWindowWidth,
-            minHeight: AppTheme.Metrics.minimumWindowHeight
-        )
     }
 
     private var content: some View {
@@ -249,16 +246,69 @@ struct LoginForm: View {
     }
 }
 
-private struct WindowDragStrip: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView {
-        DragStripView()
+/// The sidebar column before sign-in: the connected sidebar's header and
+/// footer, with nothing between them yet.
+private struct WelcomeSidebar: View {
+    @Environment(UpdateController.self) private var updates: UpdateController?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: AppTheme.Spacing.small) {
+                Image(nsImage: NSApplication.shared.applicationIconImage)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 30, height: 30)
+                    .accessibilityHidden(true)
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(AppIdentity.displayName)
+                        .font(AppTheme.Typography.sidebarEmphasized)
+                        .foregroundStyle(AppTheme.Colors.primaryText)
+                        .lineLimit(1)
+                    Text("Not connected")
+                        .font(AppTheme.Typography.metadata)
+                        .foregroundStyle(AppTheme.Colors.secondaryText)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 0)
+            }
+            .frame(minHeight: 36)
+            .padding(.horizontal, AppTheme.Spacing.medium)
+            .padding(.top, AppTheme.Metrics.sidebarTopInset)
+            .padding(.bottom, AppTheme.Spacing.small)
+
+            Spacer()
+
+            HStack {
+                Spacer()
+                Menu {
+                    if let release = updates?.availableRelease {
+                        SettingsLink {
+                            Label("Update to \(release.version)…", systemImage: "arrow.down.circle")
+                        }
+                    }
+
+                    SettingsLink {
+                        Label("Settings…", systemImage: "gearshape")
+                    }
+                } label: {
+                    Image(systemName: "gearshape")
+                        .font(AppTheme.Typography.scaled(12))
+                        .foregroundStyle(AppTheme.Colors.secondaryText)
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Settings")
+                .accessibilityLabel("Settings")
+            }
+            .padding(.horizontal, AppTheme.Spacing.small)
+            .frame(minHeight: 36)
+        }
     }
-
-    func updateNSView(_ nsView: NSView, context: Context) {}
-}
-
-private final class DragStripView: NSView {
-    override var mouseDownCanMoveWindow: Bool { true }
 }
 
 #if DEBUG
