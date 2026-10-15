@@ -483,6 +483,13 @@ final class LiveSessionViewModel {
         await connectUsingSavedAPIKey(reportMissingKey: true)
     }
 
+    /// Whether a previous run left an account to reconnect to, so the welcome
+    /// screen can wait for it instead of showing a sign-in form for a moment.
+    var hasSavedAccount: Bool {
+        defaults.string(forKey: Self.lastServerURLKey) != nil
+            && defaults.string(forKey: Self.lastEmailKey) != nil
+    }
+
     /// Reconnects the account that was active when the app last ran, so a
     /// relaunch does not require signing in again. Does nothing when the user
     /// disconnected on purpose or no API key is stored.

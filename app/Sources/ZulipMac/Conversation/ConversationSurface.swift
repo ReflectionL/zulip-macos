@@ -624,7 +624,8 @@ extension View {
         openParent: (() -> Void)? = nil,
         openSearch: (() -> Void)? = nil,
         renameTopic: (() -> Void)? = nil,
-        renameChannel: (() -> Void)? = nil
+        renameChannel: (() -> Void)? = nil,
+        showsDetails: Bool = true
     ) -> some View {
         modifier(
             ConversationToolbarModifier(
@@ -635,7 +636,8 @@ extension View {
                 openParent: openParent,
                 openSearch: openSearch,
                 renameTopic: renameTopic,
-                renameChannel: renameChannel
+                renameChannel: renameChannel,
+                showsDetails: showsDetails
             )
         )
     }
@@ -684,6 +686,7 @@ private struct ConversationToolbarModifier: ViewModifier {
     let openSearch: (() -> Void)?
     let renameTopic: (() -> Void)?
     let renameChannel: (() -> Void)?
+    let showsDetails: Bool
 
     private var accessibilitySummary: String {
         var parts = [subtitle, title]
@@ -771,13 +774,15 @@ private struct ConversationToolbarModifier: ViewModifier {
                         .accessibilityLabel("Conversation actions")
                     }
 
-                    Button {
-                        // Conversation details arrive with live membership data.
-                    } label: {
-                        Image(systemName: "info.circle")
+                    if showsDetails {
+                        Button {
+                            // Conversation details arrive with live membership data.
+                        } label: {
+                            Image(systemName: "info.circle")
+                        }
+                        .help("Conversation details")
+                        .accessibilityLabel("Conversation details")
                     }
-                    .help("Conversation details")
-                    .accessibilityLabel("Conversation details")
                 }
             }
     }

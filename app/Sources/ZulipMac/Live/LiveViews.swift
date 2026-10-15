@@ -3,16 +3,22 @@ import ZulipCoreBindings
 
 struct AppRootView: View {
     let session: LiveSessionViewModel
+    /// True from launch until a saved account has reconnected or failed to, so
+    /// the welcome screen waits instead of flashing the sign-in form.
+    @State private var isRestoring: Bool
     @State private var isLoginPresented = false
+
+    init(session: LiveSessionViewModel) {
+        self.session = session
+        _isRestoring = State(initialValue: session.hasSavedAccount)
+    }
 
     var body: some View {
         Group {
             if session.identity != nil, session.sidebarSnapshot != nil {
                 LiveWindowView(session: session)
             } else {
-                PrototypeWindowView {
-                    isLoginPresented = true
-                }
+                WelcomeView(session: session, isRestoring: isRestoring)
             }
         }
         .overlay {
@@ -24,14 +30,23 @@ struct AppRootView: View {
         .task {
             session.startObserving()
             await session.restoreSavedSession()
+            // No saved key means nothing is reconnecting; show the form.
+            if session.connectionState == .signedOut {
+                isRestoring = false
+            }
         }
         .onChange(of: session.connectionState) {
             switch session.connectionState {
             case .connected:
+                isRestoring = false
                 isLoginPresented = false
+            case .signedOut:
+                isRestoring = false
             case .failed:
-                // Surface why the session ended or could not resume.
-                isLoginPresented = true
+                isRestoring = false
+                // Surface why the session ended or could not resume. Without a
+                // session the welcome screen shows it in place.
+                isLoginPresented = session.identity != nil
             default:
                 break
             }
@@ -39,6 +54,8 @@ struct AppRootView: View {
     }
 }
 
+/// Signing in again from the connected window, when the session ended or could
+/// not resume.
 struct LiveLoginView: View {
     @Bindable var session: LiveSessionViewModel
     @Environment(\.dismiss) private var dismiss
@@ -49,7 +66,7 @@ struct LiveLoginView: View {
                 VStack(alignment: .leading, spacing: AppTheme.Spacing.extraSmall) {
                     Text("Connect to Zulip")
                         .font(AppTheme.Typography.title)
-                    Text("Credentials stay in memory until the API key is saved in Keychain.")
+                    Text("Sign in to your Zulip organization.")
                         .font(AppTheme.Typography.metadata)
                         .foregroundStyle(AppTheme.Colors.secondaryText)
                 }
@@ -60,99 +77,12 @@ struct LiveLoginView: View {
                 .keyboardShortcut(.cancelAction)
             }
 
-            Picker("Authentication", selection: $session.authenticationMethod) {
-                ForEach(LiveAuthenticationMethod.allCases) { method in
-                    Text(method.rawValue).tag(method)
-                }
-            }
-            .pickerStyle(.segmented)
-
-            Grid(alignment: .leading, horizontalSpacing: AppTheme.Spacing.large) {
-                GridRow {
-                    Text("Server")
-                    TextField("https://your-org.zulipchat.com", text: $session.serverURL)
-                        .textFieldStyle(.roundedBorder)
-                }
-                GridRow {
-                    Text("Email")
-                    TextField("you@example.com", text: $session.email)
-                        .textFieldStyle(.roundedBorder)
-                }
-                GridRow {
-                    Text(session.authenticationMethod.rawValue)
-                    SecureField(
-                        session.authenticationMethod == .password
-                            ? "Password"
-                            : "API key",
-                        text: $session.secret
-                    )
-                    .textFieldStyle(.roundedBorder)
-                    .privacySensitive()
-                    .onSubmit {
-                        session.connect()
-                    }
-                }
-            }
-            .font(AppTheme.Typography.body)
-
-            if let message = statusMessage {
-                Label(message, systemImage: statusIcon)
-                    .font(AppTheme.Typography.metadata)
-                    .foregroundStyle(statusColor)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            HStack {
-                Button("Use Saved API Key") {
-                    Task {
-                        await session.connectUsingSavedAPIKey()
-                    }
-                }
-                .disabled(session.connectionState.isConnecting)
-
-                Spacer()
-
-                if session.connectionState.isConnecting {
-                    ProgressView()
-                        .controlSize(.small)
-                }
-                Button("Connect") {
-                    session.connect()
-                }
-                .buttonStyle(.borderedProminent)
-                .keyboardShortcut(.defaultAction)
-                .disabled(session.connectionState.isConnecting)
-            }
+            LoginForm(session: session)
         }
-        .padding(28)
-        .frame(width: 520)
+        .padding(AppTheme.Spacing.extraLarge)
+        .frame(width: 440)
         .background(AppTheme.Colors.canvas)
         .interactiveDismissDisabled(session.connectionState.isConnecting)
-    }
-
-    private var statusMessage: String? {
-        switch session.connectionState {
-        case let .failed(message):
-            message
-        case let .retrying(delay):
-            "Connection interrupted. Retrying in \(delay) ms."
-        default:
-            session.notice
-        }
-    }
-
-    private var statusIcon: String {
-        if case .failed = session.connectionState {
-            return "exclamationmark.triangle"
-        }
-        return "info.circle"
-    }
-
-    private var statusColor: Color {
-        if case .failed = session.connectionState {
-            return AppTheme.Colors.destructive
-        }
-        return AppTheme.Colors.secondaryText
     }
 }
 
