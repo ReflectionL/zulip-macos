@@ -110,6 +110,8 @@ roadmap lives in [`PLAN.md`](PLAN.md).
   install or an update shows the Allow prompt right away. Settings ›
   Notifications shows whether notifications are allowed and can ask again,
   open the app's page in System Settings, or send a test notification.
+- Settings › Appearance › Message density chooses how much space sits between
+  messages: Normal (the default) or Compact.
 
 **Keyboard and appearance**
 

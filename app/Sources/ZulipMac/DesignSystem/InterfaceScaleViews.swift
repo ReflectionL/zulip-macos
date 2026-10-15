@@ -33,9 +33,10 @@ struct InterfaceScaleShortcuts: View {
     }
 }
 
-/// Text-size row for the Settings window.
+/// Text-size and message-density rows for the Settings window.
 struct TextSizeSettingsSection: View {
     private var scale: InterfaceScale { InterfaceScale.shared }
+    private var densityPreference: MessageDensityPreference { MessageDensityPreference.shared }
 
     var body: some View {
         Section("Appearance") {
@@ -51,6 +52,22 @@ struct TextSizeSettingsSection: View {
                     Button("Reset") { scale.reset() }
                         .disabled(scale.isStandard)
                 }
+            }
+            LabeledContent("Message density") {
+                Picker(
+                    "Message density",
+                    selection: Binding(
+                        get: { densityPreference.density },
+                        set: { densityPreference.select($0) }
+                    )
+                ) {
+                    ForEach(MessageDensity.allCases) { option in
+                        Text(option.title).tag(option)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .fixedSize()
             }
         }
     }

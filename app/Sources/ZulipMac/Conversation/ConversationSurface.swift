@@ -802,6 +802,10 @@ private struct MessageRow: View {
     var senderStatus: UserStatusDisplay?
     var sourceLabel: String?
 
+    private var density: MessageDensity {
+        MessageDensityPreference.shared.density
+    }
+
     @State private var isHovered = false
     @State private var isHoveringActions = false
     @State private var isPickingReaction = false
@@ -870,14 +874,14 @@ private struct MessageRow: View {
         .padding(
             .top,
             isContinuation
-                ? AppTheme.Metrics.continuationInset
-                : AppTheme.Metrics.blockTopInset
+                ? density.continuationInset
+                : density.blockTopInset
         )
         .padding(
             .bottom,
             isContinuation
-                ? AppTheme.Metrics.continuationInset
-                : AppTheme.Metrics.blockBottomInset
+                ? density.continuationInset
+                : density.blockBottomInset
         )
         .contentShape(Rectangle())
         .background {
