@@ -1700,7 +1700,8 @@ private struct ComposerView: View {
                 .accessibilityLabel("Send message")
             }
         }
-        .padding(AppTheme.Spacing.medium)
+        .padding(.horizontal, AppTheme.Spacing.medium)
+        .padding(.vertical, AppTheme.Spacing.small)
         .frame(maxWidth: AppTheme.Metrics.composerMaximumWidth)
         .elevatedSurface(radius: AppTheme.Metrics.panelRadius)
         .padding(.horizontal, AppTheme.Spacing.extraLarge)
