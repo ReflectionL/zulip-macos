@@ -23,9 +23,13 @@ use zulip_core::{
     auth::{AuthenticatedAccount, AuthenticationClient, SecretString},
     content::{
         ContentBlock as NativeContentBlock, InlineContent as NativeInlineContent,
-        InlineStyle as NativeInlineStyle, parse_zulip_html,
+        InlineStyle as NativeInlineStyle, TableAlignment as NativeTableAlignment, parse_zulip_html,
     },
     database::{CacheDatabase, CachedAccount, CachedConversation, CachedSnapshot, DraftRecord},
+    math::{
+        MathAccent as NativeMathAccent, MathNode as NativeMathNode,
+        MatrixAlignment as NativeMatrixAlignment, SymbolClass as NativeSymbolClass,
+    },
     media::MediaClient,
     messages::{
         ConversationTarget, MessageClient, MessageFlag, MessageWriteOperation, OutgoingMessage,
@@ -883,6 +887,15 @@ pub enum CoreInlineContent {
         /// Readable fallback value.
         value: String,
     },
+    /// A formula that flows with the text around it.
+    Math {
+        /// The TeX source.
+        tex: String,
+        /// The formula as one line of Unicode text.
+        text: String,
+        /// Whether Zulip drew it as a display formula.
+        display: bool,
+    },
     /// Nested content with bold, italic, strikethrough or code styling.
     Styled {
         /// The applied emphasis.
@@ -910,6 +923,180 @@ pub enum CoreInlineStyle {
 pub struct CoreContentListItem {
     /// Blocks within this item.
     pub blocks: Vec<CoreContentBlock>,
+}
+
+/// How a table column's text lines up.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum CoreTableAlignment {
+    /// Left in left-to-right text.
+    Leading,
+    /// Centered.
+    Center,
+    /// Right in left-to-right text.
+    Trailing,
+}
+
+/// One table cell.
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct CoreTableCell {
+    /// Inline values in display order.
+    pub content: Vec<CoreInlineContent>,
+}
+
+/// One table row, as wide as the table.
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct CoreTableRow {
+    /// The row's cells.
+    pub cells: Vec<CoreTableCell>,
+}
+
+/// How a math symbol is spaced.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum CoreSymbolClass {
+    /// No extra space.
+    Ordinary,
+    /// Operator such as `+`.
+    Binary,
+    /// Relation such as `=`.
+    Relation,
+    /// Comma or semicolon.
+    Punctuation,
+    /// Large operator such as a sum sign.
+    Large,
+    /// Opening bracket.
+    Open,
+    /// Closing bracket.
+    Close,
+}
+
+/// A mark over or under a math group.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum CoreMathAccent {
+    /// A circumflex.
+    Hat,
+    /// A bar.
+    Bar,
+    /// An arrow.
+    Vector,
+    /// One dot.
+    Dot,
+    /// Two dots.
+    DoubleDot,
+    /// A tilde.
+    Tilde,
+    /// A line over the whole group.
+    Overline,
+    /// A line under the whole group.
+    Underline,
+}
+
+/// How a matrix's columns line up.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum CoreMatrixAlignment {
+    /// Centered columns.
+    Centered,
+    /// Left-aligned columns.
+    Leading,
+    /// Alternating right and left, for aligned equations.
+    Equations,
+}
+
+/// One element of a parsed formula.
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum CoreMathNode {
+    /// A variable, drawn in italics.
+    Ident {
+        /// The letter.
+        value: String,
+    },
+    /// A number.
+    Number {
+        /// Digits.
+        value: String,
+    },
+    /// An upright symbol.
+    Symbol {
+        /// The glyph.
+        value: String,
+        /// Spacing class.
+        spacing: CoreSymbolClass,
+    },
+    /// Upright text.
+    Text {
+        /// The text.
+        value: String,
+    },
+    /// A named function such as `sin`.
+    Function {
+        /// The name.
+        value: String,
+    },
+    /// Space in eighteenths of an em.
+    Space {
+        /// Width in 1/18 em.
+        width: u32,
+    },
+    /// Grouped nodes.
+    Group {
+        /// The nodes.
+        children: Vec<CoreMathNode>,
+    },
+    /// A fraction.
+    Fraction {
+        /// Top part.
+        numerator: Vec<CoreMathNode>,
+        /// Bottom part.
+        denominator: Vec<CoreMathNode>,
+        /// Whether the dividing line is drawn.
+        rule: bool,
+    },
+    /// A root.
+    Root {
+        /// Degree; empty for a square root.
+        index: Vec<CoreMathNode>,
+        /// Radicand.
+        body: Vec<CoreMathNode>,
+    },
+    /// A base with scripts.
+    Script {
+        /// The base.
+        base: Vec<CoreMathNode>,
+        /// Subscript.
+        sub: Vec<CoreMathNode>,
+        /// Superscript.
+        sup: Vec<CoreMathNode>,
+        /// Whether the scripts sit above and below.
+        limits: bool,
+    },
+    /// Content between delimiters.
+    Fenced {
+        /// Opening delimiter; empty for none.
+        open: String,
+        /// Closing delimiter; empty for none.
+        close: String,
+        /// Enclosed nodes.
+        body: Vec<CoreMathNode>,
+    },
+    /// A marked group.
+    Accent {
+        /// The mark.
+        accent: CoreMathAccent,
+        /// The marked nodes.
+        body: Vec<CoreMathNode>,
+    },
+    /// A matrix, cases or aligned block.
+    Matrix {
+        /// Column count.
+        columns: u32,
+        /// Cells in row-major order.
+        cells: Vec<Vec<CoreMathNode>>,
+        /// Opening delimiter; empty for none.
+        open: String,
+        /// Closing delimiter; empty for none.
+        close: String,
+        /// Column alignment.
+        alignment: CoreMatrixAlignment,
+    },
 }
 
 /// Sanitized native block content crossing the application bridge.
@@ -969,6 +1156,22 @@ pub enum CoreContentBlock {
         image_url: Option<String>,
         /// Built by the server; otherwise the app may describe the page itself.
         from_server: bool,
+    },
+    /// A table.
+    Table {
+        /// Alignment of each column.
+        alignments: Vec<CoreTableAlignment>,
+        /// Header cells; empty when the table has no header row.
+        header: Vec<CoreTableCell>,
+        /// Body rows.
+        rows: Vec<CoreTableRow>,
+    },
+    /// A formula on its own line.
+    Math {
+        /// The TeX source.
+        tex: String,
+        /// The parsed formula.
+        nodes: Vec<CoreMathNode>,
     },
     /// Readable unsupported/unsafe fallback.
     Unsupported {
@@ -1461,6 +1664,9 @@ struct AccountSession {
     /// The newest message the event queue has delivered, so that messages
     /// arriving while a lost queue was replaced can be fetched and notified.
     newest_message_id: i64,
+    /// Where a finished mark-read request reports back to the actor, which
+    /// applies it to the unread counts. Set when the actor takes the session.
+    marked_read: Option<UnboundedSender<MarkedRead>>,
 }
 
 /// A session that finished signing in and registering beside the actor.
@@ -1496,6 +1702,12 @@ struct MissedMessages {
     messages: Vec<MessageSummary>,
 }
 
+/// Messages the server accepted as read for this client.
+struct MarkedRead {
+    account_id: String,
+    message_ids: Vec<i64>,
+}
+
 /// How many messages that arrived during a queue gap are fetched at most.
 const MISSED_MESSAGE_LIMIT: u16 = 50;
 
@@ -1505,6 +1717,7 @@ enum ActorInput {
     Topics(Option<TopicRefresh>),
     Session(Option<Box<SessionStart>>),
     Missed(Option<MissedMessages>),
+    Marked(Option<MarkedRead>),
 }
 
 /// Whether a command needs the live session, and so waits while one is starting.
@@ -1542,6 +1755,8 @@ async fn run_actor(
     // Messages that arrived while a lost event queue was replaced never come
     // through the new queue; they are fetched beside the actor.
     let (missed_sender, mut missed_receiver) = unbounded_channel::<MissedMessages>();
+    // Reads this client made are applied to the unread counts once accepted.
+    let (marked_sender, mut marked_receiver) = unbounded_channel::<MarkedRead>();
 
     loop {
         let input = if let Some(session) = account.as_mut() {
@@ -1556,6 +1771,7 @@ async fn run_actor(
                 refresh = topic_receiver.recv() => ActorInput::Topics(refresh),
                 start = session_receiver.recv() => ActorInput::Session(start.map(Box::new)),
                 missed = missed_receiver.recv() => ActorInput::Missed(missed),
+                marked = marked_receiver.recv() => ActorInput::Marked(marked),
             }
         } else {
             tokio::select! {
@@ -1621,7 +1837,8 @@ async fn run_actor(
                 else {
                     continue;
                 };
-                if let Some(started) = start.started {
+                if let Some(mut started) = start.started {
+                    started.session.marked_read = Some(marked_sender.clone());
                     account = Some(started.session);
                     poll_not_before = Instant::now();
                     retrying = false;
@@ -1697,7 +1914,23 @@ async fn run_actor(
                     });
                 }
             }
-            ActorInput::Topics(None) | ActorInput::Session(None) | ActorInput::Missed(None) => {}
+            ActorInput::Marked(Some(marked)) => {
+                if let Some(session) = account
+                    .as_mut()
+                    .filter(|session| session.account_id == marked.account_id)
+                    && let Some(snapshot) = session.sync.mark_read_locally(&marked.message_ids)
+                {
+                    cache_snapshot_throttled(session, &snapshot);
+                    event_sink.handle_event(CoreEvent::SnapshotUpdated {
+                        account_id: session.account_id.clone(),
+                        snapshot: CoreSnapshot::from_sync(snapshot, &session.topics),
+                    });
+                }
+            }
+            ActorInput::Topics(None)
+            | ActorInput::Session(None)
+            | ActorInput::Missed(None)
+            | ActorInput::Marked(None) => {}
         }
     }
 }
@@ -3176,12 +3409,22 @@ fn mark_read(
     };
     let messages = Arc::clone(&session.messages);
     let event_sink = Arc::clone(event_sink);
+    let marked_read = session.marked_read.clone();
+    let account_id = session.account_id.clone();
     tokio::spawn(async move {
         match messages.mark_read(&message_ids).await {
-            Ok(()) => event_sink.handle_event(CoreEvent::MessagesMarkedRead {
-                request_id,
-                message_ids,
-            }),
+            Ok(()) => {
+                if let Some(marked_read) = marked_read {
+                    let _ = marked_read.send(MarkedRead {
+                        account_id,
+                        message_ids: message_ids.clone(),
+                    });
+                }
+                event_sink.handle_event(CoreEvent::MessagesMarkedRead {
+                    request_id,
+                    message_ids,
+                });
+            }
             Err(error) => emit_error(Some(request_id), error, &event_sink),
         }
     });
@@ -3396,6 +3639,7 @@ async fn start_session(
                     last_snapshot_cache_seconds: AtomicU64::new(now_seconds()),
                     send_order: Arc::new(AsyncMutex::new(())),
                     newest_message_id,
+                    marked_read: None,
                 },
                 started: CoreEvent::SessionStarted {
                     request_id,
@@ -3695,6 +3939,7 @@ impl From<NativeInlineContent> for CoreInlineContent {
                 user_id,
             },
             NativeInlineContent::Emoji { name, value } => Self::Emoji { name, value },
+            NativeInlineContent::Math { tex, text, display } => Self::Math { tex, text, display },
             NativeInlineContent::Styled { style, content } => Self::Styled {
                 style: match style {
                     NativeInlineStyle::Strong => CoreInlineStyle::Strong,
@@ -3755,7 +4000,126 @@ impl From<NativeContentBlock> for CoreContentBlock {
                 image_url,
                 from_server,
             },
+            NativeContentBlock::Table {
+                alignments,
+                header,
+                rows,
+            } => {
+                let cell = |content: Vec<NativeInlineContent>| CoreTableCell {
+                    content: content.into_iter().map(CoreInlineContent::from).collect(),
+                };
+                Self::Table {
+                    alignments: alignments
+                        .into_iter()
+                        .map(|alignment| match alignment {
+                            NativeTableAlignment::Leading => CoreTableAlignment::Leading,
+                            NativeTableAlignment::Center => CoreTableAlignment::Center,
+                            NativeTableAlignment::Trailing => CoreTableAlignment::Trailing,
+                        })
+                        .collect(),
+                    header: header.into_iter().map(cell).collect(),
+                    rows: rows
+                        .into_iter()
+                        .map(|row| CoreTableRow {
+                            cells: row.into_iter().map(cell).collect(),
+                        })
+                        .collect(),
+                }
+            }
+            NativeContentBlock::Math { tex, nodes } => Self::Math {
+                tex,
+                nodes: nodes.into_iter().map(CoreMathNode::from).collect(),
+            },
             NativeContentBlock::Unsupported { summary } => Self::Unsupported { summary },
+        }
+    }
+}
+
+impl From<NativeMathNode> for CoreMathNode {
+    fn from(node: NativeMathNode) -> Self {
+        fn many(nodes: Vec<NativeMathNode>) -> Vec<CoreMathNode> {
+            nodes.into_iter().map(CoreMathNode::from).collect()
+        }
+        match node {
+            NativeMathNode::Ident(value) => Self::Ident { value },
+            NativeMathNode::Number(value) => Self::Number { value },
+            NativeMathNode::Symbol { text, class } => Self::Symbol {
+                value: text,
+                spacing: match class {
+                    NativeSymbolClass::Ordinary => CoreSymbolClass::Ordinary,
+                    NativeSymbolClass::Binary => CoreSymbolClass::Binary,
+                    NativeSymbolClass::Relation => CoreSymbolClass::Relation,
+                    NativeSymbolClass::Punctuation => CoreSymbolClass::Punctuation,
+                    NativeSymbolClass::Large => CoreSymbolClass::Large,
+                    NativeSymbolClass::Open => CoreSymbolClass::Open,
+                    NativeSymbolClass::Close => CoreSymbolClass::Close,
+                },
+            },
+            NativeMathNode::Text(value) => Self::Text { value },
+            NativeMathNode::Function(value) => Self::Function { value },
+            NativeMathNode::Space(width) => Self::Space { width },
+            NativeMathNode::Group(children) => Self::Group {
+                children: many(children),
+            },
+            NativeMathNode::Fraction {
+                numerator,
+                denominator,
+                rule,
+            } => Self::Fraction {
+                numerator: many(numerator),
+                denominator: many(denominator),
+                rule,
+            },
+            NativeMathNode::Root { index, body } => Self::Root {
+                index: many(index),
+                body: many(body),
+            },
+            NativeMathNode::Script {
+                base,
+                sub,
+                sup,
+                limits,
+            } => Self::Script {
+                base: many(base),
+                sub: many(sub),
+                sup: many(sup),
+                limits,
+            },
+            NativeMathNode::Fenced { open, close, body } => Self::Fenced {
+                open,
+                close,
+                body: many(body),
+            },
+            NativeMathNode::Accent { accent, body } => Self::Accent {
+                accent: match accent {
+                    NativeMathAccent::Hat => CoreMathAccent::Hat,
+                    NativeMathAccent::Bar => CoreMathAccent::Bar,
+                    NativeMathAccent::Vector => CoreMathAccent::Vector,
+                    NativeMathAccent::Dot => CoreMathAccent::Dot,
+                    NativeMathAccent::DoubleDot => CoreMathAccent::DoubleDot,
+                    NativeMathAccent::Tilde => CoreMathAccent::Tilde,
+                    NativeMathAccent::Overline => CoreMathAccent::Overline,
+                    NativeMathAccent::Underline => CoreMathAccent::Underline,
+                },
+                body: many(body),
+            },
+            NativeMathNode::Matrix {
+                columns,
+                cells,
+                open,
+                close,
+                alignment,
+            } => Self::Matrix {
+                columns: u32::try_from(columns).unwrap_or(1),
+                cells: cells.into_iter().map(many).collect(),
+                open,
+                close,
+                alignment: match alignment {
+                    NativeMatrixAlignment::Centered => CoreMatrixAlignment::Centered,
+                    NativeMatrixAlignment::Leading => CoreMatrixAlignment::Leading,
+                    NativeMatrixAlignment::Equations => CoreMatrixAlignment::Equations,
+                },
+            },
         }
     }
 }
@@ -3854,6 +4218,22 @@ mod tests {
                 let _ = sender.send(());
             }
         }
+    }
+
+    #[test]
+    fn formulas_cross_the_bridge_as_a_tree() {
+        let blocks = zulip_core::content::parse_zulip_html(
+            r#"<p><span class="katex-display"><span class="katex"><span class="katex-mathml"><math><semantics><mrow></mrow><annotation encoding="application/x-tex">\frac{a}{b}</annotation></semantics></math></span></span></span></p>"#,
+        );
+        let mapped: Vec<CoreContentBlock> = blocks.into_iter().map(Into::into).collect();
+        let [CoreContentBlock::Math { tex, nodes }] = mapped.as_slice() else {
+            panic!("expected one formula, got {mapped:?}");
+        };
+        assert_eq!(tex, "\\frac{a}{b}");
+        assert!(matches!(
+            nodes.as_slice(),
+            [crate::CoreMathNode::Fraction { rule: true, .. }]
+        ));
     }
 
     #[test]

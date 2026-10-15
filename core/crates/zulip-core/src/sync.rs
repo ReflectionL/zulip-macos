@@ -31,6 +31,8 @@ const MAX_LONGPOLL_TIMEOUT_SECONDS: u64 = 600;
 /// event slower the longer the app ran. Conversations are fetched from the
 /// server, not read from here; older messages only drop out of the snapshot.
 const MAX_SNAPSHOT_MESSAGES: usize = 1_000;
+/// How many read message identifiers the reducer remembers.
+const MAX_RECENTLY_READ: usize = 4_096;
 const EVENT_TYPES_JSON: &str = concat!(
     r#"["message","subscription","realm_user","update_message","#,
     r#""delete_message","reaction","update_message_flags","typing","user_settings","#,
@@ -1033,6 +1035,12 @@ impl SyncSession {
         self.reducer.add_fetched_messages(messages)
     }
 
+    /// Applies a read this client made itself, once the server accepted it.
+    /// Returns the new snapshot when it changed any unread count.
+    pub fn mark_read_locally(&mut self, message_ids: &[i64]) -> Option<SyncSnapshot> {
+        self.reducer.mark_read_locally(message_ids)
+    }
+
     /// Polls or continues a pending full resynchronization.
     ///
     /// Queue expiry and fresh `restart` events immediately attempt an atomic
@@ -1121,6 +1129,9 @@ pub struct SyncReducer {
     realm_icon_url: Option<String>,
     recent_direct_conversations: Vec<RecentDirectConversation>,
     unread: BTreeMap<i64, UnreadMessage>,
+    /// Messages known to have been read, newest last and bounded, so a copy
+    /// fetched before the read (and applied after it) cannot make one unread again.
+    recently_read: BTreeSet<i64>,
     topic_changed_streams: BTreeSet<i64>,
     typing_preferences: TypingPreferences,
     typing_notices: Vec<TypingNotice>,
@@ -1168,6 +1179,7 @@ impl SyncReducer {
                 .into_iter()
                 .map(|message| (message.id, message))
                 .collect(),
+            recently_read: BTreeSet::new(),
             topic_changed_streams: BTreeSet::new(),
             typing_preferences: bootstrap.typing_preferences,
             typing_notices: Vec::new(),
@@ -1303,9 +1315,16 @@ impl SyncReducer {
     /// or flag change the queue delivered first.
     pub fn add_fetched_messages(&mut self, messages: Vec<MessageSummary>) -> Option<SyncSnapshot> {
         let mut changed = false;
-        for message in messages {
+        for mut message in messages {
             if self.messages.contains_key(&message.id) {
                 continue;
+            }
+            // The fetch can answer after the user read the message; the read
+            // flag event only ever clears the index, so it must win here.
+            if self.recently_read.contains(&message.id)
+                && !message.flags.iter().any(|flag| flag == "read")
+            {
+                message.flags.push("read".to_owned());
             }
             self.track_unread(&message);
             self.messages.insert(message.id, message);
@@ -1423,6 +1442,27 @@ impl SyncReducer {
         changed
     }
 
+    fn note_read(&mut self, message_ids: &[i64]) {
+        self.recently_read.extend(message_ids.iter().copied());
+        while self.recently_read.len() > MAX_RECENTLY_READ {
+            self.recently_read.pop_first();
+        }
+    }
+
+    /// Applies a read this client made itself once the server accepted it.
+    /// The server announces a read through the event queue, but only for
+    /// messages that were unread there: a message this side still counts as
+    /// unread (a lost or reordered event) would otherwise stay unread for good,
+    /// because reading it again announces nothing.
+    pub fn mark_read_locally(&mut self, message_ids: &[i64]) -> Option<SyncSnapshot> {
+        let mut changed = self.apply_flag_change(true, "read", message_ids);
+        changed |= self.apply_read_change(true, message_ids, &[]);
+        changed.then(|| {
+            self.revision = self.revision.saturating_add(1);
+            self.snapshot()
+        })
+    }
+
     /// Records or clears the unread entry for a freshly delivered message.
     fn track_unread(&mut self, message: &MessageSummary) -> bool {
         if message.flags.iter().any(|flag| flag == "read") {
@@ -1442,12 +1482,14 @@ impl SyncReducer {
     ) -> bool {
         let mut changed = false;
         if added {
+            self.note_read(message_ids);
             for message_id in message_ids {
                 changed |= self.unread.remove(message_id).is_some();
             }
             return changed;
         }
         for message_id in message_ids {
+            self.recently_read.remove(message_id);
             let entry = self.messages.get(message_id).map_or_else(
                 || {
                     details
@@ -3519,6 +3561,68 @@ mod tests {
                 .add_fetched_messages(vec![fixture_message(3, "<p>c</p>")])
                 .is_none()
         );
+    }
+
+    fn unread_entry(id: i64) -> super::UnreadMessage {
+        super::UnreadMessage {
+            id,
+            stream_id: Some(5),
+            topic: Some("Rust core".to_owned()),
+            user_ids: Vec::new(),
+            mentioned: false,
+        }
+    }
+
+    #[test]
+    fn a_fetch_that_answers_after_the_read_does_not_make_the_message_unread_again() {
+        let mut reducer = SyncReducer::new(
+            0,
+            BootstrapState {
+                unread: vec![unread_entry(3)],
+                ..BootstrapState::default()
+            },
+        );
+        let read = reducer.apply_batch(vec![SyncEvent::MessageFlagsUpdated {
+            event_id: 1,
+            added: true,
+            flag: "read".to_owned(),
+            message_ids: vec![3],
+            details: Vec::new(),
+            all: false,
+        }]);
+        assert!(read.snapshot.expect("changed").unread.is_empty());
+
+        // The fetch was answered before the read, so its copy still lacks the flag.
+        let snapshot = reducer
+            .add_fetched_messages(vec![fixture_message(3, "<p>c</p>")])
+            .expect("a new message");
+        assert!(snapshot.unread.is_empty());
+        assert_eq!(snapshot.messages[0].flags, ["read"]);
+    }
+
+    #[test]
+    fn a_read_this_client_made_clears_a_message_the_queue_never_cleared() {
+        let mut reducer = SyncReducer::new(
+            0,
+            BootstrapState {
+                messages: vec![fixture_message(1, "<p>a</p>")],
+                unread: vec![unread_entry(1), unread_entry(2)],
+                ..BootstrapState::default()
+            },
+        );
+        let snapshot = reducer.mark_read_locally(&[1]).expect("changed");
+        assert_eq!(snapshot.unread[0].count, 1);
+        assert_eq!(snapshot.messages[0].flags, ["read"]);
+        assert!(
+            reducer.mark_read_locally(&[1]).is_none(),
+            "nothing left to change"
+        );
+        assert!(
+            reducer.mark_read_locally(&[9]).is_none(),
+            "unknown ids change nothing"
+        );
+        let snapshot = reducer.mark_read_locally(&[2]).expect("changed");
+        assert!(snapshot.unread.is_empty());
     }
 
     #[test]

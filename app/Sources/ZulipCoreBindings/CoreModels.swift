@@ -209,6 +209,8 @@ public enum InlineContent: Equatable, Sendable {
     case link(label: String, url: String)
     case mention(displayName: String, userID: Int64)
     case emoji(name: String, value: String)
+    /// A formula inside a sentence: its TeX and a one-line Unicode reading.
+    case math(tex: String, text: String, display: Bool)
     case styled(InlineStyle, [InlineContent])
 
     public var plainText: String {
@@ -221,10 +223,59 @@ public enum InlineContent: Equatable, Sendable {
             "@\(displayName)"
         case let .emoji(_, value):
             value
+        case let .math(tex, _, _):
+            "$$\(tex)$$"
         case let .styled(_, content):
             content.map(\.plainText).joined()
         }
     }
+}
+
+/// How a table column's text lines up.
+public enum TableCellAlignment: Equatable, Sendable {
+    case leading
+    case center
+    case trailing
+}
+
+/// How a math symbol is spaced.
+public enum MathSymbolClass: Equatable, Sendable {
+    case ordinary, binary, relation, punctuation, large, opening, closing
+}
+
+/// A mark over or under a math group.
+public enum MathAccentKind: Equatable, Sendable {
+    case hat, bar, vector, dot, doubleDot, tilde, overline, underline
+}
+
+/// How a matrix's columns line up.
+public enum MathMatrixAlignment: Equatable, Sendable {
+    case centered, leading, equations
+}
+
+/// One element of a parsed formula, ready for native layout.
+public indirect enum MathNode: Equatable, Sendable {
+    case ident(String)
+    case number(String)
+    case symbol(String, MathSymbolClass)
+    case text(String)
+    case function(String)
+    /// Horizontal space in eighteenths of an em.
+    case space(Int)
+    case group([MathNode])
+    case fraction(numerator: [MathNode], denominator: [MathNode], rule: Bool)
+    case root(index: [MathNode], body: [MathNode])
+    case script(base: [MathNode], sub: [MathNode], sup: [MathNode], limits: Bool)
+    case fenced(opening: String, closing: String, body: [MathNode])
+    case accent(MathAccentKind, [MathNode])
+    /// Cells are row-major, `columns` per row.
+    case matrix(
+        columns: Int,
+        cells: [[MathNode]],
+        opening: String,
+        closing: String,
+        alignment: MathMatrixAlignment
+    )
 }
 
 public indirect enum ContentBlock: Equatable, Sendable {
@@ -243,6 +294,15 @@ public indirect enum ContentBlock: Equatable, Sendable {
         imageURL: String?,
         fromServer: Bool
     )
+    /// A table; `header` is empty when it has no header row, and every row has
+    /// one cell per column.
+    case table(
+        alignments: [TableCellAlignment],
+        header: [[InlineContent]],
+        rows: [[[InlineContent]]]
+    )
+    /// A formula on its own line.
+    case math(tex: String, nodes: [MathNode])
     case unsupported(summary: String)
 
     public var plainText: String {
@@ -261,6 +321,13 @@ public indirect enum ContentBlock: Equatable, Sendable {
             alt
         case let .linkPreview(url, title, _, _, _):
             title ?? url
+        case let .table(_, header, rows):
+            ([header] + rows)
+                .filter { !$0.isEmpty }
+                .map { $0.map { $0.map(\.plainText).joined() }.joined(separator: " | ") }
+                .joined(separator: "\n")
+        case let .math(tex, _):
+            "```math\n\(tex)\n```"
         case let .unsupported(summary):
             summary
         }
@@ -379,7 +446,7 @@ public struct MessageViewData: Identifiable, Equatable, Sendable {
     /// row updates in place instead of being torn down and rebuilt.
     public var rowID: Int64
     /// A local echo whose final rendering belongs to the server (the text uses
-    /// Markdown), so the timeline shows a placeholder until the server copy arrives.
+    /// Markdown). The timeline still shows its text as typed, with "Sending…".
     public var isProvisional: Bool
     /// When the content was last edited; nil for a message never edited.
     public var editedAt: Date?

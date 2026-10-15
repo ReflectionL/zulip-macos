@@ -901,6 +901,70 @@ struct LiveSessionTests {
         #expect(page.messages.last?.sourceTopic == "")
     }
 
+    @Test("A message that could not be sent can be cancelled and leaves the timeline")
+    func cancelledSendLeavesTheTimeline() async throws {
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(client: core, credentialStore: MemoryCredentialStore())
+        model.startObserving()
+        let accountID = "account-1"
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: accountID),
+                credential: StoredAPICredential(accountID: accountID, apiKey: "key"),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.connectionState == .connected }
+
+        let key = ConversationKey.channel(accountID: accountID, streamID: 5)
+        model.openConversation(key)
+        core.emit(
+            .conversationOpened(
+                requestID: 3,
+                page: LiveConversationPage(
+                    key: key,
+                    messages: [],
+                    foundOldest: true,
+                    foundNewest: true
+                )
+            )
+        )
+        await eventually {
+            if case .loaded = model.conversationState { return true }
+            return false
+        }
+
+        #expect(model.sendText("Hello **there**", to: key))
+        guard case let .sendChannelMessage(requestID, _, _, _, _, _) = core.commands.last else {
+            Issue.record("Expected a channel message command")
+            return
+        }
+        guard case let .loaded(sending) = model.conversationState,
+              let echo = sending.messages.last
+        else {
+            Issue.record("Expected the echo in the timeline")
+            return
+        }
+        #expect(echo.deliveryState == .pending)
+        #expect(echo.content == [.paragraph([.text("Hello **there**")])])
+
+        core.emit(.failed(requestID: requestID, message: "offline"))
+        let echoID = echo.id
+        let failedEcho: @MainActor () -> MessageViewData? = {
+            guard case let .loaded(page) = model.conversationState else { return nil }
+            return page.messages.first { $0.id == echoID }
+        }
+        await eventually { failedEcho()?.deliveryState == .failed }
+
+        model.cancelSend(try #require(failedEcho()))
+        guard case let .loaded(cancelled) = model.conversationState else {
+            Issue.record("Expected a loaded conversation")
+            return
+        }
+        #expect(cancelled.messages.isEmpty)
+    }
+
     @Test("A channel rename is validated, sent once, and reported back")
     func renameChannel() async {
         let core = RecordingCoreClient()

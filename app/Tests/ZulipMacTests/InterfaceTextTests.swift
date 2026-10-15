@@ -214,3 +214,35 @@ struct TopicNameTests {
         #expect(TopicName.display("release") == "release")
     }
 }
+
+@Suite("Message density")
+@MainActor
+struct MessageDensityTests {
+    private func defaults() throws -> UserDefaults {
+        try #require(UserDefaults(suiteName: "MessageDensityTests-\(UUID().uuidString)"))
+    }
+
+    @Test("Normal is the default, the choice is remembered, and unknown values fall back")
+    func remembersTheChoice() throws {
+        let store = try defaults()
+        let preference = MessageDensityPreference(defaults: store)
+        #expect(preference.density == .normal)
+
+        preference.select(.compact)
+        #expect(preference.density == .compact)
+        #expect(MessageDensityPreference(defaults: store).density == .compact)
+
+        store.set("roomy", forKey: "messageDensity")
+        #expect(MessageDensityPreference(defaults: store).density == .normal)
+    }
+
+    @Test("Compact leaves less space around a message than normal and normal keeps the old metrics")
+    func compactIsTighter() {
+        #expect(MessageDensity.normal.continuationInset == 4)
+        #expect(MessageDensity.normal.blockTopInset == 14)
+        #expect(MessageDensity.normal.blockBottomInset == 4)
+        #expect(MessageDensity.compact.continuationInset < MessageDensity.normal.continuationInset)
+        #expect(MessageDensity.compact.blockTopInset < MessageDensity.normal.blockTopInset)
+        #expect(MessageDensity.compact.blockBottomInset < MessageDensity.normal.blockBottomInset)
+    }
+}

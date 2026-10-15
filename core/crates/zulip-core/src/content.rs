@@ -4,6 +4,8 @@ use ego_tree::NodeRef;
 use scraper::{CaseSensitivity, Html, Node, node::Element};
 use url::Url;
 
+use crate::math::{self, MAX_TEX_BYTES, MathNode};
+
 const MAX_INPUT_BYTES: usize = 1_048_576;
 const MAX_OUTPUT_TEXT_BYTES: usize = 262_144;
 const MAX_VISITED_NODES: usize = 8_192;
@@ -15,6 +17,9 @@ const MAX_IMAGE_DIMENSION: u32 = 4_096;
 /// Most link cards one message shows; further links stay plain links.
 const MAX_LINK_PREVIEWS: usize = 4;
 const MAX_PREVIEW_TEXT_CHARS: usize = 300;
+/// Most rows and columns a table keeps; the rest are left out.
+const MAX_TABLE_ROWS: usize = 200;
+const MAX_TABLE_COLUMNS: usize = 24;
 
 /// Emphasis applied to a run of inline content.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -27,6 +32,17 @@ pub enum InlineStyle {
     Strikethrough,
     /// Inline code (`<code>`); the content is a single text run.
     Code,
+}
+
+/// How a table column's text lines up.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TableAlignment {
+    /// Left in left-to-right text (the default).
+    Leading,
+    /// Centered.
+    Center,
+    /// Right in left-to-right text.
+    Trailing,
 }
 
 /// Native inline content safe to cross the application bridge.
@@ -54,6 +70,15 @@ pub enum InlineContent {
         name: String,
         /// Readable fallback value, normally `:name:`.
         value: String,
+    },
+    /// A formula that flows with the text around it.
+    Math {
+        /// The TeX source Zulip rendered the formula from.
+        tex: String,
+        /// The formula as one line of Unicode text.
+        text: String,
+        /// Whether Zulip drew it as a display (own-line) formula.
+        display: bool,
     },
     /// Nested content with bold, italic, strikethrough or code styling.
     Styled {
@@ -116,6 +141,22 @@ pub enum ContentBlock {
         image_url: Option<String>,
         /// Whether the server built this preview; otherwise the app may fetch one.
         from_server: bool,
+    },
+    /// A table: Markdown tables arrive from Zulip as `<table>`.
+    Table {
+        /// Alignment of each column, as many as the widest row.
+        alignments: Vec<TableAlignment>,
+        /// The header cells; empty when the table has no header row.
+        header: Vec<Vec<InlineContent>>,
+        /// The body rows, each padded to the table's width.
+        rows: Vec<Vec<Vec<InlineContent>>>,
+    },
+    /// A formula on its own line (Zulip's `math` fence or a `$$` paragraph).
+    Math {
+        /// The TeX source Zulip rendered the formula from.
+        tex: String,
+        /// The parsed formula, ready for native layout.
+        nodes: Vec<MathNode>,
     },
     /// Readable fallback for unsupported or unsafe block markup.
     Unsupported {
@@ -223,7 +264,7 @@ impl ContentParser {
                 | "math" => self.block(unsafe_block()),
                 "p" => {
                     let inline = self.parse_inline_children(node, depth + 1);
-                    self.block(ContentBlock::Paragraph(inline))
+                    self.paragraph_blocks(inline)
                 }
                 "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
                     let level = element.name().as_bytes()[1] - b'0';
@@ -248,16 +289,8 @@ impl ContentParser {
                         self.parse_block_children(node, depth + 1)
                     }
                 }
-                "table" | "audio" | "video" | "details" => {
-                    let readable = self.descendant_text(node, depth + 1);
-                    let summary = if readable.trim().is_empty() {
-                        "Unsupported content".to_owned()
-                    } else {
-                        format!("Unsupported content: {}", readable.trim())
-                    };
-                    self.record_text(&summary);
-                    self.block(ContentBlock::Unsupported { summary })
-                }
+                "table" => self.parse_table(node, depth + 1),
+                "audio" | "video" | "details" => self.unsupported_block(node, depth + 1),
                 "hr" => {
                     self.record_text("—");
                     self.block(ContentBlock::Paragraph(vec![InlineContent::Text(
@@ -313,6 +346,196 @@ impl ContentParser {
             }
         }
         self.block(ContentBlock::List { items, ordered })
+    }
+
+    /// A paragraph, with each display formula lifted out as a block of its own.
+    fn paragraph_blocks(&mut self, inline: Vec<InlineContent>) -> Vec<ContentBlock> {
+        let has_display = inline
+            .iter()
+            .any(|item| matches!(item, InlineContent::Math { display: true, .. }));
+        if !has_display {
+            return self.block(ContentBlock::Paragraph(inline));
+        }
+        let mut blocks = Vec::new();
+        let mut run: Vec<InlineContent> = Vec::new();
+        for item in inline {
+            if let InlineContent::Math {
+                tex, display: true, ..
+            } = item
+            {
+                if !run.iter().all(is_blank_text) {
+                    blocks.extend(self.block(ContentBlock::Paragraph(std::mem::take(&mut run))));
+                }
+                run.clear();
+                let nodes = math::parse_tex(&tex);
+                blocks.extend(self.block(ContentBlock::Math { tex, nodes }));
+            } else {
+                run.push(item);
+            }
+        }
+        if !run.iter().all(is_blank_text) {
+            blocks.extend(self.block(ContentBlock::Paragraph(run)));
+        }
+        blocks
+    }
+
+    /// A `KaTeX` span as the TeX it was rendered from, which Zulip keeps in an
+    /// `annotation`. Without one, the visible text stands in.
+    fn parse_math(
+        &mut self,
+        node: NodeRef<'_, Node>,
+        element: &Element,
+        depth: usize,
+    ) -> Vec<InlineContent> {
+        let display = has_class(element, "katex-display");
+        let mut tex = None;
+        let mut visible = None;
+        for descendant in node.descendants() {
+            self.visited_nodes = self.visited_nodes.saturating_add(1);
+            if self.exhausted() {
+                self.limit_exceeded = true;
+                return Vec::new();
+            }
+            let Some(inner) = descendant.value().as_element() else {
+                continue;
+            };
+            if inner.name() == "annotation" && inner.attr("encoding") == Some("application/x-tex") {
+                // `descendant_text` skips everything under `<math>`, so read the
+                // annotation's own text.
+                let source: String = descendant
+                    .children()
+                    .filter_map(|child| child.value().as_text().map(|text| text.to_string()))
+                    .collect();
+                tex = Some(source);
+                break;
+            }
+            if visible.is_none() && has_class(inner, "katex-html") {
+                visible = Some(self.descendant_text(descendant, depth + 1));
+            }
+        }
+        let Some(tex) = tex
+            .map(|tex| tex.trim().to_owned())
+            .filter(|tex| !tex.is_empty())
+        else {
+            let text = visible.unwrap_or_default();
+            self.record_text(&text);
+            return if text.trim().is_empty() {
+                Vec::new()
+            } else {
+                vec![InlineContent::Text(text)]
+            };
+        };
+        self.record_text(&tex);
+        if tex.len() > MAX_TEX_BYTES {
+            return vec![InlineContent::Text(tex)];
+        }
+        let text = math::to_linear(&math::parse_tex(&tex));
+        self.record_text(&text);
+        vec![InlineContent::Math { tex, text, display }]
+    }
+
+    /// Readable text of markup the app cannot draw.
+    fn unsupported_block(&mut self, node: NodeRef<'_, Node>, depth: usize) -> Vec<ContentBlock> {
+        let readable = self.descendant_text(node, depth);
+        let summary = if readable.trim().is_empty() {
+            "Unsupported content".to_owned()
+        } else {
+            format!("Unsupported content: {}", readable.trim())
+        };
+        self.record_text(&summary);
+        self.block(ContentBlock::Unsupported { summary })
+    }
+
+    /// A `<table>` as header and body rows of inline cells. A table with no
+    /// cells, or one nested in another, falls back to its readable text.
+    fn parse_table(&mut self, node: NodeRef<'_, Node>, depth: usize) -> Vec<ContentBlock> {
+        let mut row_nodes: Vec<(NodeRef<'_, Node>, bool)> = Vec::new();
+        for child in node.children() {
+            let Some(element) = child.value().as_element() else {
+                continue;
+            };
+            match element.name() {
+                "thead" | "tbody" | "tfoot" => {
+                    let in_head = element.name() == "thead";
+                    for row in child.children() {
+                        if row
+                            .value()
+                            .as_element()
+                            .is_some_and(|row| row.name() == "tr")
+                        {
+                            row_nodes.push((row, in_head));
+                        }
+                    }
+                }
+                "tr" => row_nodes.push((child, false)),
+                _ => {}
+            }
+        }
+
+        let mut parsed: Vec<ParsedTableRow> = Vec::new();
+        for (row, in_head) in row_nodes.into_iter().take(MAX_TABLE_ROWS) {
+            let mut cells = Vec::new();
+            let mut all_header_cells = true;
+            for cell in row.children().take(MAX_TABLE_COLUMNS * 2) {
+                let Some(element) = cell.value().as_element() else {
+                    continue;
+                };
+                if !matches!(element.name(), "th" | "td") {
+                    continue;
+                }
+                all_header_cells &= element.name() == "th";
+                if cells.len() < MAX_TABLE_COLUMNS {
+                    let content = self.parse_inline_children(cell, depth + 1);
+                    cells.push((trim_inline(content), cell_alignment(element)));
+                }
+                if self.exhausted() {
+                    break;
+                }
+            }
+            if !cells.is_empty() {
+                parsed.push((cells, in_head || all_header_cells));
+            }
+            if self.exhausted() {
+                break;
+            }
+        }
+        if parsed.is_empty() {
+            return self.unsupported_block(node, depth);
+        }
+
+        let columns = parsed
+            .iter()
+            .map(|(cells, _)| cells.len())
+            .max()
+            .unwrap_or(0);
+        let alignments = (0..columns)
+            .map(|column| {
+                parsed
+                    .iter()
+                    .find_map(|(cells, _)| cells.get(column).map(|(_, alignment)| *alignment))
+                    .unwrap_or(TableAlignment::Leading)
+            })
+            .collect();
+        let has_header = parsed.first().is_some_and(|(_, is_header)| *is_header);
+        let mut rows: Vec<Vec<Vec<InlineContent>>> = parsed
+            .into_iter()
+            .map(|(cells, _)| {
+                let mut row: Vec<Vec<InlineContent>> =
+                    cells.into_iter().map(|(content, _)| content).collect();
+                row.resize_with(columns, Vec::new);
+                row
+            })
+            .collect();
+        let header = if has_header {
+            rows.remove(0)
+        } else {
+            Vec::new()
+        };
+        self.block(ContentBlock::Table {
+            alignments,
+            header,
+            rows,
+        })
     }
 
     fn parse_code(
@@ -474,6 +697,9 @@ impl ContentParser {
                 "br" => {
                     self.record_text("\n");
                     vec![InlineContent::Text("\n".to_owned())]
+                }
+                "span" if has_class(element, "katex-display") || has_class(element, "katex") => {
+                    self.parse_math(node, element, depth + 1)
                 }
                 "a" => {
                     let label = self.descendant_text(node, depth + 1);
@@ -901,6 +1127,48 @@ fn is_executable_element(name: &str) -> bool {
     )
 }
 
+/// A table row's cells with their alignment, and whether it is a header row.
+type ParsedTableRow = (Vec<(Vec<InlineContent>, TableAlignment)>, bool);
+
+/// The column alignment a cell asks for (`text-align` style or `align`).
+fn cell_alignment(element: &Element) -> TableAlignment {
+    let style = element
+        .attr("style")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let requested = style
+        .split(';')
+        .filter_map(|declaration| declaration.split_once(':'))
+        .find(|(name, _)| name.trim() == "text-align")
+        .map(|(_, value)| value.trim().to_owned())
+        .or_else(|| {
+            element
+                .attr("align")
+                .map(|value| value.trim().to_ascii_lowercase())
+        });
+    match requested.as_deref() {
+        Some("center") => TableAlignment::Center,
+        Some("right" | "end") => TableAlignment::Trailing,
+        _ => TableAlignment::Leading,
+    }
+}
+
+/// Drops the blank text a cell's markup leaves around its content.
+fn trim_inline(mut content: Vec<InlineContent>) -> Vec<InlineContent> {
+    if let Some(InlineContent::Text(first)) = content.first_mut() {
+        *first = first.trim_start().to_owned();
+    }
+    if let Some(InlineContent::Text(last)) = content.last_mut() {
+        *last = last.trim_end().to_owned();
+    }
+    content.retain(|item| !matches!(item, InlineContent::Text(value) if value.is_empty()));
+    content
+}
+
+fn is_blank_text(item: &InlineContent) -> bool {
+    matches!(item, InlineContent::Text(text) if text.trim().is_empty())
+}
+
 fn has_class(element: &Element, class: &str) -> bool {
     element.has_class(class, CaseSensitivity::AsciiCaseInsensitive)
 }
@@ -954,8 +1222,10 @@ fn block_is_empty(block: &ContentBlock) -> bool {
         ContentBlock::Quote(blocks) => blocks.is_empty(),
         ContentBlock::List { items, .. } => items.is_empty(),
         ContentBlock::Code { value, .. } => value.is_empty(),
+        ContentBlock::Table { header, rows, .. } => header.is_empty() && rows.is_empty(),
         ContentBlock::Image { .. }
         | ContentBlock::LinkPreview { .. }
+        | ContentBlock::Math { .. }
         | ContentBlock::Unsupported { .. } => false,
     }
 }
@@ -995,7 +1265,7 @@ fn readable_text_fallback(html: &str) -> String {
 mod tests {
     use super::{
         ContentBlock, InlineContent, InlineStyle, MAX_INPUT_BYTES, MAX_LINK_PREVIEWS,
-        parse_zulip_html,
+        TableAlignment, parse_zulip_html,
     };
 
     #[test]
@@ -1087,11 +1357,85 @@ mod tests {
         assert!(debug.contains("world"));
         assert!(debug.contains("one"));
 
-        let unknown = parse_zulip_html("<table><tr><td>Readable cells</td></tr></table>");
+        let unknown = parse_zulip_html("<details><summary>Readable cells</summary></details>");
         assert!(matches!(
             &unknown[0],
             ContentBlock::Unsupported { summary } if summary.contains("Readable cells")
         ));
+    }
+
+    #[test]
+    fn tables_keep_header_rows_alignment_and_inline_cells() {
+        let blocks = parse_zulip_html(
+            "<table><thead><tr><th style=\"text-align: left\">Name</th>\
+             <th style=\"text-align: center\">Role</th>\
+             <th style=\"text-align: right\">Count</th></tr></thead>\
+             <tbody><tr><td>Maya</td><td><strong>lead</strong></td><td>3</td></tr>\
+             <tr><td>Theo</td></tr></tbody></table>",
+        );
+        let [
+            ContentBlock::Table {
+                alignments,
+                header,
+                rows,
+            },
+        ] = blocks.as_slice()
+        else {
+            panic!("a table expected, got {blocks:?}");
+        };
+        assert_eq!(
+            alignments,
+            &[
+                TableAlignment::Leading,
+                TableAlignment::Center,
+                TableAlignment::Trailing
+            ]
+        );
+        assert_eq!(header.len(), 3);
+        assert_eq!(header[0], vec![InlineContent::Text("Name".to_owned())]);
+        assert_eq!(rows.len(), 2);
+        assert!(matches!(
+            rows[0][1].as_slice(),
+            [InlineContent::Styled {
+                style: InlineStyle::Strong,
+                ..
+            }]
+        ));
+        assert_eq!(
+            rows[1].len(),
+            3,
+            "short rows are padded to the table's width"
+        );
+        assert!(rows[1][1].is_empty());
+    }
+
+    #[test]
+    fn a_table_without_a_header_row_has_none_and_an_empty_one_stays_readable() {
+        let blocks = parse_zulip_html("<table><tr><td>a</td><td>b</td></tr></table>");
+        assert!(matches!(
+            &blocks[0],
+            ContentBlock::Table { header, rows, .. } if header.is_empty() && rows.len() == 1
+        ));
+
+        let empty = parse_zulip_html("<table><tr></tr></table>");
+        assert!(matches!(&empty[0], ContentBlock::Unsupported { .. }));
+    }
+
+    #[test]
+    fn tables_are_bounded_in_rows_and_columns() {
+        let cells = "<td>x</td>".repeat(super::MAX_TABLE_COLUMNS + 10);
+        let rows = format!("<tr>{cells}</tr>").repeat(super::MAX_TABLE_ROWS + 10);
+        let blocks = parse_zulip_html(&format!("<table>{rows}</table>"));
+        let [
+            ContentBlock::Table {
+                alignments, rows, ..
+            },
+        ] = blocks.as_slice()
+        else {
+            panic!("a table expected, got {blocks:?}");
+        };
+        assert_eq!(alignments.len(), super::MAX_TABLE_COLUMNS);
+        assert_eq!(rows.len(), super::MAX_TABLE_ROWS);
     }
 
     #[test]
@@ -1448,6 +1792,78 @@ mod tests {
             vec![ContentBlock::Unsupported {
                 summary: "Message content exceeded safe display limits".to_owned(),
             }]
+        );
+    }
+
+    fn katex(tex: &str, display: bool) -> String {
+        let span = format!(
+            "<span class=\"katex\"><span class=\"katex-mathml\"><math xmlns=\"http://www.w3.org/1998/Math/MathML\"><semantics><mrow><mi>x</mi></mrow><annotation encoding=\"application/x-tex\">{tex}</annotation></semantics></math></span><span class=\"katex-html\" aria-hidden=\"true\"><span class=\"base\">x</span></span></span>"
+        );
+        if display {
+            format!("<span class=\"katex-display\">{span}</span>")
+        } else {
+            span
+        }
+    }
+
+    #[test]
+    fn inline_math_keeps_its_tex_and_reads_as_text() {
+        let html = format!("<p>Energy is {} here.</p>", katex("E = mc^2", false));
+        let blocks = parse_zulip_html(&html);
+        let [ContentBlock::Paragraph(inline)] = blocks.as_slice() else {
+            panic!("expected one paragraph, got {blocks:?}");
+        };
+        assert_eq!(
+            inline,
+            &vec![
+                InlineContent::Text("Energy is ".to_owned()),
+                InlineContent::Math {
+                    tex: "E = mc^2".to_owned(),
+                    text: "𝐸 = 𝑚𝑐²".to_owned(),
+                    display: false,
+                },
+                InlineContent::Text(" here.".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn display_math_becomes_its_own_block() {
+        let html = format!(
+            "<p>Before</p><p>{}</p><p>Then {} and after</p>",
+            katex(r"\int_0^1 x\,dx", true),
+            katex("y", true)
+        );
+        let blocks = parse_zulip_html(&html);
+        assert!(matches!(&blocks[0], ContentBlock::Paragraph(_)));
+        assert!(
+            matches!(&blocks[1], ContentBlock::Math { tex, nodes } if tex == r"\int_0^1 x\,dx" && !nodes.is_empty())
+        );
+        assert!(matches!(&blocks[2], ContentBlock::Paragraph(inline) if inline.len() == 1));
+        assert!(matches!(&blocks[3], ContentBlock::Math { tex, .. } if tex == "y"));
+        assert_eq!(blocks.len(), 5);
+        assert!(matches!(&blocks[4], ContentBlock::Paragraph(_)));
+    }
+
+    #[test]
+    fn math_without_an_annotation_falls_back_to_visible_text() {
+        let html = "<p><span class=\"katex\"><span class=\"katex-html\">x²</span></span></p>";
+        assert_eq!(
+            parse_zulip_html(html),
+            vec![ContentBlock::Paragraph(vec![InlineContent::Text(
+                "x²".to_owned()
+            )])]
+        );
+    }
+
+    #[test]
+    fn a_formula_error_stays_readable_text() {
+        let html = "<p><span class=\"tex-error\">$$\\frac{$$</span></p>";
+        assert_eq!(
+            parse_zulip_html(html),
+            vec![ContentBlock::Paragraph(vec![InlineContent::Text(
+                "$$\\frac{$$".to_owned()
+            )])]
         );
     }
 }

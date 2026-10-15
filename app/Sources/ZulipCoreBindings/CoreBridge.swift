@@ -1322,6 +1322,8 @@ private extension InlineContent {
             self = .mention(displayName: displayName, userID: userID)
         case let .emoji(name, value):
             self = .emoji(name: name, value: value)
+        case let .math(tex, text, display):
+            self = .math(tex: tex, text: text, display: display)
         case let .styled(style, content):
             self = .styled(InlineStyle(style), content.map(InlineContent.init))
         }
@@ -1380,8 +1382,111 @@ private extension ContentBlock {
                 imageURL: imageUrl,
                 fromServer: fromServer
             )
+        case let .table(alignments, header, rows):
+            self = .table(
+                alignments: alignments.map { alignment in
+                    switch alignment {
+                    case .leading: TableCellAlignment.leading
+                    case .center: TableCellAlignment.center
+                    case .trailing: TableCellAlignment.trailing
+                    }
+                },
+                header: header.map { $0.content.map(InlineContent.init) },
+                rows: rows.map { row in
+                    row.cells.map { $0.content.map(InlineContent.init) }
+                }
+            )
+        case let .math(tex, nodes):
+            self = .math(tex: tex, nodes: nodes.map(MathNode.init))
         case let .unsupported(summary):
             self = .unsupported(summary: summary)
+        }
+    }
+}
+
+private extension MathNode {
+    init(_ node: CoreMathNode) {
+        switch node {
+        case let .ident(value):
+            self = .ident(value)
+        case let .number(value):
+            self = .number(value)
+        case let .symbol(value, spacing):
+            self = .symbol(value, MathSymbolClass(spacing))
+        case let .text(value):
+            self = .text(value)
+        case let .function(value):
+            self = .function(value)
+        case let .space(width):
+            self = .space(Int(width))
+        case let .group(children):
+            self = .group(children.map(MathNode.init))
+        case let .fraction(numerator, denominator, rule):
+            self = .fraction(
+                numerator: numerator.map(MathNode.init),
+                denominator: denominator.map(MathNode.init),
+                rule: rule
+            )
+        case let .root(index, body):
+            self = .root(index: index.map(MathNode.init), body: body.map(MathNode.init))
+        case let .script(base, sub, sup, limits):
+            self = .script(
+                base: base.map(MathNode.init),
+                sub: sub.map(MathNode.init),
+                sup: sup.map(MathNode.init),
+                limits: limits
+            )
+        case let .fenced(opening, closing, body):
+            self = .fenced(opening: opening, closing: closing, body: body.map(MathNode.init))
+        case let .accent(accent, body):
+            self = .accent(MathAccentKind(accent), body.map(MathNode.init))
+        case let .matrix(columns, cells, opening, closing, alignment):
+            self = .matrix(
+                columns: Int(columns),
+                cells: cells.map { $0.map(MathNode.init) },
+                opening: opening,
+                closing: closing,
+                alignment: MathMatrixAlignment(alignment)
+            )
+        }
+    }
+}
+
+private extension MathSymbolClass {
+    init(_ value: CoreSymbolClass) {
+        switch value {
+        case .ordinary: self = .ordinary
+        case .binary: self = .binary
+        case .relation: self = .relation
+        case .punctuation: self = .punctuation
+        case .large: self = .large
+        case .open: self = .opening
+        case .close: self = .closing
+        }
+    }
+}
+
+private extension MathAccentKind {
+    init(_ value: CoreMathAccent) {
+        switch value {
+        case .hat: self = .hat
+        case .bar: self = .bar
+        case .vector: self = .vector
+        case .dot: self = .dot
+        case .doubleDot: self = .doubleDot
+        case .tilde: self = .tilde
+        case .overline: self = .overline
+        case .underline: self = .underline
+        }
+    }
+}
+
+private extension MathMatrixAlignment {
+    init(_ value: CoreMatrixAlignment) {
+        switch value {
+        case .centered: self = .centered
+        case .leading: self = .leading
+        case .equations: self = .equations
         }
     }
 }

@@ -75,6 +75,44 @@ enum FixtureContent {
             ),
         ],
         [
+            .table(
+                alignments: [.leading, .center, .trailing],
+                header: [[.text("Step")], [.text("Owner")], [.text("Days")]],
+                rows: [
+                    [[.text("Parse HTML")], [.styled(.strong, [.text("Rust")])], [.text("2")]],
+                    [[.text("Draw the grid")], [.text("SwiftUI")], [.text("1")]],
+                ]
+            ),
+        ],
+        [
+            .paragraph([
+                .text("Energy and mass are related by "),
+                .math(tex: "E = mc^2", text: "𝐸 = 𝑚𝑐²", display: false),
+                .text("."),
+            ]),
+            .math(
+                tex: #"\int_0^1 \frac{x^2}{2}\,dx = \frac{1}{6}"#,
+                nodes: [
+                    .script(
+                        base: [.symbol("∫", .large)],
+                        sub: [.number("0")],
+                        sup: [.number("1")],
+                        limits: false
+                    ),
+                    .fraction(
+                        numerator: [.script(base: [.ident("x")], sub: [], sup: [.number("2")], limits: false)],
+                        denominator: [.number("2")],
+                        rule: true
+                    ),
+                    .space(3),
+                    .ident("d"),
+                    .ident("x"),
+                    .symbol("=", .relation),
+                    .fraction(numerator: [.number("1")], denominator: [.number("6")], rule: true),
+                ]
+            ),
+        ],
+        [
             .unsupported(summary: "Unsupported fixture content is shown safely."),
         ],
     ]

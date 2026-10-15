@@ -25,6 +25,8 @@ struct ConversationSurface: View {
     var setMessageRead: ((MessageViewData, Bool) -> Bool)?
     var retryMessageAction: ((MessageViewData) -> Void)?
     var retrySend: ((MessageViewData) -> Void)?
+    var cancelSend: ((MessageViewData) -> Void)?
+    var cancelMessageAction: ((MessageViewData) -> Void)?
     var quoteMessage: ((MessageViewData) -> Void)?
     var forwardMessage: ((MessageViewData, ConversationKey) -> Void)?
     var forwardDestinations: ((String) -> [NavigationDestination])?
@@ -59,6 +61,11 @@ struct ConversationSurface: View {
     @State private var messages: [MessageViewData]
     @State private var draft = ""
     @State private var followsNewest = true
+    /// How far the toolbar reaches into the timeline's top edge.
+    @State private var toolbarInset: CGFloat = 0
+    /// How far below the composer's outer top edge the typing line's bottom sits:
+    /// just above the composer card, which starts after its own top padding.
+    private static let typingIndicatorDrop: CGFloat = 10
     @State private var editingMessage: MessageViewData?
     @State private var deletingMessage: MessageViewData?
     @State private var forwardingMessage: MessageViewData?
@@ -92,6 +99,8 @@ struct ConversationSurface: View {
         setMessageRead: ((MessageViewData, Bool) -> Bool)? = nil,
         retryMessageAction: ((MessageViewData) -> Void)? = nil,
         retrySend: ((MessageViewData) -> Void)? = nil,
+        cancelSend: ((MessageViewData) -> Void)? = nil,
+        cancelMessageAction: ((MessageViewData) -> Void)? = nil,
         quoteMessage: ((MessageViewData) -> Void)? = nil,
         forwardMessage: ((MessageViewData, ConversationKey) -> Void)? = nil,
         forwardDestinations: ((String) -> [NavigationDestination])? = nil,
@@ -136,6 +145,8 @@ struct ConversationSurface: View {
         self.setMessageRead = setMessageRead
         self.retryMessageAction = retryMessageAction
         self.retrySend = retrySend
+        self.cancelSend = cancelSend
+        self.cancelMessageAction = cancelMessageAction
         self.quoteMessage = quoteMessage
         self.forwardMessage = forwardMessage
         self.forwardDestinations = forwardDestinations
@@ -257,6 +268,12 @@ struct ConversationSurface: View {
                                         retrySend: {
                                             retrySend?(message)
                                         },
+                                        cancelSend: {
+                                            cancelSend?(message)
+                                        },
+                                        cancelAction: {
+                                            cancelMessageAction?(message)
+                                        },
                                         mediaLocalURLs: mediaLocalURLs,
                                         mediaFailures: mediaFailures,
                                         requestMedia: requestMedia,
@@ -282,9 +299,20 @@ struct ConversationSurface: View {
                         .frame(maxWidth: AppTheme.Metrics.messageMaximumWidth)
                         .frame(maxWidth: .infinity)
                         .padding(.horizontal, AppTheme.Spacing.extraLarge)
+                        // Keeps the newest message clear of the bottom fade.
+                        .padding(.bottom, TimelineEdgeFade.bottomLength)
                     }
                     .defaultScrollAnchor(.bottom, for: .initialOffset)
                     .defaultScrollAnchor(.bottom, for: .sizeChanges)
+                    // The window has no title bar, so messages scroll under the
+                    // toolbar's breadcrumb; fade them out before they reach it,
+                    // and before they meet the composer at the bottom.
+                    .onGeometryChange(for: CGFloat.self) { geometry in
+                        geometry.safeAreaInsets.top
+                    } action: { inset in
+                        toolbarInset = inset
+                    }
+                    .mask { TimelineEdgeFade(toolbarInset: toolbarInset) }
                     .onScrollGeometryChange(for: Bool.self) { geometry in
                         let remaining = geometry.contentSize.height
                             - geometry.contentOffset.y
@@ -352,13 +380,17 @@ struct ConversationSurface: View {
                     : { isChoosingAttachment = true },
                 retryAttachmentUpload: retryAttachmentUpload,
                 dismissAttachmentUploadFailure: dismissAttachmentUploadFailure,
+                draftChanged: draftChanged,
+                typingChanged: typingChanged,
                 send: sendDraft
             )
             .overlay(alignment: .topLeading) {
                 if let typingDescription {
+                    // Sits in the clear band between the faded timeline and the
+                    // composer, in line with the composer's left edge.
                     TypingIndicator(text: typingDescription)
-                        .alignmentGuide(.top) { $0[.bottom] }
-                        .padding(.leading, AppTheme.Spacing.large)
+                        .alignmentGuide(.top) { $0[.bottom] - Self.typingIndicatorDrop }
+                        .padding(.leading, AppTheme.Spacing.extraLarge + AppTheme.Spacing.small)
                         .transition(.opacity)
                 }
             }
@@ -427,14 +459,6 @@ struct ConversationSurface: View {
         }
         .onChange(of: page.messages) {
             messages = page.messages
-        }
-        .onChange(of: draft) {
-            draftChanged?(draft)
-            // Text restored from a saved draft is not typing; only the focused
-            // composer announces it, and emptying the box always withdraws it.
-            if draft.isEmpty || isComposerFocused {
-                typingChanged?(!draft.isEmpty)
-            }
         }
         .onChange(of: page.key) {
             pendingQuote = nil
@@ -605,6 +629,40 @@ extension View {
                 renameChannel: renameChannel
             )
         )
+    }
+}
+
+/// Hides the timeline behind the toolbar and fades it in just below, and fades
+/// it out above the composer, so messages never end in a hard edge. Nothing
+/// fades at rest: the first message starts below the top band and the timeline
+/// keeps `bottomLength` of empty space under the newest one.
+private struct TimelineEdgeFade: View {
+    let toolbarInset: CGFloat
+
+    /// How far the top fade starts above the toolbar's lower edge and ends below it.
+    private static let leadIn: CGFloat = 6
+    private static let topLength: CGFloat = 18
+    static let bottomLength: CGFloat = 16
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Color.clear
+                .frame(height: max(toolbarInset - Self.leadIn, 0))
+            LinearGradient(
+                colors: [.clear, .black],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .frame(height: Self.topLength)
+            Color.black
+            LinearGradient(
+                colors: [.black, .clear],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .frame(height: Self.bottomLength)
+        }
+        .ignoresSafeArea(.container, edges: .vertical)
     }
 }
 
@@ -786,6 +844,8 @@ private struct MessageRow: View {
     let toggleRead: (() -> Void)?
     let retryAction: () -> Void
     let retrySend: () -> Void
+    let cancelSend: () -> Void
+    let cancelAction: () -> Void
     let mediaLocalURLs: [String: String]
     let mediaFailures: [String: String]
     let requestMedia: ((String) -> Void)?
@@ -793,6 +853,10 @@ private struct MessageRow: View {
     var readers: [ReadReceiptReader] = []
     var senderStatus: UserStatusDisplay?
     var sourceLabel: String?
+
+    private var density: MessageDensity {
+        MessageDensityPreference.shared.density
+    }
 
     @State private var isHovered = false
     @State private var isHoveringActions = false
@@ -836,7 +900,7 @@ private struct MessageRow: View {
                             .help(sourceLabel)
                             .accessibilityLabel("In \(sourceLabel)")
                     }
-                    statusLabels
+                    otherPendingLabel
                     Spacer(minLength: 0)
                 }
             }
@@ -862,14 +926,14 @@ private struct MessageRow: View {
         .padding(
             .top,
             isContinuation
-                ? AppTheme.Metrics.continuationInset
-                : AppTheme.Metrics.blockTopInset
+                ? density.continuationInset
+                : density.blockTopInset
         )
         .padding(
             .bottom,
             isContinuation
-                ? AppTheme.Metrics.continuationInset
-                : AppTheme.Metrics.blockBottomInset
+                ? density.continuationInset
+                : density.blockBottomInset
         )
         .contentShape(Rectangle())
         .background {
@@ -953,33 +1017,33 @@ private struct MessageRow: View {
     /// How far the floating action bar reaches down into its own row.
     private static let actionBarOverlap: CGFloat = 10
 
-    /// The message's own lines: status, content, reactions and read receipts.
+    /// The message's own lines: content with its status note, reactions and read receipts.
     private var messageBody: some View {
         VStack(alignment: .leading, spacing: AppTheme.Spacing.extraSmall) {
-            if isContinuation, hasStatus {
+            if isContinuation, hasOtherPendingAction {
                 HStack(spacing: AppTheme.Spacing.small) {
-                    statusLabels
+                    otherPendingLabel
                 }
             }
 
-            if !showsPlaceholder {
-                MessageContentView(
-                    blocks: message.content,
-                    mediaLocalURLs: mediaLocalURLs,
-                    mediaFailures: mediaFailures,
-                    requestMedia: requestMedia,
-                    retryMedia: retryMedia,
-                    trailingNote: editedContinuesText ? "(edited)" : nil
-                )
-            }
+            // The whole message is shown from the start, even while it is being
+            // sent or edited; the status follows it as small gray text.
+            MessageContentView(
+                blocks: message.content,
+                mediaLocalURLs: mediaLocalURLs,
+                mediaFailures: mediaFailures,
+                requestMedia: requestMedia,
+                retryMedia: retryMedia,
+                trailingNote: statusContinuesText ? trailingStatus : nil
+            )
 
             // Content that does not end in a paragraph (a picture, code, a list)
-            // has no line to continue, so the label gets a line of its own.
-            if let editedAt = message.editedAt, !showsPlaceholder, !editedContinuesText {
-                Text("(edited)")
+            // has no line to continue, so the note gets a line of its own.
+            if let trailingStatus, !statusContinuesText {
+                Text(trailingStatus)
                     .font(AppTheme.Typography.metadata)
                     .foregroundStyle(AppTheme.Colors.tertiaryText)
-                    .help("Edited \(editedAt.formatted(date: .abbreviated, time: .shortened))")
+                    .help(trailingStatusHelp ?? "")
             }
 
             if !message.reactions.isEmpty {
@@ -991,18 +1055,21 @@ private struct MessageRow: View {
             }
 
             if message.deliveryState == .failed {
-                Button("Retry send", action: retrySend)
-                    .buttonStyle(.borderless)
-                    .font(AppTheme.Typography.metadata)
+                failureRow(
+                    text: "Not sent",
+                    retryHelp: "Retry send",
+                    cancelHelp: "Cancel send",
+                    retry: retrySend,
+                    cancel: cancelSend
+                )
             } else if case let .failed(_, failure) = message.actionState {
-                HStack(spacing: AppTheme.Spacing.small) {
-                    Text(failure)
-                        .lineLimit(1)
-                        .foregroundStyle(AppTheme.Colors.destructive)
-                    Button("Retry", action: retryAction)
-                        .buttonStyle(.borderless)
-                }
-                .font(AppTheme.Typography.metadata)
+                failureRow(
+                    text: failure,
+                    retryHelp: "Retry",
+                    cancelHelp: "Cancel",
+                    retry: retryAction,
+                    cancel: cancelAction
+                )
             }
 
             if !readers.isEmpty {
@@ -1018,44 +1085,73 @@ private struct MessageRow: View {
         .animation(.snappy, value: readers)
     }
 
-    /// A just-sent Markdown message waits for its server rendering instead of showing
-    /// its raw source, which would flash when the rendered copy replaces it.
-    private var showsPlaceholder: Bool {
-        message.isProvisional && message.deliveryState != .failed
+    /// Why the message failed, with retry and cancel icons at the right.
+    private func failureRow(
+        text: String,
+        retryHelp: String,
+        cancelHelp: String,
+        retry: @escaping () -> Void,
+        cancel: @escaping () -> Void
+    ) -> some View {
+        HStack(spacing: AppTheme.Spacing.small) {
+            Text(text)
+                .lineLimit(1)
+                .foregroundStyle(AppTheme.Colors.destructive)
+            Spacer(minLength: 0)
+            Button(action: retry) {
+                Image(systemName: "arrow.clockwise")
+            }
+            .help(retryHelp)
+            .accessibilityLabel(retryHelp)
+            Button(action: cancel) {
+                Image(systemName: "xmark")
+            }
+            .help(cancelHelp)
+            .accessibilityLabel(cancelHelp)
+        }
+        .buttonStyle(.borderless)
+        .foregroundStyle(AppTheme.Colors.secondaryText)
+        .font(AppTheme.Typography.metadata)
     }
 
-    /// "(edited)" follows the last paragraph of the message on the same line.
-    private var editedContinuesText: Bool {
-        message.editedAt != nil && MessageContentView.canInlineTrailingNote(message.content)
+    /// The small gray note after the message: "Sending…" until the server has it,
+    /// "Editing…" until it accepts an edit, otherwise "(edited)".
+    private var trailingStatus: String? {
+        if message.deliveryState == .pending {
+            return "Sending…"
+        }
+        if case .pending(.edit) = message.actionState {
+            return "Editing…"
+        }
+        return message.editedAt == nil ? nil : "(edited)"
     }
 
-    private var hasStatus: Bool {
-        message.deliveryState != .sent || message.actionState != .idle || showsPlaceholder
+    private var trailingStatusHelp: String? {
+        guard trailingStatus == "(edited)", let editedAt = message.editedAt else {
+            return nil
+        }
+        return "Edited \(editedAt.formatted(date: .abbreviated, time: .shortened))"
+    }
+
+    /// The note follows the last paragraph of the message on the same line.
+    private var statusContinuesText: Bool {
+        trailingStatus != nil && MessageContentView.canInlineTrailingNote(message.content)
+    }
+
+    /// An action other than an edit still in flight (delete, reaction, star, read state).
+    private var hasOtherPendingAction: Bool {
+        if case let .pending(kind) = message.actionState {
+            return kind != .edit
+        }
+        return false
     }
 
     @ViewBuilder
-    private var statusLabels: some View {
-        if message.deliveryState == .pending || showsPlaceholder {
-            Text("Sending…")
-                .font(AppTheme.Typography.metadata)
-                .foregroundStyle(AppTheme.Colors.secondaryText)
-        } else if message.deliveryState == .failed {
-            Text("Failed")
-                .font(AppTheme.Typography.metadata)
-                .foregroundStyle(AppTheme.Colors.destructive)
-        }
-
-        switch message.actionState {
-        case let .pending(kind):
+    private var otherPendingLabel: some View {
+        if case let .pending(kind) = message.actionState, kind != .edit {
             Text(pendingLabel(kind))
                 .font(AppTheme.Typography.metadata)
                 .foregroundStyle(AppTheme.Colors.secondaryText)
-        case .failed:
-            Text("Action failed")
-                .font(AppTheme.Typography.metadata)
-                .foregroundStyle(AppTheme.Colors.destructive)
-        case .idle:
-            EmptyView()
         }
     }
 
@@ -1282,6 +1378,8 @@ private struct ComposerView: View {
     let chooseAttachment: (() -> Void)?
     let retryAttachmentUpload: (() -> Void)?
     let dismissAttachmentUploadFailure: (() -> Void)?
+    let draftChanged: ((String) -> Void)?
+    let typingChanged: ((Bool) -> Void)?
     let send: () -> Void
 
     @State private var selection: TextSelection?
@@ -1415,8 +1513,10 @@ private struct ComposerView: View {
         hint.map { "Message \(conversationTitle) · \($0)" } ?? "Message \(conversationTitle)"
     }
 
+    /// Looks for the first visible character instead of trimming a copy of the
+    /// whole draft, which cost a full copy of a long paste on every keystroke.
     private var canSend: Bool {
-        quote != nil || !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        quote != nil || draft.contains { !$0.isWhitespace }
     }
 
     /// Return sends; Shift+Return or Option+Return inserts a line break at the
@@ -1560,6 +1660,15 @@ private struct ComposerView: View {
                 .onChange(of: draft) {
                     mentionIndex = 0
                     placePendingCaret()
+                    // Kept here rather than on the surface, so typing does not
+                    // re-evaluate the whole timeline beside the composer.
+                    draftChanged?(draft)
+                    // Text restored from a saved draft is not typing; only the
+                    // focused composer announces it, and emptying the box always
+                    // withdraws it.
+                    if draft.isEmpty || isFocused.wrappedValue {
+                        typingChanged?(!draft.isEmpty)
+                    }
                 }
                 .onExitCommand {
                     if mentionMatch != nil {
@@ -1591,7 +1700,8 @@ private struct ComposerView: View {
                 .accessibilityLabel("Send message")
             }
         }
-        .padding(AppTheme.Spacing.medium)
+        .padding(.horizontal, AppTheme.Spacing.medium)
+        .padding(.vertical, 10)
         .frame(maxWidth: AppTheme.Metrics.composerMaximumWidth)
         .elevatedSurface(radius: AppTheme.Metrics.panelRadius)
         .padding(.horizontal, AppTheme.Spacing.extraLarge)
@@ -1649,9 +1759,6 @@ private struct TypingIndicator: View {
             .font(AppTheme.Typography.metadata)
             .foregroundStyle(AppTheme.Colors.secondaryText)
             .lineLimit(1)
-            .padding(.horizontal, AppTheme.Spacing.medium)
-            .padding(.vertical, 3)
-            .background(.regularMaterial, in: Capsule())
             .allowsHitTesting(false)
             .accessibilityLabel(text)
     }

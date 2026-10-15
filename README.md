@@ -110,6 +110,8 @@ roadmap lives in [`PLAN.md`](PLAN.md).
   install or an update shows the Allow prompt right away. Settings ›
   Notifications shows whether notifications are allowed and can ask again,
   open the app's page in System Settings, or send a test notification.
+- Settings › Appearance › Message density chooses how much space sits between
+  messages: Normal (the default) or Compact.
 
 **Keyboard and appearance**
 
@@ -148,8 +150,16 @@ file. Do not disable Gatekeeper globally.
 - Offline use is read-only; failed writes are retried by hand, not replayed.
 - A message that was moved to another topic or channel shows "(edited)", like
   an edited one.
-- Custom (image) emoji appear as `:name:` (and are left out of status emoji); complex formulas and tables are not
-  rendered.
+- Custom (image) emoji appear as `:name:` (and are left out of status emoji).
+  LaTeX formulas (`$$…$$` and the `math` fence) are drawn natively: a
+  formula on its own line is laid out with stacked fractions, roots, limits,
+  matrices and stretchy brackets (right-click › Copy LaTeX); a formula inside
+  a sentence is shown as one line of Unicode text. Only common LaTeX is
+  understood (no custom macros or `\newcommand`, no column rules in `array`);
+  anything unknown is shown as written.
+  Markdown tables are drawn as a native grid (header row, column alignment,
+  sideways scrolling when wide); cells hold inline text, links and mentions
+  only, and very large tables are cut to 200 rows and 24 columns.
 - The media cache has no aggregate size limit yet (`REL-001`).
 - Read receipts rely on polling because Zulip sends no event when a message is
   read.

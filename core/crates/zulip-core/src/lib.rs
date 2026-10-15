@@ -3,6 +3,7 @@
 pub mod auth;
 pub mod content;
 pub mod database;
+pub mod math;
 pub mod media;
 pub mod messages;
 pub mod server;
