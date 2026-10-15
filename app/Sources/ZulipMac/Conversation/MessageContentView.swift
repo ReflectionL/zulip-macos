@@ -280,7 +280,7 @@ extension ContentBlockView {
 /// A Markdown table: an optional header row and the body rows on a grid that
 /// scrolls sideways when it is wider than the message.
 private struct MessageTableView: View {
-    let alignments: [TableColumnAlignment]
+    let alignments: [TableCellAlignment]
     let header: [[InlineContent]]
     let rows: [[[InlineContent]]]
 
@@ -334,7 +334,7 @@ private struct MessageTableView: View {
         .padding(.vertical, AppTheme.Spacing.small)
     }
 
-    private func textAlignment(_ alignment: TableColumnAlignment) -> TextAlignment {
+    private func textAlignment(_ alignment: TableCellAlignment) -> TextAlignment {
         switch alignment {
         case .leading: .leading
         case .center: .center
@@ -342,7 +342,7 @@ private struct MessageTableView: View {
         }
     }
 
-    private func frameAlignment(_ alignment: TableColumnAlignment) -> Alignment {
+    private func frameAlignment(_ alignment: TableCellAlignment) -> Alignment {
         switch alignment {
         case .leading: .leading
         case .center: .center

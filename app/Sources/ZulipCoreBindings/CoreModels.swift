@@ -232,7 +232,7 @@ public enum InlineContent: Equatable, Sendable {
 }
 
 /// How a table column's text lines up.
-public enum TableColumnAlignment: Equatable, Sendable {
+public enum TableCellAlignment: Equatable, Sendable {
     case leading
     case center
     case trailing
@@ -297,7 +297,7 @@ public indirect enum ContentBlock: Equatable, Sendable {
     /// A table; `header` is empty when it has no header row, and every row has
     /// one cell per column.
     case table(
-        alignments: [TableColumnAlignment],
+        alignments: [TableCellAlignment],
         header: [[InlineContent]],
         rows: [[[InlineContent]]]
     )

@@ -1386,9 +1386,9 @@ private extension ContentBlock {
             self = .table(
                 alignments: alignments.map { alignment in
                     switch alignment {
-                    case .leading: TableColumnAlignment.leading
-                    case .center: TableColumnAlignment.center
-                    case .trailing: TableColumnAlignment.trailing
+                    case .leading: TableCellAlignment.leading
+                    case .center: TableCellAlignment.center
+                    case .trailing: TableCellAlignment.trailing
                     }
                 },
                 header: header.map { $0.content.map(InlineContent.init) },
@@ -1436,16 +1436,16 @@ private extension MathNode {
                 sup: sup.map(MathNode.init),
                 limits: limits
             )
-        case let .fenced(open, close, body):
-            self = .fenced(opening: open, closing: close, body: body.map(MathNode.init))
+        case let .fenced(opening, closing, body):
+            self = .fenced(opening: opening, closing: closing, body: body.map(MathNode.init))
         case let .accent(accent, body):
             self = .accent(MathAccentKind(accent), body.map(MathNode.init))
-        case let .matrix(columns, cells, open, close, alignment):
+        case let .matrix(columns, cells, opening, closing, alignment):
             self = .matrix(
                 columns: Int(columns),
                 cells: cells.map { $0.map(MathNode.init) },
-                opening: open,
-                closing: close,
+                opening: opening,
+                closing: closing,
                 alignment: MathMatrixAlignment(alignment)
             )
         }
