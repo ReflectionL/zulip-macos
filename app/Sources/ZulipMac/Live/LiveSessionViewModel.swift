@@ -284,7 +284,13 @@ final class LiveSessionViewModel {
     /// Bumps whenever read receipts change, so views showing them redraw.
     private(set) var readReceiptRevision = 0
     private static let readReceiptCacheLimit = 64
-    private(set) var drafts: [ConversationKey: String] = [:]
+    /// Not observed: it changes on every keystroke, and views that read it made
+    /// the whole conversation redraw each time. Views read a draft only once,
+    /// through `draft(for:)`, which depends on `draftsLoadRevision` instead.
+    @ObservationIgnored private(set) var drafts: [ConversationKey: String] = [:]
+    /// Bumps when saved drafts arrive from disk, so a composer that is already
+    /// showing picks up its restored text.
+    private(set) var draftsLoadRevision = 0
     @ObservationIgnored private var draftSaveTasks: [ConversationKey: Task<Void, Never>] = [:]
     private var requestID: UInt64 = 1
     private var activeSelection: ConversationKey?
@@ -543,7 +549,8 @@ final class LiveSessionViewModel {
     }
 
     func draft(for key: ConversationKey) -> String {
-        drafts[key] ?? ""
+        _ = draftsLoadRevision
+        return drafts[key] ?? ""
     }
 
     /// Remembers composer text immediately and persists it shortly after typing
@@ -2013,6 +2020,7 @@ final class LiveSessionViewModel {
             for draft in loaded where drafts[draft.key] == nil {
                 drafts[draft.key] = draft.content
             }
+            draftsLoadRevision += 1
 
         case let .presenceUpdated(accountID, presences):
             guard identity?.accountID == accountID else {

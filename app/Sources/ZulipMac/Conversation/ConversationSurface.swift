@@ -352,6 +352,8 @@ struct ConversationSurface: View {
                     : { isChoosingAttachment = true },
                 retryAttachmentUpload: retryAttachmentUpload,
                 dismissAttachmentUploadFailure: dismissAttachmentUploadFailure,
+                draftChanged: draftChanged,
+                typingChanged: typingChanged,
                 send: sendDraft
             )
             .overlay(alignment: .topLeading) {
@@ -427,14 +429,6 @@ struct ConversationSurface: View {
         }
         .onChange(of: page.messages) {
             messages = page.messages
-        }
-        .onChange(of: draft) {
-            draftChanged?(draft)
-            // Text restored from a saved draft is not typing; only the focused
-            // composer announces it, and emptying the box always withdraws it.
-            if draft.isEmpty || isComposerFocused {
-                typingChanged?(!draft.isEmpty)
-            }
         }
         .onChange(of: page.key) {
             pendingQuote = nil
@@ -1282,6 +1276,8 @@ private struct ComposerView: View {
     let chooseAttachment: (() -> Void)?
     let retryAttachmentUpload: (() -> Void)?
     let dismissAttachmentUploadFailure: (() -> Void)?
+    let draftChanged: ((String) -> Void)?
+    let typingChanged: ((Bool) -> Void)?
     let send: () -> Void
 
     @State private var selection: TextSelection?
@@ -1415,8 +1411,10 @@ private struct ComposerView: View {
         hint.map { "Message \(conversationTitle) · \($0)" } ?? "Message \(conversationTitle)"
     }
 
+    /// Looks for the first visible character instead of trimming a copy of the
+    /// whole draft, which cost a full copy of a long paste on every keystroke.
     private var canSend: Bool {
-        quote != nil || !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        quote != nil || draft.contains { !$0.isWhitespace }
     }
 
     /// Return sends; Shift+Return or Option+Return inserts a line break at the
@@ -1560,6 +1558,15 @@ private struct ComposerView: View {
                 .onChange(of: draft) {
                     mentionIndex = 0
                     placePendingCaret()
+                    // Kept here rather than on the surface, so typing does not
+                    // re-evaluate the whole timeline beside the composer.
+                    draftChanged?(draft)
+                    // Text restored from a saved draft is not typing; only the
+                    // focused composer announces it, and emptying the box always
+                    // withdraws it.
+                    if draft.isEmpty || isFocused.wrappedValue {
+                        typingChanged?(!draft.isEmpty)
+                    }
                 }
                 .onExitCommand {
                     if mentionMatch != nil {
