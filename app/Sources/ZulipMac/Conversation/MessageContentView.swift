@@ -242,6 +242,9 @@ private struct ContentBlockView: View {
                 requestMedia: requestMedia
             )
 
+        case let .table(alignments, header, rows):
+            MessageTableView(alignments: alignments, header: header, rows: rows)
+
         case let .unsupported(summary):
             Label(summary, systemImage: "doc.questionmark")
                 .font(AppTheme.Typography.body)
@@ -267,6 +270,80 @@ extension ContentBlockView {
         case 2: AppTheme.Typography.scaled(19, weight: .semibold)
         case 3: AppTheme.Typography.scaled(16.5, weight: .semibold)
         default: AppTheme.Typography.scaled(14, weight: .semibold)
+        }
+    }
+}
+
+/// A Markdown table: an optional header row and the body rows on a grid that
+/// scrolls sideways when it is wider than the message.
+private struct MessageTableView: View {
+    let alignments: [TableColumnAlignment]
+    let header: [[InlineContent]]
+    let rows: [[[InlineContent]]]
+
+    private static let maximumCellWidth: CGFloat = 320
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
+                if !header.isEmpty {
+                    GridRow {
+                        ForEach(Array(header.enumerated()), id: \.offset) { column, cell in
+                            cellView(cell, column: column, isHeader: true)
+                        }
+                    }
+                    .background(AppTheme.Colors.sidebar)
+                    Divider()
+                }
+                ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
+                    GridRow {
+                        ForEach(Array(row.enumerated()), id: \.offset) { column, cell in
+                            cellView(cell, column: column, isHeader: false)
+                        }
+                    }
+                    if index < rows.count - 1 {
+                        Divider().opacity(0.5)
+                    }
+                }
+            }
+        }
+        .clipShape(
+            RoundedRectangle(cornerRadius: AppTheme.Metrics.controlRadius, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: AppTheme.Metrics.controlRadius, style: .continuous)
+                .stroke(AppTheme.Colors.subtleStroke, lineWidth: 1)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Table, \(rows.count) rows")
+    }
+
+    private func cellView(_ cell: [InlineContent], column: Int, isHeader: Bool) -> some View {
+        let alignment = column < alignments.count ? alignments[column] : .leading
+        return InlineContentText(
+            content: cell,
+            font: isHeader ? AppTheme.Typography.bodyEmphasized : AppTheme.Typography.body
+        )
+        .multilineTextAlignment(textAlignment(alignment))
+        .frame(maxWidth: Self.maximumCellWidth, alignment: frameAlignment(alignment))
+        .frame(maxWidth: .infinity, alignment: frameAlignment(alignment))
+        .padding(.horizontal, AppTheme.Spacing.medium)
+        .padding(.vertical, AppTheme.Spacing.small)
+    }
+
+    private func textAlignment(_ alignment: TableColumnAlignment) -> TextAlignment {
+        switch alignment {
+        case .leading: .leading
+        case .center: .center
+        case .trailing: .trailing
+        }
+    }
+
+    private func frameAlignment(_ alignment: TableColumnAlignment) -> Alignment {
+        switch alignment {
+        case .leading: .leading
+        case .center: .center
+        case .trailing: .trailing
         }
     }
 }
@@ -587,9 +664,16 @@ enum ContentSnapshot {
         case let .linkPreview(url, title, description, imageURL, fromServer):
             "card[\(fromServer ? "server" : "client")](\(url),\(title ?? ""),"
                 + "\(description ?? ""),\(imageURL ?? ""))"
+        case let .table(alignments, header, rows):
+            "table[\(alignments.count)](\(header.map(describe).joined(separator: ",")))"
+                + "{\(rows.map { $0.map(describe).joined(separator: ",") }.joined(separator: ";"))}"
         case let .unsupported(summary):
             "unsupported(\(summary))"
         }
+    }
+
+    private static func describe(_ cell: [InlineContent]) -> String {
+        cell.map(describe).joined(separator: "|")
     }
 
     private static func describe(_ inline: InlineContent) -> String {

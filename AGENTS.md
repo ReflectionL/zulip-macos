@@ -173,5 +173,5 @@ including performance, resilience, diagnostics, and a real self-hosted smoke
 test.
 
 Browser SSO, multiple simultaneously synchronized accounts, administration,
-offline write replay, complex formula/table rendering, Intel, the Mac App
+offline write replay, complex formula rendering, Intel, the Mac App
 Store, and non-macOS UIs are intentionally deferred.

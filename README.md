@@ -150,8 +150,10 @@ file. Do not disable Gatekeeper globally.
 - Offline use is read-only; failed writes are retried by hand, not replayed.
 - A message that was moved to another topic or channel shows "(edited)", like
   an edited one.
-- Custom (image) emoji appear as `:name:` (and are left out of status emoji); complex formulas and tables are not
-  rendered.
+- Custom (image) emoji appear as `:name:` (and are left out of status emoji); complex formulas are not rendered.
+  Markdown tables are drawn as a native grid (header row, column alignment,
+  sideways scrolling when wide); cells hold inline text, links and mentions
+  only, and very large tables are cut to 200 rows and 24 columns.
 - The media cache has no aggregate size limit yet (`REL-001`).
 - Read receipts rely on polling because Zulip sends no event when a message is
   read.

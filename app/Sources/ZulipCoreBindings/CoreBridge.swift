@@ -1380,6 +1380,20 @@ private extension ContentBlock {
                 imageURL: imageUrl,
                 fromServer: fromServer
             )
+        case let .table(alignments, header, rows):
+            self = .table(
+                alignments: alignments.map { alignment in
+                    switch alignment {
+                    case .leading: TableColumnAlignment.leading
+                    case .center: TableColumnAlignment.center
+                    case .trailing: TableColumnAlignment.trailing
+                    }
+                },
+                header: header.map { $0.content.map(InlineContent.init) },
+                rows: rows.map { row in
+                    row.cells.map { $0.content.map(InlineContent.init) }
+                }
+            )
         case let .unsupported(summary):
             self = .unsupported(summary: summary)
         }

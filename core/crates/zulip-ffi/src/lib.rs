@@ -23,7 +23,7 @@ use zulip_core::{
     auth::{AuthenticatedAccount, AuthenticationClient, SecretString},
     content::{
         ContentBlock as NativeContentBlock, InlineContent as NativeInlineContent,
-        InlineStyle as NativeInlineStyle, parse_zulip_html,
+        InlineStyle as NativeInlineStyle, TableAlignment as NativeTableAlignment, parse_zulip_html,
     },
     database::{CacheDatabase, CachedAccount, CachedConversation, CachedSnapshot, DraftRecord},
     media::MediaClient,
@@ -912,6 +912,31 @@ pub struct CoreContentListItem {
     pub blocks: Vec<CoreContentBlock>,
 }
 
+/// How a table column's text lines up.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum CoreTableAlignment {
+    /// Left in left-to-right text.
+    Leading,
+    /// Centered.
+    Center,
+    /// Right in left-to-right text.
+    Trailing,
+}
+
+/// One table cell.
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct CoreTableCell {
+    /// Inline values in display order.
+    pub content: Vec<CoreInlineContent>,
+}
+
+/// One table row, as wide as the table.
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct CoreTableRow {
+    /// The row's cells.
+    pub cells: Vec<CoreTableCell>,
+}
+
 /// Sanitized native block content crossing the application bridge.
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Enum)]
 pub enum CoreContentBlock {
@@ -969,6 +994,15 @@ pub enum CoreContentBlock {
         image_url: Option<String>,
         /// Built by the server; otherwise the app may describe the page itself.
         from_server: bool,
+    },
+    /// A table.
+    Table {
+        /// Alignment of each column.
+        alignments: Vec<CoreTableAlignment>,
+        /// Header cells; empty when the table has no header row.
+        header: Vec<CoreTableCell>,
+        /// Body rows.
+        rows: Vec<CoreTableRow>,
     },
     /// Readable unsupported/unsafe fallback.
     Unsupported {
@@ -3796,6 +3830,32 @@ impl From<NativeContentBlock> for CoreContentBlock {
                 image_url,
                 from_server,
             },
+            NativeContentBlock::Table {
+                alignments,
+                header,
+                rows,
+            } => {
+                let cell = |content: Vec<NativeInlineContent>| CoreTableCell {
+                    content: content.into_iter().map(CoreInlineContent::from).collect(),
+                };
+                Self::Table {
+                    alignments: alignments
+                        .into_iter()
+                        .map(|alignment| match alignment {
+                            NativeTableAlignment::Leading => CoreTableAlignment::Leading,
+                            NativeTableAlignment::Center => CoreTableAlignment::Center,
+                            NativeTableAlignment::Trailing => CoreTableAlignment::Trailing,
+                        })
+                        .collect(),
+                    header: header.into_iter().map(cell).collect(),
+                    rows: rows
+                        .into_iter()
+                        .map(|row| CoreTableRow {
+                            cells: row.into_iter().map(cell).collect(),
+                        })
+                        .collect(),
+                }
+            }
             NativeContentBlock::Unsupported { summary } => Self::Unsupported { summary },
         }
     }

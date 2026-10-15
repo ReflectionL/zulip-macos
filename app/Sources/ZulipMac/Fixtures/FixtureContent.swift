@@ -75,6 +75,16 @@ enum FixtureContent {
             ),
         ],
         [
+            .table(
+                alignments: [.leading, .center, .trailing],
+                header: [[.text("Step")], [.text("Owner")], [.text("Days")]],
+                rows: [
+                    [[.text("Parse HTML")], [.styled(.strong, [.text("Rust")])], [.text("2")]],
+                    [[.text("Draw the grid")], [.text("SwiftUI")], [.text("1")]],
+                ]
+            ),
+        ],
+        [
             .unsupported(summary: "Unsupported fixture content is shown safely."),
         ],
     ]

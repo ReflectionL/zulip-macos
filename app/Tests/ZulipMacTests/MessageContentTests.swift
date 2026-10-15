@@ -20,7 +20,25 @@ struct MessageContentTests {
         #expect(snapshot.contains("code[rust]"))
         #expect(snapshot.contains("image(fixture://native-preview"))
         #expect(snapshot.contains("card[server](https://zulip.com/help/,Zulip help center"))
+        #expect(snapshot.contains("table[3]("))
         #expect(snapshot.contains("unsupported("))
+    }
+
+    @Test("A table reads as its rows, cells joined by bars")
+    func tableText() {
+        let table = ContentBlock.table(
+            alignments: [.leading, .trailing],
+            header: [[.text("Name")], [.text("Count")]],
+            rows: [[[.text("Maya")], [.text("3")]]]
+        )
+        #expect(table.plainText == "Name | Count\nMaya | 3")
+
+        let headerless = ContentBlock.table(
+            alignments: [.leading],
+            header: [],
+            rows: [[[.text("a")]], [[.text("b")]]]
+        )
+        #expect(headerless.plainText == "a\nb")
     }
 
     @Test("A link card reads as its title, or its address without one")

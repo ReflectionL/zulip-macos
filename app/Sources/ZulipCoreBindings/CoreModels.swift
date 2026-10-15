@@ -227,6 +227,13 @@ public enum InlineContent: Equatable, Sendable {
     }
 }
 
+/// How a table column's text lines up.
+public enum TableColumnAlignment: Equatable, Sendable {
+    case leading
+    case center
+    case trailing
+}
+
 public indirect enum ContentBlock: Equatable, Sendable {
     case paragraph([InlineContent])
     case heading(level: Int, content: [InlineContent])
@@ -242,6 +249,13 @@ public indirect enum ContentBlock: Equatable, Sendable {
         description: String?,
         imageURL: String?,
         fromServer: Bool
+    )
+    /// A table; `header` is empty when it has no header row, and every row has
+    /// one cell per column.
+    case table(
+        alignments: [TableColumnAlignment],
+        header: [[InlineContent]],
+        rows: [[[InlineContent]]]
     )
     case unsupported(summary: String)
 
@@ -261,6 +275,11 @@ public indirect enum ContentBlock: Equatable, Sendable {
             alt
         case let .linkPreview(url, title, _, _, _):
             title ?? url
+        case let .table(_, header, rows):
+            ([header] + rows)
+                .filter { !$0.isEmpty }
+                .map { $0.map { $0.map(\.plainText).joined() }.joined(separator: " | ") }
+                .joined(separator: "\n")
         case let .unsupported(summary):
             summary
         }
