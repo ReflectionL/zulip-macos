@@ -301,6 +301,11 @@ final class LiveSessionViewModel {
     private var notificationSettingRequests = Set<UInt64>()
     /// Status and invisible-mode changes waiting for the server.
     @ObservationIgnored private var statusRequests = Set<UInt64>()
+    /// Messages the user marked unread in the open conversation. Opening or
+    /// refreshing it marks every message read, which used to undo "Mark as
+    /// Unread" at once (the flag change itself refreshes the conversation), so
+    /// these stay unread until the user leaves the conversation, as on the web.
+    @ObservationIgnored private var keptUnreadMessageIDs = Set<Int64>()
     /// Refreshes and mark-read requests: when one fails the screen stays as it
     /// is and the connection is not reported as failed.
     private var quietRequestIDs = Set<UInt64>()
@@ -767,6 +772,9 @@ final class LiveSessionViewModel {
         pendingFocusedMessageRequestID = nil
         pendingOlderRequestID = nil
         isLoadingOlderMessages = false
+        if activeSelection != key {
+            keptUnreadMessageIDs = []
+        }
         activeSelection = key
         if let page = recentPages[key] {
             // Seen earlier this session: show it synchronously while the fresh page loads.
@@ -951,6 +959,9 @@ final class LiveSessionViewModel {
         stashVisiblePage()
         pendingOlderRequestID = nil
         isLoadingOlderMessages = false
+        if activeSelection != result.conversationKey {
+            keptUnreadMessageIDs = []
+        }
         activeSelection = result.conversationKey
         conversationState = .loading(title: result.title, subtitle: result.subtitle)
 
@@ -1091,9 +1102,17 @@ final class LiveSessionViewModel {
 
     @discardableResult
     func setRead(_ message: MessageViewData, read: Bool) -> Bool {
-        submitMessageAction(
+        let submitted = submitMessageAction(
             .flag(messageID: message.id, flag: .read, add: read)
         )
+        if submitted {
+            if read {
+                keptUnreadMessageIDs.remove(message.id)
+            } else {
+                keptUnreadMessageIDs.insert(message.id)
+            }
+        }
+        return submitted
     }
 
     /// Puts a quote of `message` into the open conversation's composer.
@@ -1339,10 +1358,8 @@ final class LiveSessionViewModel {
             .setUserStatus(
                 requestID: id,
                 accountID: accountID,
-                text: String(
-                    status.text
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                        .prefix(UserStatusDisplay.maximumTextLength)
+                text: UserStatusDisplay.clampedText(
+                    status.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 ),
                 emojiName: status.emojiName,
                 emojiCode: status.emojiCode,
@@ -2294,6 +2311,7 @@ final class LiveSessionViewModel {
         userStatuses = [:]
         isInvisible = false
         statusRequests = []
+        keptUnreadMessageIDs = []
         draftSaveTasks.values.forEach { $0.cancel() }
         draftSaveTasks = [:]
         drafts = [:]
@@ -3021,7 +3039,12 @@ final class LiveSessionViewModel {
         )
     }
 
+    /// Marks what the user is looking at read, except what they marked unread.
     private func submitMarkRead(accountID: String, messageIDs: [Int64]) {
+        let messageIDs = messageIDs.filter { !keptUnreadMessageIDs.contains($0) }
+        guard !messageIDs.isEmpty else {
+            return
+        }
         let id = nextRequestID()
         quietRequestIDs.insert(id)
         client.submit(
