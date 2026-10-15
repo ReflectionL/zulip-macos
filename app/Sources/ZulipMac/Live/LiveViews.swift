@@ -457,6 +457,12 @@ private struct LiveWindowView: View {
                 retrySend: { message in
                     session.retrySend(message)
                 },
+                cancelSend: { message in
+                    session.cancelSend(message)
+                },
+                cancelMessageAction: { message in
+                    session.cancelMessageAction(for: message.id)
+                },
                 quoteMessage: { message in
                     session.quote(message)
                 },

@@ -25,6 +25,8 @@ struct ConversationSurface: View {
     var setMessageRead: ((MessageViewData, Bool) -> Bool)?
     var retryMessageAction: ((MessageViewData) -> Void)?
     var retrySend: ((MessageViewData) -> Void)?
+    var cancelSend: ((MessageViewData) -> Void)?
+    var cancelMessageAction: ((MessageViewData) -> Void)?
     var quoteMessage: ((MessageViewData) -> Void)?
     var forwardMessage: ((MessageViewData, ConversationKey) -> Void)?
     var forwardDestinations: ((String) -> [NavigationDestination])?
@@ -92,6 +94,8 @@ struct ConversationSurface: View {
         setMessageRead: ((MessageViewData, Bool) -> Bool)? = nil,
         retryMessageAction: ((MessageViewData) -> Void)? = nil,
         retrySend: ((MessageViewData) -> Void)? = nil,
+        cancelSend: ((MessageViewData) -> Void)? = nil,
+        cancelMessageAction: ((MessageViewData) -> Void)? = nil,
         quoteMessage: ((MessageViewData) -> Void)? = nil,
         forwardMessage: ((MessageViewData, ConversationKey) -> Void)? = nil,
         forwardDestinations: ((String) -> [NavigationDestination])? = nil,
@@ -136,6 +140,8 @@ struct ConversationSurface: View {
         self.setMessageRead = setMessageRead
         self.retryMessageAction = retryMessageAction
         self.retrySend = retrySend
+        self.cancelSend = cancelSend
+        self.cancelMessageAction = cancelMessageAction
         self.quoteMessage = quoteMessage
         self.forwardMessage = forwardMessage
         self.forwardDestinations = forwardDestinations
@@ -256,6 +262,12 @@ struct ConversationSurface: View {
                                         },
                                         retrySend: {
                                             retrySend?(message)
+                                        },
+                                        cancelSend: {
+                                            cancelSend?(message)
+                                        },
+                                        cancelAction: {
+                                            cancelMessageAction?(message)
                                         },
                                         mediaLocalURLs: mediaLocalURLs,
                                         mediaFailures: mediaFailures,
@@ -780,6 +792,8 @@ private struct MessageRow: View {
     let toggleRead: (() -> Void)?
     let retryAction: () -> Void
     let retrySend: () -> Void
+    let cancelSend: () -> Void
+    let cancelAction: () -> Void
     let mediaLocalURLs: [String: String]
     let mediaFailures: [String: String]
     let requestMedia: ((String) -> Void)?
@@ -830,7 +844,7 @@ private struct MessageRow: View {
                             .help(sourceLabel)
                             .accessibilityLabel("In \(sourceLabel)")
                     }
-                    statusLabels
+                    otherPendingLabel
                     Spacer(minLength: 0)
                 }
             }
@@ -947,33 +961,33 @@ private struct MessageRow: View {
     /// How far the floating action bar reaches down into its own row.
     private static let actionBarOverlap: CGFloat = 10
 
-    /// The message's own lines: status, content, reactions and read receipts.
+    /// The message's own lines: content with its status note, reactions and read receipts.
     private var messageBody: some View {
         VStack(alignment: .leading, spacing: AppTheme.Spacing.extraSmall) {
-            if isContinuation, hasStatus {
+            if isContinuation, hasOtherPendingAction {
                 HStack(spacing: AppTheme.Spacing.small) {
-                    statusLabels
+                    otherPendingLabel
                 }
             }
 
-            if !showsPlaceholder {
-                MessageContentView(
-                    blocks: message.content,
-                    mediaLocalURLs: mediaLocalURLs,
-                    mediaFailures: mediaFailures,
-                    requestMedia: requestMedia,
-                    retryMedia: retryMedia,
-                    trailingNote: editedContinuesText ? "(edited)" : nil
-                )
-            }
+            // The whole message is shown from the start, even while it is being
+            // sent or edited; the status follows it as small gray text.
+            MessageContentView(
+                blocks: message.content,
+                mediaLocalURLs: mediaLocalURLs,
+                mediaFailures: mediaFailures,
+                requestMedia: requestMedia,
+                retryMedia: retryMedia,
+                trailingNote: statusContinuesText ? trailingStatus : nil
+            )
 
             // Content that does not end in a paragraph (a picture, code, a list)
-            // has no line to continue, so the label gets a line of its own.
-            if let editedAt = message.editedAt, !showsPlaceholder, !editedContinuesText {
-                Text("(edited)")
+            // has no line to continue, so the note gets a line of its own.
+            if let trailingStatus, !statusContinuesText {
+                Text(trailingStatus)
                     .font(AppTheme.Typography.metadata)
                     .foregroundStyle(AppTheme.Colors.tertiaryText)
-                    .help("Edited \(editedAt.formatted(date: .abbreviated, time: .shortened))")
+                    .help(trailingStatusHelp ?? "")
             }
 
             if !message.reactions.isEmpty {
@@ -985,18 +999,21 @@ private struct MessageRow: View {
             }
 
             if message.deliveryState == .failed {
-                Button("Retry send", action: retrySend)
-                    .buttonStyle(.borderless)
-                    .font(AppTheme.Typography.metadata)
+                failureRow(
+                    text: "Not sent",
+                    retryHelp: "Retry send",
+                    cancelHelp: "Cancel send",
+                    retry: retrySend,
+                    cancel: cancelSend
+                )
             } else if case let .failed(_, failure) = message.actionState {
-                HStack(spacing: AppTheme.Spacing.small) {
-                    Text(failure)
-                        .lineLimit(1)
-                        .foregroundStyle(AppTheme.Colors.destructive)
-                    Button("Retry", action: retryAction)
-                        .buttonStyle(.borderless)
-                }
-                .font(AppTheme.Typography.metadata)
+                failureRow(
+                    text: failure,
+                    retryHelp: "Retry",
+                    cancelHelp: "Cancel",
+                    retry: retryAction,
+                    cancel: cancelAction
+                )
             }
 
             if !readers.isEmpty {
@@ -1012,44 +1029,73 @@ private struct MessageRow: View {
         .animation(.snappy, value: readers)
     }
 
-    /// A just-sent Markdown message waits for its server rendering instead of showing
-    /// its raw source, which would flash when the rendered copy replaces it.
-    private var showsPlaceholder: Bool {
-        message.isProvisional && message.deliveryState != .failed
+    /// Why the message failed, with retry and cancel icons at the right.
+    private func failureRow(
+        text: String,
+        retryHelp: String,
+        cancelHelp: String,
+        retry: @escaping () -> Void,
+        cancel: @escaping () -> Void
+    ) -> some View {
+        HStack(spacing: AppTheme.Spacing.small) {
+            Text(text)
+                .lineLimit(1)
+                .foregroundStyle(AppTheme.Colors.destructive)
+            Spacer(minLength: 0)
+            Button(action: retry) {
+                Image(systemName: "arrow.clockwise")
+            }
+            .help(retryHelp)
+            .accessibilityLabel(retryHelp)
+            Button(action: cancel) {
+                Image(systemName: "xmark")
+            }
+            .help(cancelHelp)
+            .accessibilityLabel(cancelHelp)
+        }
+        .buttonStyle(.borderless)
+        .foregroundStyle(AppTheme.Colors.secondaryText)
+        .font(AppTheme.Typography.metadata)
     }
 
-    /// "(edited)" follows the last paragraph of the message on the same line.
-    private var editedContinuesText: Bool {
-        message.editedAt != nil && MessageContentView.canInlineTrailingNote(message.content)
+    /// The small gray note after the message: "Sending…" until the server has it,
+    /// "Editing…" until it accepts an edit, otherwise "(edited)".
+    private var trailingStatus: String? {
+        if message.deliveryState == .pending {
+            return "Sending…"
+        }
+        if case .pending(.edit) = message.actionState {
+            return "Editing…"
+        }
+        return message.editedAt == nil ? nil : "(edited)"
     }
 
-    private var hasStatus: Bool {
-        message.deliveryState != .sent || message.actionState != .idle || showsPlaceholder
+    private var trailingStatusHelp: String? {
+        guard trailingStatus == "(edited)", let editedAt = message.editedAt else {
+            return nil
+        }
+        return "Edited \(editedAt.formatted(date: .abbreviated, time: .shortened))"
+    }
+
+    /// The note follows the last paragraph of the message on the same line.
+    private var statusContinuesText: Bool {
+        trailingStatus != nil && MessageContentView.canInlineTrailingNote(message.content)
+    }
+
+    /// An action other than an edit still in flight (delete, reaction, star, read state).
+    private var hasOtherPendingAction: Bool {
+        if case let .pending(kind) = message.actionState {
+            return kind != .edit
+        }
+        return false
     }
 
     @ViewBuilder
-    private var statusLabels: some View {
-        if message.deliveryState == .pending || showsPlaceholder {
-            Text("Sending…")
-                .font(AppTheme.Typography.metadata)
-                .foregroundStyle(AppTheme.Colors.secondaryText)
-        } else if message.deliveryState == .failed {
-            Text("Failed")
-                .font(AppTheme.Typography.metadata)
-                .foregroundStyle(AppTheme.Colors.destructive)
-        }
-
-        switch message.actionState {
-        case let .pending(kind):
+    private var otherPendingLabel: some View {
+        if case let .pending(kind) = message.actionState, kind != .edit {
             Text(pendingLabel(kind))
                 .font(AppTheme.Typography.metadata)
                 .foregroundStyle(AppTheme.Colors.secondaryText)
-        case .failed:
-            Text("Action failed")
-                .font(AppTheme.Typography.metadata)
-                .foregroundStyle(AppTheme.Colors.destructive)
-        case .idle:
-            EmptyView()
         }
     }
 

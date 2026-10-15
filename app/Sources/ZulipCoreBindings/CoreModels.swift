@@ -379,7 +379,7 @@ public struct MessageViewData: Identifiable, Equatable, Sendable {
     /// row updates in place instead of being torn down and rebuilt.
     public var rowID: Int64
     /// A local echo whose final rendering belongs to the server (the text uses
-    /// Markdown), so the timeline shows a placeholder until the server copy arrives.
+    /// Markdown). The timeline still shows its text as typed, with "Sending…".
     public var isProvisional: Bool
     /// When the content was last edited; nil for a message never edited.
     public var editedAt: Date?

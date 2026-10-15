@@ -1548,6 +1548,25 @@ final class LiveSessionViewModel {
         _ = submitMessageAction(action)
     }
 
+    /// Gives up on a message that could not be sent: the echo leaves the timeline.
+    func cancelSend(_ message: MessageViewData) {
+        guard failedSends.removeValue(forKey: message.id) != nil else {
+            return
+        }
+        removeLoadedMessage(message.id)
+    }
+
+    /// Drops a failed edit or other action; the message already shows its
+    /// previous state, so only the failure notice goes away.
+    func cancelMessageAction(for messageID: Int64) {
+        failedMessageActions.removeValue(forKey: messageID)
+        modifyLoadedMessage(messageID) { message in
+            if case .failed = message.actionState {
+                message.actionState = .idle
+            }
+        }
+    }
+
     func retrySend(_ message: MessageViewData) {
         guard let send = failedSends.removeValue(forKey: message.id) else {
             return
