@@ -1701,7 +1701,7 @@ private struct ComposerView: View {
             }
         }
         .padding(.horizontal, AppTheme.Spacing.medium)
-        .padding(.vertical, AppTheme.Spacing.small)
+        .padding(.vertical, 10)
         .frame(maxWidth: AppTheme.Metrics.composerMaximumWidth)
         .elevatedSurface(radius: AppTheme.Metrics.panelRadius)
         .padding(.horizontal, AppTheme.Spacing.extraLarge)
