@@ -61,6 +61,8 @@ struct ConversationSurface: View {
     @State private var messages: [MessageViewData]
     @State private var draft = ""
     @State private var followsNewest = true
+    /// How far the toolbar reaches into the timeline's top edge.
+    @State private var toolbarInset: CGFloat = 0
     @State private var editingMessage: MessageViewData?
     @State private var deletingMessage: MessageViewData?
     @State private var forwardingMessage: MessageViewData?
@@ -297,6 +299,14 @@ struct ConversationSurface: View {
                     }
                     .defaultScrollAnchor(.bottom, for: .initialOffset)
                     .defaultScrollAnchor(.bottom, for: .sizeChanges)
+                    // The window has no title bar, so messages scroll under the
+                    // toolbar's breadcrumb; fade them out before they reach it.
+                    .onGeometryChange(for: CGFloat.self) { geometry in
+                        geometry.safeAreaInsets.top
+                    } action: { inset in
+                        toolbarInset = inset
+                    }
+                    .mask { TimelineTopFade(toolbarInset: toolbarInset) }
                     .onScrollGeometryChange(for: Bool.self) { geometry in
                         let remaining = geometry.contentSize.height
                             - geometry.contentOffset.y
@@ -611,6 +621,32 @@ extension View {
                 renameChannel: renameChannel
             )
         )
+    }
+}
+
+/// Hides the timeline behind the toolbar and fades it in just below, so a
+/// message scrolling up never overlaps the breadcrumb. Nothing fades at rest:
+/// the first message starts below the faded band.
+private struct TimelineTopFade: View {
+    let toolbarInset: CGFloat
+
+    /// How far the fade starts above the toolbar's lower edge and ends below it.
+    private static let leadIn: CGFloat = 6
+    private static let fadeLength: CGFloat = 18
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Color.clear
+                .frame(height: max(toolbarInset - Self.leadIn, 0))
+            LinearGradient(
+                colors: [.clear, .black],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .frame(height: Self.fadeLength)
+            Color.black
+        }
+        .ignoresSafeArea(.container, edges: .top)
     }
 }
 
