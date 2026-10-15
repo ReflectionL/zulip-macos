@@ -1461,6 +1461,9 @@ struct AccountSession {
     /// The newest message the event queue has delivered, so that messages
     /// arriving while a lost queue was replaced can be fetched and notified.
     newest_message_id: i64,
+    /// Where a finished mark-read request reports back to the actor, which
+    /// applies it to the unread counts. Set when the actor takes the session.
+    marked_read: Option<UnboundedSender<MarkedRead>>,
 }
 
 /// A session that finished signing in and registering beside the actor.
@@ -1496,6 +1499,12 @@ struct MissedMessages {
     messages: Vec<MessageSummary>,
 }
 
+/// Messages the server accepted as read for this client.
+struct MarkedRead {
+    account_id: String,
+    message_ids: Vec<i64>,
+}
+
 /// How many messages that arrived during a queue gap are fetched at most.
 const MISSED_MESSAGE_LIMIT: u16 = 50;
 
@@ -1505,6 +1514,7 @@ enum ActorInput {
     Topics(Option<TopicRefresh>),
     Session(Option<Box<SessionStart>>),
     Missed(Option<MissedMessages>),
+    Marked(Option<MarkedRead>),
 }
 
 /// Whether a command needs the live session, and so waits while one is starting.
@@ -1542,6 +1552,8 @@ async fn run_actor(
     // Messages that arrived while a lost event queue was replaced never come
     // through the new queue; they are fetched beside the actor.
     let (missed_sender, mut missed_receiver) = unbounded_channel::<MissedMessages>();
+    // Reads this client made are applied to the unread counts once accepted.
+    let (marked_sender, mut marked_receiver) = unbounded_channel::<MarkedRead>();
 
     loop {
         let input = if let Some(session) = account.as_mut() {
@@ -1556,6 +1568,7 @@ async fn run_actor(
                 refresh = topic_receiver.recv() => ActorInput::Topics(refresh),
                 start = session_receiver.recv() => ActorInput::Session(start.map(Box::new)),
                 missed = missed_receiver.recv() => ActorInput::Missed(missed),
+                marked = marked_receiver.recv() => ActorInput::Marked(marked),
             }
         } else {
             tokio::select! {
@@ -1621,7 +1634,8 @@ async fn run_actor(
                 else {
                     continue;
                 };
-                if let Some(started) = start.started {
+                if let Some(mut started) = start.started {
+                    started.session.marked_read = Some(marked_sender.clone());
                     account = Some(started.session);
                     poll_not_before = Instant::now();
                     retrying = false;
@@ -1697,7 +1711,23 @@ async fn run_actor(
                     });
                 }
             }
-            ActorInput::Topics(None) | ActorInput::Session(None) | ActorInput::Missed(None) => {}
+            ActorInput::Marked(Some(marked)) => {
+                if let Some(session) = account
+                    .as_mut()
+                    .filter(|session| session.account_id == marked.account_id)
+                    && let Some(snapshot) = session.sync.mark_read_locally(&marked.message_ids)
+                {
+                    cache_snapshot_throttled(session, &snapshot);
+                    event_sink.handle_event(CoreEvent::SnapshotUpdated {
+                        account_id: session.account_id.clone(),
+                        snapshot: CoreSnapshot::from_sync(snapshot, &session.topics),
+                    });
+                }
+            }
+            ActorInput::Topics(None)
+            | ActorInput::Session(None)
+            | ActorInput::Missed(None)
+            | ActorInput::Marked(None) => {}
         }
     }
 }
@@ -3176,12 +3206,22 @@ fn mark_read(
     };
     let messages = Arc::clone(&session.messages);
     let event_sink = Arc::clone(event_sink);
+    let marked_read = session.marked_read.clone();
+    let account_id = session.account_id.clone();
     tokio::spawn(async move {
         match messages.mark_read(&message_ids).await {
-            Ok(()) => event_sink.handle_event(CoreEvent::MessagesMarkedRead {
-                request_id,
-                message_ids,
-            }),
+            Ok(()) => {
+                if let Some(marked_read) = marked_read {
+                    let _ = marked_read.send(MarkedRead {
+                        account_id,
+                        message_ids: message_ids.clone(),
+                    });
+                }
+                event_sink.handle_event(CoreEvent::MessagesMarkedRead {
+                    request_id,
+                    message_ids,
+                });
+            }
             Err(error) => emit_error(Some(request_id), error, &event_sink),
         }
     });
@@ -3396,6 +3436,7 @@ async fn start_session(
                     last_snapshot_cache_seconds: AtomicU64::new(now_seconds()),
                     send_order: Arc::new(AsyncMutex::new(())),
                     newest_message_id,
+                    marked_read: None,
                 },
                 started: CoreEvent::SessionStarted {
                     request_id,
