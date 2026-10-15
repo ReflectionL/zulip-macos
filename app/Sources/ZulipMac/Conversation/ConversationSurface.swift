@@ -1629,7 +1629,7 @@ private struct ComposerView: View {
                     chooseAttachment?()
                 } label: {
                     Image(systemName: "plus")
-                        .font(AppTheme.Typography.scaled(14, weight: .medium))
+                        .font(AppTheme.Typography.scaled(13, weight: .medium))
                 }
                 .buttonStyle(CircleHoverButtonStyle())
                 .foregroundStyle(AppTheme.Colors.secondaryText)
@@ -1693,12 +1693,12 @@ private struct ComposerView: View {
                         : "Type a message and press Return to send"
                 )
                 // As tall as the buttons, so a single line sits centered beside them.
-                .frame(minHeight: 28)
+                .frame(minHeight: ComposerMetrics.buttonSize)
 
                 Button(action: send) {
                     Image(systemName: "arrow.up")
-                        .font(AppTheme.Typography.scaled(12, weight: .bold))
-                        .frame(width: 28, height: 28)
+                        .font(AppTheme.Typography.scaled(11, weight: .bold))
+                        .frame(width: ComposerMetrics.buttonSize, height: ComposerMetrics.buttonSize)
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.white)
@@ -1710,7 +1710,7 @@ private struct ComposerView: View {
             }
         }
         .padding(.horizontal, AppTheme.Spacing.medium)
-        .padding(.vertical, 10)
+        .padding(.vertical, ComposerMetrics.verticalPadding)
         .frame(maxWidth: AppTheme.Metrics.composerMaximumWidth)
         .elevatedSurface(radius: AppTheme.Metrics.panelRadius)
         .padding(.horizontal, AppTheme.Spacing.extraLarge)
@@ -1729,8 +1729,15 @@ private struct ComposerView: View {
     .frame(width: 800, height: 720)
 }
 
-/// A round 28 pt hit area that lights up under the pointer, for the
-/// composer's icon buttons.
+/// The composer card's size: a one-line composer is the button height plus
+/// the vertical padding twice (42 pt).
+private enum ComposerMetrics {
+    static let buttonSize: CGFloat = 26
+    static let verticalPadding: CGFloat = 8
+}
+
+/// A round hit area, as large as the send button, that lights up under the
+/// pointer, for the composer's icon buttons.
 private struct CircleHoverButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         CircleHoverButton(configuration: configuration)
@@ -1749,7 +1756,7 @@ private struct CircleHoverButtonStyle: ButtonStyle {
 
         var body: some View {
             configuration.label
-                .frame(width: 28, height: 28)
+                .frame(width: ComposerMetrics.buttonSize, height: ComposerMetrics.buttonSize)
                 .background(Circle().fill(Color.primary.opacity(fillOpacity)))
                 .contentShape(Circle())
                 .opacity(isEnabled ? 1 : 0.45)
