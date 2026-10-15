@@ -1130,6 +1130,14 @@ struct LiveSessionTests {
         }
         core.emit(.notificationSettingSaved(requestID: invisibleRequestID))
         #expect(model.connectionState == .connected)
+
+        // Zulip counts code points: a family emoji is five of them, and a
+        // character is never cut in half.
+        let family = "👨‍👩‍👧"
+        let nearlyFull = String(repeating: "a", count: 58)
+        #expect(UserStatusDisplay.clampedText(nearlyFull + family) == nearlyFull)
+        #expect(UserStatusDisplay.clampedText(String(repeating: "中", count: 70)).count == 60)
+        #expect(UserStatusDisplay.clampedText("short") == "short")
     }
 
     @Test("Mixed timelines label each message with its topic")
@@ -1430,6 +1438,80 @@ struct LiveSessionTests {
         #expect(LiveSessionViewModel.marksMessagesRead(in: key))
         #expect(!LiveSessionViewModel.marksMessagesRead(in: .mentions(accountID: accountID)))
         #expect(!LiveSessionViewModel.marksMessagesRead(in: .starred(accountID: accountID)))
+    }
+
+    @Test("A message marked unread stays unread until the user leaves the conversation")
+    func markedUnreadIsKept() async throws {
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(
+            client: core,
+            credentialStore: MemoryCredentialStore()
+        )
+        model.isApplicationActive = { true }
+        model.startObserving()
+        let accountID = "account-1"
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: accountID),
+                credential: StoredAPICredential(accountID: accountID, apiKey: "key"),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.connectionState == .connected }
+
+        let key = ConversationKey.topic(accountID: accountID, streamID: 5, topic: "macOS")
+        func page(_ text: String) -> LiveConversationPage {
+            LiveConversationPage(
+                key: key,
+                messages: [
+                    LiveMessageSnapshot(
+                        messageID: 44,
+                        senderID: 22,
+                        senderFullName: "Theo Martin",
+                        timestamp: Date(timeIntervalSince1970: 1_700_000_000),
+                        content: [.paragraph([.text(text)])],
+                        streamID: 5,
+                        topic: "macOS",
+                        recipientIDs: []
+                    ),
+                ],
+                foundOldest: true,
+                foundNewest: true
+            )
+        }
+        let markReads = { [core] in
+            core.commands.filter {
+                if case .markRead = $0 { return true }
+                return false
+            }.count
+        }
+
+        model.openConversation(key)
+        core.emit(.conversationOpened(requestID: 100, page: page("first")))
+        await eventually { self.loadedMessage(model)?.plainText == "first" }
+        #expect(markReads() == 1)
+
+        let loaded = try #require(loadedMessage(model))
+        #expect(model.setRead(loaded, read: false))
+        guard case let .updateMessageFlag(flagID, _, [44], .read, false) = core.commands.last else {
+            Issue.record("Expected mark-unread command")
+            return
+        }
+        core.emit(
+            .messageFlagUpdated(requestID: flagID, messageIDs: [44], flag: .read, added: false)
+        )
+        // The flag change refreshes the conversation; the refresh must not read it again.
+        core.emit(.conversationOpened(requestID: 200, page: page("refreshed")))
+        await eventually { self.loadedMessage(model)?.plainText == "refreshed" }
+        #expect(markReads() == 1)
+
+        // Leaving and coming back reads it as usual.
+        model.openConversation(.mentions(accountID: accountID))
+        model.openConversation(key)
+        core.emit(.conversationOpened(requestID: 300, page: page("again")))
+        await eventually { self.loadedMessage(model)?.plainText == "again" }
+        #expect(markReads() == 2)
     }
 
     @Test("A locked screen counts as away even though the app stays frontmost")

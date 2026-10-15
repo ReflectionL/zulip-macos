@@ -4,8 +4,26 @@ import ZulipCoreBindings
 /// What a user says about themselves (Zulip's user status): a short text and an
 /// emoji, either of which may be empty.
 struct UserStatusDisplay: Equatable, Sendable {
-    /// Zulip rejects longer texts.
+    /// Zulip rejects longer texts. It counts Unicode code points, so one emoji
+    /// built from several (a family, a flag) counts as more than one.
     static let maximumTextLength = 60
+
+    /// `text` cut to whole characters that fit Zulip's limit.
+    static func clampedText(_ text: String) -> String {
+        guard text.unicodeScalars.count > maximumTextLength else {
+            return text
+        }
+        var result = ""
+        var used = 0
+        for character in text {
+            used += character.unicodeScalars.count
+            if used > maximumTextLength {
+                break
+            }
+            result.append(character)
+        }
+        return result
+    }
 
     var text: String
     var emojiName: String
@@ -226,7 +244,7 @@ struct UserStatusEditor: View {
     }
 
     private var canSave: Bool {
-        draft.text.count <= UserStatusDisplay.maximumTextLength
+        draft.text.unicodeScalars.count <= UserStatusDisplay.maximumTextLength
             && draft != (initial ?? UserStatusDisplay())
             && !(draft.isEmpty && !hasInitialStatus)
     }
@@ -276,8 +294,9 @@ struct UserStatusEditor: View {
                         if canSave { submit() }
                     }
                     .onChange(of: text) {
-                        if text.count > UserStatusDisplay.maximumTextLength {
-                            text = String(text.prefix(UserStatusDisplay.maximumTextLength))
+                        let clamped = UserStatusDisplay.clampedText(text)
+                        if clamped != text {
+                            text = clamped
                         }
                     }
 
