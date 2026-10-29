@@ -916,7 +916,7 @@ private struct MessageRow: View {
                     UserStatusEmoji(status: senderStatus, size: 13)
                     // The first message of a block always shows its time; the
                     // messages that continue it show theirs on hover.
-                    Text(message.timestamp, format: .dateTime.hour(.twoDigits(amPM: .narrow)).minute())
+                    Text(message.timestamp, format: MessageTimestamp.clockStyle())
                         .font(AppTheme.Typography.caption.monospacedDigit())
                         .foregroundStyle(AppTheme.Colors.tertiaryText)
                         .lineLimit(1)
@@ -941,7 +941,7 @@ private struct MessageRow: View {
             }
 
             HStack(alignment: .top, spacing: AppTheme.Spacing.medium) {
-                Text(message.timestamp, format: .dateTime.hour(.twoDigits(amPM: .narrow)).minute())
+                Text(message.timestamp, format: MessageTimestamp.clockStyle())
                     .font(AppTheme.Typography.caption.monospacedDigit())
                     .foregroundStyle(AppTheme.Colors.tertiaryText)
                     .lineLimit(1)

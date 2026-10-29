@@ -34,6 +34,26 @@ enum MessageTimestamp {
         return "\(date.formatted(dateStyle)) \(time)"
     }
 
+    /// The short clock time beside a message, such as "12:05" (or "12:05 p" on a
+    /// 12-hour system). Minutes always take two digits: with only the hour pinned
+    /// to two digits, the formatter wrote 12:05 as "12:5".
+    static func clockTime(
+        _ date: Date,
+        calendar: Calendar = .current,
+        locale: Locale = .current
+    ) -> String {
+        date.formatted(clockStyle(calendar: calendar, locale: locale))
+    }
+
+    static func clockStyle(
+        calendar: Calendar = .current,
+        locale: Locale = .current
+    ) -> Date.FormatStyle {
+        Date.FormatStyle(locale: locale, calendar: calendar, timeZone: calendar.timeZone)
+            .hour(.twoDigits(amPM: .narrow))
+            .minute(.twoDigits)
+    }
+
     /// The date separator's label: "Today", "Yesterday", or the weekday and date.
     /// Days follow `calendar`, which is the system's calendar and time zone.
     static func dayLabel(
