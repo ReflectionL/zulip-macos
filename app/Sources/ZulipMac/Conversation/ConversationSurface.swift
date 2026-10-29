@@ -305,7 +305,9 @@ struct ConversationSurface: View {
                         .frame(maxWidth: AppTheme.Metrics.messageMaximumWidth)
                         .frame(maxWidth: .infinity)
                         .padding(.horizontal, AppTheme.Spacing.extraLarge)
-                        // Keeps the newest message clear of the bottom fade.
+                        // Keep the first and newest messages clear of the fades
+                        // while the timeline is at rest.
+                        .padding(.top, TimelineEdgeFade.topClearance)
                         .padding(.bottom, TimelineEdgeFade.bottomLength)
                     }
                     .defaultScrollAnchor(.bottom, for: .initialOffset)
@@ -319,13 +321,28 @@ struct ConversationSurface: View {
                         toolbarInset = inset
                     }
                     .mask { TimelineEdgeFade(toolbarInset: toolbarInset) }
-                    .onScrollGeometryChange(for: Bool.self) { geometry in
-                        let remaining = geometry.contentSize.height
-                            - geometry.contentOffset.y
-                            - geometry.containerSize.height
-                        return remaining < 72
-                    } action: { _, isAtBottom in
-                        followsNewest = isAtBottom
+                    .onScrollGeometryChange(for: TimelineScrollMetrics.self) { geometry in
+                        TimelineScrollMetrics(
+                            contentHeight: geometry.contentSize.height,
+                            offset: geometry.contentOffset.y,
+                            containerHeight: geometry.containerSize.height
+                        )
+                    } action: { old, new in
+                        // Content that grows under a still scroll position (a new
+                        // message, a picture that finished loading) is not the
+                        // user scrolling away. Judging it by the distance left
+                        // used to stop following whenever the new content was
+                        // taller than the threshold, before the scroll to the
+                        // newest message ran.
+                        if new.contentHeight > old.contentHeight,
+                           abs(new.offset - old.offset) < 1
+                        {
+                            if followsNewest {
+                                proxy.scrollTo(TimelineAnchor.bottom, anchor: .bottom)
+                            }
+                            return
+                        }
+                        followsNewest = new.isNearBottom
                     }
                     .task(
                         id: TimelineFocus(
@@ -623,6 +640,20 @@ private enum TimelineAnchor: Hashable {
     case bottom
 }
 
+/// Where the timeline is scrolled, for deciding whether it follows the newest message.
+struct TimelineScrollMetrics: Equatable {
+    var contentHeight: CGFloat
+    var offset: CGFloat
+    var containerHeight: CGFloat
+
+    /// Within this distance of the end, the timeline keeps following new messages.
+    static let followThreshold: CGFloat = 72
+
+    var isNearBottom: Bool {
+        contentHeight - offset - containerHeight < Self.followThreshold
+    }
+}
+
 private struct TimelineFocus: Hashable {
     let key: ConversationKey
     let messageID: Int64?
@@ -660,29 +691,44 @@ extension View {
 /// it out above the composer, so messages never end in a hard edge. Nothing
 /// fades at rest: the first message starts below the top band and the timeline
 /// keeps `bottomLength` of empty space under the newest one.
+///
+/// The bands are long and follow an ease-in-out curve: short linear ramps (18
+/// and 16 pt before) showed a visible line where the fade began.
 private struct TimelineEdgeFade: View {
     let toolbarInset: CGFloat
 
-    /// How far the top fade starts above the toolbar's lower edge and ends below it.
-    private static let leadIn: CGFloat = 6
-    private static let topLength: CGFloat = 18
-    static let bottomLength: CGFloat = 16
+    /// How far the top fade starts above the toolbar's lower edge.
+    private static let leadIn: CGFloat = 8
+    private static let topLength: CGFloat = 36
+    static let bottomLength: CGFloat = 32
+
+    /// Extra space above the first message, so that with its own top padding it
+    /// starts below the top band.
+    static var topClearance: CGFloat {
+        max(topLength - leadIn - AppTheme.Metrics.blockTopInset, 0)
+    }
+
+    /// Opacity stops of a smoothstep curve, from clear to opaque.
+    private static let easedStops: [Gradient.Stop] = (0...8).map { step in
+        let t = Double(step) / 8
+        return Gradient.Stop(color: .black.opacity(t * t * (3 - 2 * t)), location: t)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             Color.clear
                 .frame(height: max(toolbarInset - Self.leadIn, 0))
             LinearGradient(
-                colors: [.clear, .black],
+                stops: Self.easedStops,
                 startPoint: .top,
                 endPoint: .bottom
             )
             .frame(height: Self.topLength)
             Color.black
             LinearGradient(
-                colors: [.black, .clear],
-                startPoint: .top,
-                endPoint: .bottom
+                stops: Self.easedStops,
+                startPoint: .bottom,
+                endPoint: .top
             )
             .frame(height: Self.bottomLength)
         }
