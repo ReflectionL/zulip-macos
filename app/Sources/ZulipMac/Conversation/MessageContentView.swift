@@ -85,17 +85,17 @@ private struct QuoteCard: View {
             .foregroundStyle(AppTheme.Colors.secondaryText)
         }
         .padding(.vertical, AppTheme.Spacing.small)
-        .padding(.leading, AppTheme.Spacing.medium + 2)
+        .padding(.leading, AppTheme.Spacing.medium + 3)
         .padding(.trailing, AppTheme.Spacing.medium)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(AppTheme.Colors.sidebar)
+        .background(AppTheme.Colors.surfaceSunken)
         .overlay(alignment: .leading) {
             Rectangle()
-                .fill(AppTheme.Colors.tertiaryText.opacity(0.7))
-                .frame(width: 2)
+                .fill(AppTheme.Colors.tertiaryText.opacity(0.5))
+                .frame(width: 3)
         }
         .clipShape(
-            RoundedRectangle(cornerRadius: AppTheme.Metrics.controlRadius, style: .continuous)
+            RoundedRectangle(cornerRadius: AppTheme.Radius.medium, style: .continuous)
         )
         .accessibilityElement(children: .contain)
         .accessibilityLabel(
@@ -110,7 +110,7 @@ private struct QuoteCard: View {
             Text(attribution.name)
                 .fontWeight(.medium)
         }
-        .font(AppTheme.Typography.metadata)
+        .font(AppTheme.Typography.caption)
         .foregroundStyle(AppTheme.Colors.secondaryText)
 
         if let link = attribution.link {
@@ -142,8 +142,8 @@ private struct ContentBlockView: View {
 
         case let .quote(blocks):
             HStack(alignment: .top, spacing: AppTheme.Spacing.medium) {
-                RoundedRectangle(cornerRadius: 1)
-                    .fill(AppTheme.Colors.accent.opacity(0.7))
+                Capsule()
+                    .fill(AppTheme.Colors.tertiaryText.opacity(0.5))
                     .frame(width: 3)
 
                 AnyView(
@@ -161,11 +161,11 @@ private struct ContentBlockView: View {
             .accessibilityLabel("Quote, \(blocks.map(\.plainText).joined(separator: " "))")
 
         case let .list(items, ordered):
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: AppTheme.Spacing.small) {
                 ForEach(Array(items.enumerated()), id: \.offset) { index, item in
                     HStack(alignment: .top, spacing: AppTheme.Spacing.small) {
                         Text(ordered ? "\(index + 1)." : "•")
-                            .font(AppTheme.Typography.bodyEmphasized)
+                            .font(AppTheme.Typography.bodyStrong)
                             .foregroundStyle(AppTheme.Colors.secondaryText)
                             .frame(width: 20, alignment: .trailing)
 
@@ -189,7 +189,7 @@ private struct ContentBlockView: View {
             VStack(alignment: .leading, spacing: 0) {
                 if let language {
                     Text(language.uppercased())
-                        .font(AppTheme.Typography.eyebrow)
+                        .font(AppTheme.Typography.captionStrong)
                         .foregroundStyle(AppTheme.Colors.tertiaryText)
                         .padding(.horizontal, AppTheme.Spacing.medium)
                         .padding(.top, AppTheme.Spacing.small)
@@ -203,20 +203,14 @@ private struct ContentBlockView: View {
                         .padding(AppTheme.Spacing.medium)
                 }
             }
-            .background(AppTheme.Colors.sidebar)
+            // A recessed fill alone; an outline on top of it read as heavy.
+            .background(AppTheme.Colors.surfaceSunken)
             .clipShape(
                 RoundedRectangle(
-                    cornerRadius: AppTheme.Metrics.controlRadius,
+                    cornerRadius: AppTheme.Radius.medium,
                     style: .continuous
                 )
             )
-            .overlay {
-                RoundedRectangle(
-                    cornerRadius: AppTheme.Metrics.controlRadius,
-                    style: .continuous
-                )
-                .stroke(AppTheme.Colors.subtleStroke, lineWidth: 1)
-            }
             .accessibilityLabel("Code\(language.map { ", \($0)" } ?? ""), \(value)")
 
         case let .image(url, alt, width, height):
@@ -254,10 +248,10 @@ private struct ContentBlockView: View {
                 .foregroundStyle(AppTheme.Colors.secondaryText)
                 .padding(AppTheme.Spacing.medium)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(AppTheme.Colors.sidebar)
+                .background(AppTheme.Colors.surfaceSunken)
                 .clipShape(
                     RoundedRectangle(
-                        cornerRadius: AppTheme.Metrics.controlRadius,
+                        cornerRadius: AppTheme.Radius.medium,
                         style: .continuous
                     )
                 )
@@ -269,10 +263,10 @@ private struct ContentBlockView: View {
 extension ContentBlockView {
     static func headingFont(level: Int) -> Font {
         switch level {
-        case 1: AppTheme.Typography.scaled(22, weight: .semibold)
-        case 2: AppTheme.Typography.scaled(19, weight: .semibold)
-        case 3: AppTheme.Typography.scaled(16.5, weight: .semibold)
-        default: AppTheme.Typography.scaled(14, weight: .semibold)
+        case 1: AppTheme.Typography.display
+        case 2: AppTheme.Typography.headline
+        case 3: AppTheme.Typography.title
+        default: AppTheme.Typography.bodyStrong
         }
     }
 }
@@ -295,7 +289,7 @@ private struct MessageTableView: View {
                             cellView(cell, column: column, isHeader: true)
                         }
                     }
-                    .background(AppTheme.Colors.sidebar)
+                    .background(AppTheme.Colors.surfaceSunken)
                     Divider()
                 }
                 ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
@@ -311,11 +305,11 @@ private struct MessageTableView: View {
             }
         }
         .clipShape(
-            RoundedRectangle(cornerRadius: AppTheme.Metrics.controlRadius, style: .continuous)
+            RoundedRectangle(cornerRadius: AppTheme.Radius.medium, style: .continuous)
         )
         .overlay {
-            RoundedRectangle(cornerRadius: AppTheme.Metrics.controlRadius, style: .continuous)
-                .stroke(AppTheme.Colors.subtleStroke, lineWidth: 1)
+            RoundedRectangle(cornerRadius: AppTheme.Radius.medium, style: .continuous)
+                .strokeBorder(AppTheme.Colors.stroke, lineWidth: AppTheme.Metrics.hairline)
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Table, \(rows.count) rows")
@@ -325,7 +319,7 @@ private struct MessageTableView: View {
         let alignment = column < alignments.count ? alignments[column] : .leading
         return InlineContentText(
             content: cell,
-            font: isHeader ? AppTheme.Typography.bodyEmphasized : AppTheme.Typography.body
+            font: isHeader ? AppTheme.Typography.bodyStrong : AppTheme.Typography.body
         )
         .multilineTextAlignment(textAlignment(alignment))
         .frame(maxWidth: Self.maximumCellWidth, alignment: frameAlignment(alignment))
@@ -359,8 +353,9 @@ private struct InlineContentText: View {
     var body: some View {
         Text(attributedContent)
             .font(font)
+            .lineSpacing(AppTheme.Typography.bodyLineSpacing)
             .foregroundStyle(AppTheme.Colors.primaryText)
-            .tint(AppTheme.Colors.accent)
+            .tint(AppTheme.Colors.accentText)
             .textSelection(.enabled)
             .fixedSize(horizontal: false, vertical: true)
     }
@@ -369,7 +364,7 @@ private struct InlineContentText: View {
         var result = Self.attributed(content, inherited: [])
         if let trailingNote {
             var note = AttributedString(" " + trailingNote)
-            note.font = AppTheme.Typography.metadata
+            note.font = AppTheme.Typography.caption
             note.foregroundColor = AppTheme.Colors.tertiaryText
             result.append(note)
         }
@@ -387,7 +382,7 @@ private struct InlineContentText: View {
             case let .styled(style, children):
                 fragment = attributed(children, inherited: inherited.union(intent(for: style)))
                 if style == .code {
-                    fragment.backgroundColor = AppTheme.Colors.hover
+                    fragment.backgroundColor = AppTheme.Colors.fillHover
                 }
             case .text, .emoji:
                 fragment = AttributedString(item.plainText)
@@ -397,12 +392,12 @@ private struct InlineContentText: View {
             case let .link(label, url):
                 fragment = AttributedString(label)
                 fragment.link = URL(string: url)
-                fragment.foregroundColor = AppTheme.Colors.accent
+                fragment.foregroundColor = AppTheme.Colors.accentText
                 fragment.underlineStyle = .single
             case .mention:
                 fragment = AttributedString(item.plainText)
-                fragment.foregroundColor = AppTheme.Colors.accent
-                fragment.font = AppTheme.Typography.scaled(14, weight: .semibold)
+                fragment.foregroundColor = AppTheme.Colors.accentText
+                fragment.font = AppTheme.Typography.bodyStrong
             }
 
             if !inherited.isEmpty, !isStyled(item) {
@@ -450,8 +445,8 @@ private struct NativeImageBlock: View {
                 } else {
                     LinearGradient(
                         colors: [
-                            AppTheme.Colors.accent.opacity(0.45),
-                            AppTheme.Colors.sidebar,
+                            AppTheme.Colors.accentSoft,
+                            AppTheme.Colors.surfaceSunken,
                         ],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
@@ -460,11 +455,11 @@ private struct NativeImageBlock: View {
                     if url.hasPrefix("fixture://") {
                         VStack(spacing: AppTheme.Spacing.medium) {
                             Image(systemName: "macwindow")
-                                .font(AppTheme.Typography.scaled(34, weight: .light))
+                                .font(AppTheme.Typography.scaled(34))
                             Text("Zulip Mac")
-                                .font(AppTheme.Typography.scaled(20, weight: .semibold))
+                                .font(AppTheme.Typography.display)
                             Text("Native conversation surface")
-                                .font(AppTheme.Typography.metadata)
+                                .font(AppTheme.Typography.caption)
                         }
                         .foregroundStyle(AppTheme.Colors.primaryText)
                     } else if let failure {
@@ -477,7 +472,7 @@ private struct NativeImageBlock: View {
                             Button("Retry") { retryMedia?(url) }
                                 .buttonStyle(.borderless)
                         }
-                        .font(AppTheme.Typography.metadata)
+                        .font(AppTheme.Typography.caption)
                         .foregroundStyle(AppTheme.Colors.destructive)
                         .padding()
                     } else if decodeFailed {
@@ -486,7 +481,7 @@ private struct NativeImageBlock: View {
                             Text("The file is damaged or its format is not supported.")
                                 .foregroundStyle(AppTheme.Colors.tertiaryText)
                         }
-                        .font(AppTheme.Typography.metadata)
+                        .font(AppTheme.Typography.caption)
                         .foregroundStyle(AppTheme.Colors.secondaryText)
                         .multilineTextAlignment(.center)
                         .padding()
@@ -502,16 +497,16 @@ private struct NativeImageBlock: View {
             .frame(maxWidth: min(Self.maximumWidth, Self.maximumHeight * aspectRatio))
             .clipShape(
                 RoundedRectangle(
-                    cornerRadius: AppTheme.Metrics.panelRadius,
+                    cornerRadius: AppTheme.Radius.large,
                     style: .continuous
                 )
             )
             .overlay {
                 RoundedRectangle(
-                    cornerRadius: AppTheme.Metrics.panelRadius,
+                    cornerRadius: AppTheme.Radius.large,
                     style: .continuous
                 )
-                .stroke(AppTheme.Colors.subtleStroke, lineWidth: 1)
+                .stroke(AppTheme.Colors.stroke, lineWidth: 1)
             }
             .contentShape(Rectangle())
             .onTapGesture(perform: openFullSize)
@@ -519,7 +514,7 @@ private struct NativeImageBlock: View {
 
             if showsCaption {
                 Text(alt)
-                    .font(AppTheme.Typography.metadata)
+                    .font(AppTheme.Typography.caption)
                     .foregroundStyle(AppTheme.Colors.secondaryText)
             }
         }

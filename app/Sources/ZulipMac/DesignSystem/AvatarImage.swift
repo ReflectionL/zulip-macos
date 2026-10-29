@@ -29,7 +29,7 @@ struct AvatarImage: View {
     let remoteURL: String?
     let size: CGFloat
     var cornerRadius: CGFloat?
-    var fallbackFill: Color = AppTheme.Colors.hover
+    var fallbackFill: Color = AppTheme.Colors.fillPressed
     var fallbackForeground: Color = AppTheme.Colors.primaryText
     var mediaLocalURLs: [String: String] = [:]
     var requestMedia: ((String) -> Void)?

@@ -59,6 +59,9 @@ struct SidebarView: View {
     var requestMedia: ((String) -> Void)?
     @Environment(UpdateController.self) private var updates: UpdateController?
     @State private var isProfilePopoverShown = false
+    /// The channel row under the pointer; its chevron and "+" show only then
+    /// (or while it is selected or expanded).
+    @State private var hoveredChannelID: Int64?
 
     /// Zulip's three levels for a topic. Inside a muted channel a topic is
     /// either left muted with its channel or unmuted.
@@ -100,17 +103,17 @@ struct SidebarView: View {
                     Text("Search or jump")
                     Spacer()
                     Text("⌘K")
-                        .font(AppTheme.Typography.metadata)
+                        .font(AppTheme.Typography.caption)
                         .foregroundStyle(AppTheme.Colors.tertiaryText)
                 }
-                .font(AppTheme.Typography.sidebar)
+                .font(AppTheme.Typography.callout)
                 .foregroundStyle(AppTheme.Colors.secondaryText)
                 .padding(.horizontal, AppTheme.Spacing.small)
-                .frame(minHeight: 32)
-                .background(AppTheme.Colors.hover.opacity(0.65))
+                .frame(minHeight: AppTheme.ControlHeight.row)
+                .background(AppTheme.Colors.fillHover)
                 .clipShape(
                     RoundedRectangle(
-                        cornerRadius: AppTheme.Metrics.controlRadius,
+                        cornerRadius: AppTheme.Radius.medium,
                         style: .continuous
                     )
                 )
@@ -146,23 +149,26 @@ struct SidebarView: View {
                     if model.areChannelsExpanded {
                         ForEach(model.snapshot.channels) { channel in
                             let key = model.key(for: channel)
+                            let isExpanded = model.isChannelExpanded(channel.streamID)
+                            let showsAccessories = hoveredChannelID == channel.streamID
+                                || selection == key
                             HStack(spacing: 0) {
                                 Button {
                                     model.toggleChannel(channel.streamID)
                                 } label: {
                                     Image(systemName: "chevron.right")
                                         .font(AppTheme.Typography.scaled(9, weight: .semibold))
-                                        .rotationEffect(
-                                            .degrees(
-                                                model.isChannelExpanded(channel.streamID)
-                                                    ? 90
-                                                    : 0
-                                            )
+                                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                                        .motion(AppTheme.Motion.base, value: isExpanded)
+                                        .frame(
+                                            width: AppTheme.Metrics.topicIndent,
+                                            height: AppTheme.ControlHeight.row
                                         )
-                                        .frame(width: 22, height: 32)
                                 }
-                                .buttonStyle(.plain)
+                                .buttonStyle(HoverFillButtonStyle())
                                 .foregroundStyle(AppTheme.Colors.tertiaryText)
+                                // An expanded channel keeps its chevron as a state mark.
+                                .opacity(showsAccessories || isExpanded ? 1 : 0)
                                 .help(
                                     model.isChannelExpanded(channel.streamID)
                                         ? "Collapse topics"
@@ -179,13 +185,16 @@ struct SidebarView: View {
                                     isMuted: channel.isMuted,
                                     leading: {
                                         Circle()
-                                            .fill(Color(hex: channel.colorHex))
+                                            .fill(ChannelColor.color(hex: channel.colorHex))
                                             .frame(width: 8, height: 8)
                                     }
                                 ) {
                                     selection = key
                                 }
                                 .contextMenu {
+                                    Button("New topic…") {
+                                        startNewTopic(channel)
+                                    }
                                     if let setChannelNotifications {
                                         Button(
                                             channel.notifiesForAllMessages
@@ -210,13 +219,22 @@ struct SidebarView: View {
                                 } label: {
                                     Image(systemName: "plus")
                                         .font(AppTheme.Typography.scaled(10, weight: .semibold))
-                                        .frame(width: 24, height: 32)
+                                        .frame(width: 24, height: AppTheme.ControlHeight.row)
                                 }
-                                .buttonStyle(.plain)
+                                .buttonStyle(HoverFillButtonStyle())
                                 .foregroundStyle(AppTheme.Colors.tertiaryText)
+                                .opacity(showsAccessories ? 1 : 0)
                                 .help("Start a new topic in \(channel.name)")
                                 .accessibilityLabel("New topic in \(channel.name)")
                             }
+                            .onHover { isHovering in
+                                if isHovering {
+                                    hoveredChannelID = channel.streamID
+                                } else if hoveredChannelID == channel.streamID {
+                                    hoveredChannelID = nil
+                                }
+                            }
+                            .animation(AppTheme.Motion.fast, value: showsAccessories)
 
                             if model.isChannelExpanded(channel.streamID) {
                                 ForEach(channel.topics) { topic in
@@ -242,7 +260,7 @@ struct SidebarView: View {
                                             )
                                         }
                                     }
-                                    .padding(.leading, 22)
+                                    .padding(.leading, AppTheme.Metrics.topicIndent)
                                 }
                             }
                         }
@@ -314,11 +332,11 @@ struct SidebarView: View {
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(model.snapshot.organizationName)
-                    .font(AppTheme.Typography.sidebarEmphasized)
+                    .font(AppTheme.Typography.calloutMedium)
                     .foregroundStyle(AppTheme.Colors.primaryText)
                     .lineLimit(1)
                 Text(model.snapshot.organizationHost)
-                    .font(AppTheme.Typography.metadata)
+                    .font(AppTheme.Typography.caption)
                     .foregroundStyle(AppTheme.Colors.secondaryText)
                     .lineLimit(1)
             }
@@ -343,7 +361,7 @@ struct SidebarView: View {
             ownAvatar(size: 24)
 
             Text(model.snapshot.currentUserName)
-                .font(AppTheme.Typography.sidebar)
+                .font(AppTheme.Typography.callout)
                 .lineLimit(1)
 
             if let profileStatus {
@@ -459,10 +477,9 @@ private struct SidebarSectionHeader: View {
                     Image(systemName: "plus")
                         .font(AppTheme.Typography.scaled(11, weight: .semibold))
                         .foregroundStyle(AppTheme.Colors.tertiaryText)
-                        .frame(width: 26, height: 28)
-                        .contentShape(Rectangle())
+                        .frame(width: 26, height: AppTheme.ControlHeight.regular)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(HoverFillButtonStyle())
                 .help(addTitle)
                 .accessibilityLabel(addTitle)
             }
@@ -475,21 +492,22 @@ private struct SidebarSectionHeader: View {
                 Image(systemName: "chevron.right")
                     .font(AppTheme.Typography.scaled(9, weight: .semibold))
                     .rotationEffect(.degrees(isExpanded ? 90 : 0))
-                    .animation(.snappy(duration: 0.18), value: isExpanded)
+                    .motion(AppTheme.Motion.base, value: isExpanded)
                     .frame(width: 10)
+                    .foregroundStyle(AppTheme.Colors.tertiaryText)
 
-                Text(title.uppercased())
-                    .font(AppTheme.Typography.eyebrow)
-                    .tracking(0.45)
+                Text(title)
+                    .font(AppTheme.Typography.label)
+                    .foregroundStyle(AppTheme.Colors.secondaryText)
 
                 Spacer()
 
                 Text("\(count)")
-                    .font(AppTheme.Typography.metadata.monospacedDigit())
+                    .font(AppTheme.Typography.caption.monospacedDigit())
+                    .foregroundStyle(AppTheme.Colors.tertiaryText)
             }
-            .foregroundStyle(AppTheme.Colors.tertiaryText)
             .padding(.horizontal, AppTheme.Spacing.small)
-            .frame(minHeight: 28)
+            .frame(minHeight: AppTheme.ControlHeight.regular)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -547,8 +565,8 @@ private struct SidebarRow<Leading: View>: View {
                 Text(title)
                     .font(
                         unreadCount > 0
-                            ? AppTheme.Typography.sidebarEmphasized
-                            : AppTheme.Typography.sidebar
+                            ? AppTheme.Typography.calloutStrong
+                            : AppTheme.Typography.callout
                     )
                     .lineLimit(1)
 
@@ -565,15 +583,16 @@ private struct SidebarRow<Leading: View>: View {
 
                 if unreadCount > 0 {
                     Text("\(unreadCount)")
-                        .font(AppTheme.Typography.scaled(10, weight: .semibold).monospacedDigit())
+                        .font(AppTheme.Typography.captionStrong.monospacedDigit())
                         .foregroundStyle(
                             isSelected
                                 ? AppTheme.Colors.primaryText
                                 : AppTheme.Colors.secondaryText
                         )
-                        .padding(.horizontal, 5)
+                        .padding(.horizontal, AppTheme.Spacing.extraSmall + 1)
                         .frame(minWidth: 20, minHeight: 18)
-                        .background(AppTheme.Colors.hover)
+                        // Darker than the hover fill, so a badge never looks hovered.
+                        .background(AppTheme.Colors.fillPressed)
                         .clipShape(Capsule())
                 }
             }
@@ -583,24 +602,26 @@ private struct SidebarRow<Leading: View>: View {
                     : AppTheme.Colors.primaryText
             )
             .padding(.horizontal, AppTheme.Spacing.small)
-            .frame(minHeight: 32)
+            .frame(minHeight: AppTheme.ControlHeight.row)
             .contentShape(Rectangle())
             .background {
                 RoundedRectangle(
-                    cornerRadius: AppTheme.Metrics.controlRadius,
+                    cornerRadius: AppTheme.Radius.medium,
                     style: .continuous
                 )
                 .fill(
                     isSelected
-                        ? AppTheme.Colors.selection
+                        ? AppTheme.Colors.accentSoft
                         : isHovered
-                            ? AppTheme.Colors.hover
+                            ? AppTheme.Colors.fillHover
                             : .clear
                 )
             }
         }
         .buttonStyle(.plain)
         .onHover { isHovered = $0 }
+        .animation(AppTheme.Motion.fast, value: isHovered)
+        .animation(AppTheme.Motion.fast, value: isSelected)
         .accessibilityLabel(title)
         .accessibilityValue(unreadCount > 0 ? "\(unreadCount) unread" : "")
         .accessibilityAddTraits(isSelected ? .isSelected : [])
@@ -665,18 +686,6 @@ private struct AvatarView: View {
         case .offline:
             AppTheme.Colors.tertiaryText
         }
-    }
-}
-
-private extension Color {
-    init(hex: String) {
-        let sanitized = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
-        let value = UInt64(sanitized, radix: 16) ?? 0x808080
-        self.init(
-            red: Double((value >> 16) & 0xFF) / 255,
-            green: Double((value >> 8) & 0xFF) / 255,
-            blue: Double(value & 0xFF) / 255
-        )
     }
 }
 

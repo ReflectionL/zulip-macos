@@ -34,7 +34,7 @@ struct RenameChannelSheet: View {
                 Text("Rename channel")
                     .font(AppTheme.Typography.title)
                 Text("Everyone in the organization sees the new name. Only people the server allows can rename a channel.")
-                    .font(AppTheme.Typography.metadata)
+                    .font(AppTheme.Typography.caption)
                     .foregroundStyle(AppTheme.Colors.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -45,7 +45,7 @@ struct RenameChannelSheet: View {
 
             if case let .failed(message) = session.channelRenameState {
                 Label(message, systemImage: "exclamationmark.triangle")
-                    .font(AppTheme.Typography.metadata)
+                    .font(AppTheme.Typography.caption)
                     .foregroundStyle(AppTheme.Colors.destructive)
                     .fixedSize(horizontal: false, vertical: true)
             }

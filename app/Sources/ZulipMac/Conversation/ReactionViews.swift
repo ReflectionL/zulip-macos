@@ -14,29 +14,30 @@ struct ReactionChips: View {
                 Button {
                     react(reaction.target)
                 } label: {
-                    HStack(spacing: 4) {
+                    HStack(spacing: AppTheme.Spacing.extraSmall) {
                         Text(Self.glyph(for: reaction))
                         Text("\(reaction.count)")
                             .monospacedDigit()
                     }
-                    .font(AppTheme.Typography.metadata)
-                    .padding(.horizontal, 7)
-                    .frame(height: 24)
+                    .font(AppTheme.Typography.caption)
+                    .padding(.horizontal, AppTheme.Spacing.small)
+                    .frame(height: AppTheme.ControlHeight.compact)
                     .background(
                         reaction.includesMe
-                            ? AppTheme.Colors.accent.opacity(0.18)
-                            : AppTheme.Colors.hover
+                            ? AppTheme.Colors.accentSoft
+                            : AppTheme.Colors.surfaceSunken
                     )
                     .overlay {
                         Capsule()
                             .strokeBorder(
-                                AppTheme.Colors.accent.opacity(reaction.includesMe ? 0.7 : 0),
-                                lineWidth: 1
+                                reaction.includesMe ? AppTheme.Colors.accentOutline : AppTheme.Colors.stroke,
+                                lineWidth: AppTheme.Metrics.hairline
                             )
                     }
                     .clipShape(Capsule())
+                    .animation(AppTheme.Motion.fast, value: reaction.includesMe)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(HoverFillButtonStyle(cornerRadius: AppTheme.ControlHeight.compact / 2))
                 .disabled(isDisabled)
                 .help(":\(reaction.emojiName):")
                 .accessibilityLabel(
@@ -83,7 +84,7 @@ struct ReactionPicker: View {
     var body: some View {
         VStack(alignment: .leading, spacing: AppTheme.Spacing.small) {
             Text("Quick reactions")
-                .font(AppTheme.Typography.metadata)
+                .font(AppTheme.Typography.caption)
                 .foregroundStyle(AppTheme.Colors.secondaryText)
             HStack(spacing: 2) {
                 ForEach(EmojiCatalog.recommended) { entry in
@@ -101,7 +102,7 @@ struct ReactionPicker: View {
             let results = EmojiCatalog.search(query)
             if results.isEmpty {
                 Text("No matching emoji")
-                    .font(AppTheme.Typography.metadata)
+                    .font(AppTheme.Typography.caption)
                     .foregroundStyle(AppTheme.Colors.secondaryText)
                     .frame(maxWidth: .infinity, minHeight: 120)
             } else {
@@ -129,12 +130,11 @@ struct ReactionPicker: View {
                 .font(.system(size: size))
                 .frame(width: 34, height: 34)
                 .background(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(used ? AppTheme.Colors.accent.opacity(0.2) : .clear)
+                    RoundedRectangle(cornerRadius: AppTheme.Radius.small, style: .continuous)
+                        .fill(used ? AppTheme.Colors.accentSoft : .clear)
                 )
-                .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(HoverFillButtonStyle())
         .help(":\(entry.name):")
         .accessibilityLabel(entry.name.replacingOccurrences(of: "_", with: " "))
     }

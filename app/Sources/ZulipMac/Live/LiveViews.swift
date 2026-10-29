@@ -67,7 +67,7 @@ struct LiveLoginView: View {
                     Text("Connect to Zulip")
                         .font(AppTheme.Typography.title)
                     Text("Sign in to your Zulip organization.")
-                        .font(AppTheme.Typography.metadata)
+                        .font(AppTheme.Typography.caption)
                         .foregroundStyle(AppTheme.Colors.secondaryText)
                 }
                 Spacer()
@@ -94,7 +94,7 @@ private struct ConnectionStatusPill: View {
             ProgressView()
                 .controlSize(.small)
             Text(text)
-                .font(AppTheme.Typography.metadata)
+                .font(AppTheme.Typography.caption)
                 .foregroundStyle(AppTheme.Colors.secondaryText)
         }
         .padding(.horizontal, AppTheme.Spacing.medium)
@@ -114,6 +114,12 @@ private struct LiveWindowView: View {
     @State private var isCreatingChannel = false
     @State private var channelRenameTarget: ChannelSnapshot?
     @State private var isEditingStatus = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// Panels slide down from the top, or only fade in with Reduce Motion on.
+    private var panelTransition: AnyTransition {
+        reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity)
+    }
 
     init(session: LiveSessionViewModel) {
         self.session = session
@@ -208,7 +214,7 @@ private struct LiveWindowView: View {
 
                 CommandPaletteView(navigation: navigation)
                     .padding(.top, 74)
-                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .transition(panelTransition)
             }
 
             if isMessageSearchPresented {
@@ -226,13 +232,13 @@ private struct LiveWindowView: View {
                     dismiss: dismissMessageSearch
                 )
                 .padding(.top, 74)
-                .transition(.move(edge: .top).combined(with: .opacity))
+                .transition(panelTransition)
             }
 
             if let statusText = connectionStatusText {
                 ConnectionStatusPill(text: statusText)
                     .padding(.top, AppTheme.Spacing.small)
-                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .transition(panelTransition)
             }
 
             Button("Open quick switcher") {
@@ -272,9 +278,9 @@ private struct LiveWindowView: View {
             .frame(width: 0, height: 0)
             .opacity(0)
         }
-        .animation(.snappy(duration: 0.2), value: navigation.isCommandPalettePresented)
-        .animation(.snappy(duration: 0.2), value: isMessageSearchPresented)
-        .animation(.snappy(duration: 0.2), value: session.connectionState)
+        .animation(AppTheme.Motion.base, value: navigation.isCommandPalettePresented)
+        .animation(AppTheme.Motion.base, value: isMessageSearchPresented)
+        .animation(AppTheme.Motion.base, value: session.connectionState)
         .onChange(of: navigation.selection) {
             navigation.dismissCommandPalette()
             if suppressedSelectionOpen == navigation.selection {
@@ -611,7 +617,7 @@ private struct LiveTopicActionSheet: View {
                 Text(title)
                     .font(AppTheme.Typography.title)
                 Text(explanation)
-                    .font(AppTheme.Typography.metadata)
+                    .font(AppTheme.Typography.caption)
                     .foregroundStyle(AppTheme.Colors.secondaryText)
             }
 
@@ -633,7 +639,7 @@ private struct LiveTopicActionSheet: View {
                context.isServerMutation
             {
                 Label(message, systemImage: "exclamationmark.triangle")
-                    .font(AppTheme.Typography.metadata)
+                    .font(AppTheme.Typography.caption)
                     .foregroundStyle(AppTheme.Colors.destructive)
                 Button("Retry last request") {
                     session.retryTopicAction()

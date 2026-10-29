@@ -82,6 +82,7 @@ struct ConversationSurface: View {
     /// stays on screen past midnight does not keep yesterday's labels.
     @State private var labelsReferenceDate = Date.now
     @FocusState private var isComposerFocused: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(
         page: ConversationPage,
@@ -190,7 +191,7 @@ struct ConversationSurface: View {
                         .buttonStyle(.plain)
                         .fontWeight(.semibold)
                 }
-                .font(AppTheme.Typography.metadata)
+                .font(AppTheme.Typography.caption)
                 .foregroundStyle(AppTheme.Colors.secondaryText)
                 .padding(.horizontal, AppTheme.Spacing.large)
                 .frame(height: 34)
@@ -219,7 +220,7 @@ struct ConversationSurface: View {
                                 }
                                 .buttonStyle(.borderless)
                                 .disabled(isLoadingEarlier || loadEarlier == nil)
-                                .font(AppTheme.Typography.metadata)
+                                .font(AppTheme.Typography.caption)
                                 .foregroundStyle(AppTheme.Colors.secondaryText)
                                 .padding(.vertical, AppTheme.Spacing.large)
                             }
@@ -350,23 +351,29 @@ struct ConversationSurface: View {
                         proxy.scrollTo(TimelineAnchor.bottom, anchor: .bottom)
                     }
 
-                    if !followsNewest {
-                        Button {
-                            withAnimation(.snappy) {
-                                proxy.scrollTo(TimelineAnchor.bottom, anchor: .bottom)
+                    // Its own stack, so the fade animates only the button and
+                    // never a scroll that happens in the same update.
+                    ZStack {
+                        if !followsNewest {
+                            Button {
+                                withAnimation(reduceMotion ? nil : AppTheme.Motion.slow) {
+                                    proxy.scrollTo(TimelineAnchor.bottom, anchor: .bottom)
+                                }
+                            } label: {
+                                Label("Jump to latest", systemImage: "arrow.down")
+                                    .labelStyle(.iconOnly)
+                                    .frame(width: 32, height: 32)
                             }
-                        } label: {
-                            Label("Jump to latest", systemImage: "arrow.down")
-                                .labelStyle(.iconOnly)
-                                .frame(width: 32, height: 32)
+                            .buttonStyle(.plain)
+                            // Half its size: a circle.
+                            .elevatedSurface(radius: 16)
+                            .padding(AppTheme.Spacing.large)
+                            .help("Jump to latest")
+                            .accessibilityLabel("Jump to latest message")
+                            .transition(.opacity)
                         }
-                        .buttonStyle(.plain)
-                        .elevatedSurface(radius: 16)
-                        .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
-                        .padding(AppTheme.Spacing.large)
-                        .help("Jump to latest")
-                        .accessibilityLabel("Jump to latest message")
                     }
+                    .animation(AppTheme.Motion.fast, value: followsNewest)
                 }
             }
 
@@ -399,7 +406,7 @@ struct ConversationSurface: View {
                         .transition(.opacity)
                 }
             }
-            .animation(.easeOut(duration: 0.15), value: typingDescription)
+            .animation(AppTheme.Motion.base, value: typingDescription)
         }
         .background(AppTheme.Colors.canvas)
         .onReceive(Self.dayLabelRefreshes) { _ in
@@ -416,12 +423,18 @@ struct ConversationSurface: View {
         }
         .overlay {
             if isDropTargeted {
-                RoundedRectangle(cornerRadius: 12)
-                    .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 3, dash: [8]))
-                    .background(Color.accentColor.opacity(0.08))
+                RoundedRectangle(cornerRadius: AppTheme.Radius.large, style: .continuous)
+                    .strokeBorder(
+                        AppTheme.Colors.accentOutline,
+                        style: StrokeStyle(lineWidth: 2, dash: [8])
+                    )
+                    .background(
+                        AppTheme.Colors.accentSoft,
+                        in: RoundedRectangle(cornerRadius: AppTheme.Radius.large, style: .continuous)
+                    )
                     .overlay {
                         Label("Drop to upload", systemImage: "arrow.up.doc")
-                            .font(.headline)
+                            .font(AppTheme.Typography.bodyStrong)
                             .padding(AppTheme.Spacing.large)
                             .background(.regularMaterial, in: Capsule())
                     }
@@ -430,7 +443,7 @@ struct ConversationSurface: View {
                     .transition(.opacity)
             }
         }
-        .animation(.easeOut(duration: 0.12), value: isDropTargeted)
+        .animation(AppTheme.Motion.fast, value: isDropTargeted)
         .conversationToolbar(
             title: page.title,
             subtitle: page.subtitle,
@@ -722,12 +735,12 @@ private struct ConversationToolbarModifier: ViewModifier {
                             .foregroundStyle(AppTheme.Colors.tertiaryText)
 
                         Text(title)
-                            .fontWeight(.semibold)
+                            .font(AppTheme.Typography.title)
                             .foregroundStyle(AppTheme.Colors.primaryText)
 
                         if let status {
                             Text(status)
-                                .font(AppTheme.Typography.metadata)
+                                .font(AppTheme.Typography.caption)
                                 .foregroundStyle(AppTheme.Colors.tertiaryText)
                         }
                     }
@@ -742,7 +755,7 @@ private struct ConversationToolbarModifier: ViewModifier {
                 ToolbarItemGroup(placement: .primaryAction) {
                     if isOffline {
                         Label("Offline", systemImage: "wifi.slash")
-                            .font(AppTheme.Typography.metadata)
+                            .font(AppTheme.Typography.caption)
                             .foregroundStyle(AppTheme.Colors.warning)
                             .padding(.horizontal, AppTheme.Spacing.small)
                             .frame(height: 24)
@@ -815,7 +828,7 @@ private struct DateSeparator: View {
         HStack(spacing: AppTheme.Spacing.medium) {
             hairline
             Text(label)
-                .font(AppTheme.Typography.metadata.weight(.semibold))
+                .font(AppTheme.Typography.captionStrong)
                 .foregroundStyle(AppTheme.Colors.secondaryText)
                 .fixedSize()
             hairline
@@ -833,7 +846,7 @@ private struct DateSeparator: View {
 
     private var hairline: some View {
         Rectangle()
-            .fill(AppTheme.Colors.subtleStroke)
+            .fill(AppTheme.Colors.stroke)
             .frame(height: AppTheme.Metrics.hairline)
     }
 }
@@ -897,14 +910,22 @@ private struct MessageRow: View {
                         requestMedia: requestMedia
                     )
                     Text(message.senderName)
-                        .font(AppTheme.Typography.bodyEmphasized)
+                        .font(AppTheme.Typography.calloutStrong)
                         .foregroundStyle(SenderColor.color(for: message.senderID))
                         .lineLimit(1)
                     UserStatusEmoji(status: senderStatus, size: 13)
+                    // The first message of a block always shows its time; the
+                    // messages that continue it show theirs on hover.
+                    Text(message.timestamp, format: .dateTime.hour(.twoDigits(amPM: .narrow)).minute())
+                        .font(AppTheme.Typography.caption.monospacedDigit())
+                        .foregroundStyle(AppTheme.Colors.tertiaryText)
+                        .lineLimit(1)
+                        .fixedSize()
+                        .help(message.timestamp.formatted(date: .complete, time: .standard))
                     if let sourceLabel {
                         // Like the time beside the message, it appears on hover.
                         Text(sourceLabel)
-                            .font(AppTheme.Typography.metadata)
+                            .font(AppTheme.Typography.caption)
                             .foregroundStyle(AppTheme.Colors.tertiaryText)
                             .lineLimit(1)
                             .truncationMode(.tail)
@@ -921,13 +942,14 @@ private struct MessageRow: View {
 
             HStack(alignment: .top, spacing: AppTheme.Spacing.medium) {
                 Text(message.timestamp, format: .dateTime.hour(.twoDigits(amPM: .narrow)).minute())
-                    .font(AppTheme.Typography.scaled(10).monospacedDigit())
+                    .font(AppTheme.Typography.caption.monospacedDigit())
                     .foregroundStyle(AppTheme.Colors.tertiaryText)
                     .lineLimit(1)
                     .minimumScaleFactor(0.5)
                     .frame(width: Self.avatarSize, alignment: .center)
                     .padding(.top, 2)
-                    .opacity(isActive ? 1 : 0)
+                    // The first message's time sits beside the sender's name.
+                    .opacity(isActive && isContinuation ? 1 : 0)
                     .help(message.timestamp.formatted(date: .complete, time: .standard))
                     .accessibilityHidden(true)
 
@@ -952,24 +974,24 @@ private struct MessageRow: View {
         .contentShape(Rectangle())
         .background {
             RoundedRectangle(
-                cornerRadius: AppTheme.Metrics.controlRadius,
+                cornerRadius: AppTheme.Radius.medium,
                 style: .continuous
             )
             .fill(
                 isFocusedSearchResult
-                    ? AppTheme.Colors.accent.opacity(0.12)
+                    ? AppTheme.Colors.accentSoft
                     : isActive
-                        ? AppTheme.Colors.hover.opacity(0.45)
+                        ? AppTheme.Colors.fillHover.opacity(0.8)
                         : .clear
             )
         }
         .overlay {
             if isFocusedSearchResult {
                 RoundedRectangle(
-                    cornerRadius: AppTheme.Metrics.controlRadius,
+                    cornerRadius: AppTheme.Radius.medium,
                     style: .continuous
                 )
-                .stroke(AppTheme.Colors.accent.opacity(0.7), lineWidth: 1)
+                .strokeBorder(AppTheme.Colors.accentOutline, lineWidth: AppTheme.Metrics.hairline)
             }
         }
         .overlay(alignment: .topTrailing) {
@@ -998,6 +1020,9 @@ private struct MessageRow: View {
             .allowsHitTesting(isActive || isPickingReaction)
             .accessibilityHidden(!isActive && !isPickingReaction)
         }
+        // Only opacities and fills depend on `isActive`, so this fades the
+        // hover affordances without animating the row's layout.
+        .animation(AppTheme.Motion.fast, value: isActive)
         .onHover { isHovered = $0 }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(message.senderName), \(message.plainText)")
@@ -1055,7 +1080,7 @@ private struct MessageRow: View {
             // has no line to continue, so the note gets a line of its own.
             if let trailingStatus, !statusContinuesText {
                 Text(trailingStatus)
-                    .font(AppTheme.Typography.metadata)
+                    .font(AppTheme.Typography.caption)
                     .foregroundStyle(AppTheme.Colors.tertiaryText)
                     .help(trailingStatusHelp ?? "")
             }
@@ -1096,7 +1121,7 @@ private struct MessageRow: View {
                 .transition(.opacity)
             }
         }
-        .animation(.snappy, value: readers)
+        .animation(AppTheme.Motion.base, value: readers)
     }
 
     /// Why the message failed, with retry and cancel icons at the right.
@@ -1125,7 +1150,7 @@ private struct MessageRow: View {
         }
         .buttonStyle(.borderless)
         .foregroundStyle(AppTheme.Colors.secondaryText)
-        .font(AppTheme.Typography.metadata)
+        .font(AppTheme.Typography.caption)
     }
 
     /// The small gray note after the message: "Sending…" until the server has it,
@@ -1164,7 +1189,7 @@ private struct MessageRow: View {
     private var otherPendingLabel: some View {
         if case let .pending(kind) = message.actionState, kind != .edit {
             Text(pendingLabel(kind))
-                .font(AppTheme.Typography.metadata)
+                .font(AppTheme.Typography.caption)
                 .foregroundStyle(AppTheme.Colors.secondaryText)
         }
     }
@@ -1254,8 +1279,8 @@ private struct MessageActions: View {
             .accessibilityLabel("More message actions")
             .disabled(isDisabled)
         }
-        .elevatedSurface(radius: AppTheme.Metrics.controlRadius)
-        .shadow(color: .black.opacity(0.08), radius: 5, y: 2)
+        .padding(AppTheme.Spacing.extraExtraSmall)
+        .elevatedSurface(radius: AppTheme.Radius.medium)
     }
 
     private func actionButton(
@@ -1265,9 +1290,9 @@ private struct MessageActions: View {
     ) -> some View {
         Button(action: action) {
             Image(systemName: systemImage)
-                .frame(width: 30, height: 28)
+                .frame(width: 30, height: AppTheme.ControlHeight.regular)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(HoverFillButtonStyle())
         .disabled(isDisabled)
         .help(title)
         .accessibilityLabel(title)
@@ -1296,7 +1321,7 @@ private struct ForwardMessageSheet: View {
             Text("Forward message")
                 .font(AppTheme.Typography.title)
             Text("\(message.senderName): \(message.plainText)")
-                .font(AppTheme.Typography.metadata)
+                .font(AppTheme.Typography.caption)
                 .foregroundStyle(AppTheme.Colors.secondaryText)
                 .lineLimit(2)
             TextField("Search topics and people", text: $query)
@@ -1311,7 +1336,7 @@ private struct ForwardMessageSheet: View {
                         VStack(alignment: .leading, spacing: 1) {
                             Text(destination.title)
                             Text(destination.subtitle)
-                                .font(AppTheme.Typography.metadata)
+                                .font(AppTheme.Typography.caption)
                                 .foregroundStyle(AppTheme.Colors.secondaryText)
                         }
                         Spacer()
@@ -1355,10 +1380,10 @@ private struct EditMessageSheet: View {
                 .font(AppTheme.Typography.body)
                 .frame(minHeight: 140)
                 .padding(AppTheme.Spacing.small)
-                .background(AppTheme.Colors.hover.opacity(0.45))
+                .background(AppTheme.Colors.surfaceSunken)
                 .clipShape(
                     RoundedRectangle(
-                        cornerRadius: AppTheme.Metrics.controlRadius,
+                        cornerRadius: AppTheme.Radius.medium,
                         style: .continuous
                     )
                 )
@@ -1506,17 +1531,18 @@ private struct ComposerView: View {
                     }
                     .font(AppTheme.Typography.body)
                     .padding(.horizontal, AppTheme.Spacing.medium)
-                    .padding(.vertical, 5)
-                    .background(index == highlighted ? AppTheme.Colors.accent.opacity(0.18) : Color.clear)
+                    .padding(.vertical, AppTheme.Spacing.extraSmall)
+                    .background(index == highlighted ? AppTheme.Colors.accentSoft : Color.clear)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }
         }
-        .background(AppTheme.Colors.sidebar)
+        .background(AppTheme.Colors.surfaceSunken)
+        // Nested in the composer: its radius less the composer's padding.
         .clipShape(
             RoundedRectangle(
-                cornerRadius: AppTheme.Metrics.controlRadius,
+                cornerRadius: AppTheme.Radius.small,
                 style: .continuous
             )
         )
@@ -1563,7 +1589,7 @@ private struct ComposerView: View {
                     Text("Uploading \(filename)…")
                         .lineLimit(1)
                 }
-                .font(AppTheme.Typography.metadata)
+                .font(AppTheme.Typography.caption)
                 .foregroundStyle(AppTheme.Colors.secondaryText)
             case let .failed(filename, message):
                 HStack(spacing: AppTheme.Spacing.small) {
@@ -1588,7 +1614,7 @@ private struct ComposerView: View {
                         .accessibilityLabel("Dismiss upload error")
                     }
                 }
-                .font(AppTheme.Typography.metadata)
+                .font(AppTheme.Typography.caption)
                 .foregroundStyle(AppTheme.Colors.destructive)
             }
 
@@ -1612,13 +1638,13 @@ private struct ComposerView: View {
                     .help("Remove quote")
                     .accessibilityLabel("Remove quote")
                 }
-                .font(AppTheme.Typography.metadata)
+                .font(AppTheme.Typography.caption)
                 .padding(.vertical, AppTheme.Spacing.small)
                 .padding(.horizontal, AppTheme.Spacing.medium)
-                .background(AppTheme.Colors.sidebar)
+                .background(AppTheme.Colors.surfaceSunken)
                 .clipShape(
                     RoundedRectangle(
-                        cornerRadius: AppTheme.Metrics.controlRadius,
+                        cornerRadius: AppTheme.Radius.small,
                         style: .continuous
                     )
                 )
@@ -1702,13 +1728,15 @@ private struct ComposerView: View {
 
                 Button(action: send) {
                     Image(systemName: "arrow.up")
-                        .font(AppTheme.Typography.scaled(11, weight: .bold))
+                        .font(AppTheme.Typography.scaled(12, weight: .semibold))
                         .frame(width: ComposerMetrics.buttonSize, height: ComposerMetrics.buttonSize)
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.white)
-                .background(canSend ? AppTheme.Colors.accent : AppTheme.Colors.tertiaryText)
+                // A faded accent while there is nothing to send, not a gray button.
+                .background(AppTheme.Colors.accent.opacity(canSend ? 1 : 0.4))
                 .clipShape(Circle())
+                .animation(AppTheme.Motion.fast, value: canSend)
                 .disabled(!canSend)
                 .help("Send message")
                 .accessibilityLabel("Send message")
@@ -1717,10 +1745,10 @@ private struct ComposerView: View {
         .padding(.horizontal, AppTheme.Spacing.medium)
         .padding(.vertical, ComposerMetrics.verticalPadding)
         .frame(maxWidth: AppTheme.Metrics.composerMaximumWidth)
-        .elevatedSurface(radius: AppTheme.Metrics.panelRadius)
+        .elevatedSurface(radius: AppTheme.Radius.large)
         .padding(.horizontal, AppTheme.Spacing.extraLarge)
         .padding(.vertical, AppTheme.Spacing.medium)
-        .opacity(isDisabled ? 0.62 : 1)
+        .opacity(isDisabled ? AppTheme.Colors.disabledOpacity : 1)
     }
 }
 
@@ -1753,20 +1781,21 @@ private struct CircleHoverButtonStyle: ButtonStyle {
         @Environment(\.isEnabled) private var isEnabled
         @State private var isHovered = false
 
-        private var fillOpacity: Double {
-            guard isEnabled else { return 0 }
-            if configuration.isPressed { return 0.16 }
-            return isHovered ? 0.09 : 0
+        private var fill: Color {
+            guard isEnabled else { return .clear }
+            if configuration.isPressed { return AppTheme.Colors.fillPressed }
+            return isHovered ? AppTheme.Colors.fillHover : .clear
         }
 
         var body: some View {
             configuration.label
                 .frame(width: ComposerMetrics.buttonSize, height: ComposerMetrics.buttonSize)
-                .background(Circle().fill(Color.primary.opacity(fillOpacity)))
+                .background(Circle().fill(fill))
                 .contentShape(Circle())
-                .opacity(isEnabled ? 1 : 0.45)
+                .opacity(isEnabled ? 1 : AppTheme.Colors.disabledOpacity)
                 .onHover { isHovered = $0 }
-                .animation(.easeOut(duration: 0.12), value: isHovered)
+                .animation(AppTheme.Motion.fast, value: isHovered)
+                .animation(AppTheme.Motion.instant, value: configuration.isPressed)
         }
     }
 }
@@ -1777,7 +1806,7 @@ private struct TypingIndicator: View {
 
     var body: some View {
         Text(text)
-            .font(AppTheme.Typography.metadata)
+            .font(AppTheme.Typography.caption)
             .foregroundStyle(AppTheme.Colors.secondaryText)
             .lineLimit(1)
             .allowsHitTesting(false)

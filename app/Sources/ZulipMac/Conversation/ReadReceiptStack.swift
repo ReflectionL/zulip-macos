@@ -37,7 +37,7 @@ struct ReadReceiptStack: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.6)
                     .frame(width: Self.avatarSize, height: Self.avatarSize)
-                    .background(Circle().fill(AppTheme.Colors.hover))
+                    .background(Circle().fill(AppTheme.Colors.fillHover))
                     .padding(Self.ringWidth)
                     .background(Circle().fill(AppTheme.Colors.canvas))
             }
