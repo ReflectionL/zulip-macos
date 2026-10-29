@@ -38,7 +38,7 @@ struct WelcomeView: View {
                     .frame(width: 64, height: 64)
                     .accessibilityHidden(true)
                 Text("Welcome to \(AppIdentity.displayName)")
-                    .font(AppTheme.Typography.scaled(22, weight: .semibold))
+                    .font(AppTheme.Typography.display)
                 Text("Sign in to your Zulip organization.")
                     .font(AppTheme.Typography.body)
                     .foregroundStyle(AppTheme.Colors.secondaryText)
@@ -114,7 +114,7 @@ struct LoginForm: View {
 
             if let message = statusMessage {
                 Label(message, systemImage: statusIcon)
-                    .font(AppTheme.Typography.metadata)
+                    .font(AppTheme.Typography.caption)
                     .foregroundStyle(statusColor)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -142,14 +142,14 @@ struct LoginForm: View {
                         }
                     }
                     .buttonStyle(.plain)
-                    .font(AppTheme.Typography.sidebar)
-                    .foregroundStyle(AppTheme.Colors.accent)
+                    .font(AppTheme.Typography.callout)
+                    .foregroundStyle(AppTheme.Colors.accentText)
                     .disabled(isConnecting)
                 }
             }
 
             Text(storageNote)
-                .font(AppTheme.Typography.metadata)
+                .font(AppTheme.Typography.caption)
                 .foregroundStyle(AppTheme.Colors.tertiaryText)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -184,12 +184,12 @@ struct LoginForm: View {
         @ViewBuilder field: () -> FieldContent
     ) -> some View {
         let shape = RoundedRectangle(
-            cornerRadius: AppTheme.Metrics.controlRadius,
+            cornerRadius: AppTheme.Radius.medium,
             style: .continuous
         )
         return VStack(alignment: .leading, spacing: AppTheme.Spacing.extraSmall) {
             Text(title)
-                .font(AppTheme.Typography.metadata)
+                .font(AppTheme.Typography.caption)
                 .foregroundStyle(AppTheme.Colors.secondaryText)
             field()
                 .textFieldStyle(.plain)
@@ -197,12 +197,12 @@ struct LoginForm: View {
                 .focused($focus, equals: target)
                 .padding(.horizontal, AppTheme.Spacing.medium)
                 .frame(minHeight: 34)
-                .background(AppTheme.Colors.elevated, in: shape)
+                .background(AppTheme.Colors.surfaceRaised, in: shape)
                 .overlay {
                     shape.strokeBorder(
                         focus == target
-                            ? AppTheme.Colors.accent.opacity(0.7)
-                            : AppTheme.Colors.subtleStroke,
+                            ? AppTheme.Colors.accentOutline
+                            : AppTheme.Colors.stroke,
                         lineWidth: AppTheme.Metrics.hairline
                     )
                 }
@@ -262,11 +262,11 @@ private struct WelcomeSidebar: View {
 
                 VStack(alignment: .leading, spacing: 1) {
                     Text(AppIdentity.displayName)
-                        .font(AppTheme.Typography.sidebarEmphasized)
+                        .font(AppTheme.Typography.calloutMedium)
                         .foregroundStyle(AppTheme.Colors.primaryText)
                         .lineLimit(1)
                     Text("Not connected")
-                        .font(AppTheme.Typography.metadata)
+                        .font(AppTheme.Typography.caption)
                         .foregroundStyle(AppTheme.Colors.secondaryText)
                         .lineLimit(1)
                 }

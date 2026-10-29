@@ -20,12 +20,12 @@ struct CommandPaletteView: View {
                     .onSubmit(openHighlightedResult)
 
                 Text("esc")
-                    .font(AppTheme.Typography.metadata)
+                    .font(AppTheme.Typography.caption)
                     .foregroundStyle(AppTheme.Colors.tertiaryText)
                     .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
-                    .background(AppTheme.Colors.hover)
-                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    .padding(.vertical, AppTheme.Spacing.extraExtraSmall)
+                    .background(AppTheme.Colors.fillHover)
+                    .clipShape(RoundedRectangle(cornerRadius: AppTheme.Radius.extraSmall, style: .continuous))
             }
             .padding(.horizontal, AppTheme.Spacing.large)
             .frame(minHeight: 52)
@@ -69,14 +69,13 @@ struct CommandPaletteView: View {
                 Spacer()
                 Text("\(navigation.searchResults.count) results")
             }
-            .font(AppTheme.Typography.metadata)
+            .font(AppTheme.Typography.caption)
             .foregroundStyle(AppTheme.Colors.tertiaryText)
             .padding(.horizontal, AppTheme.Spacing.large)
             .frame(minHeight: 34)
         }
         .frame(width: 560)
-        .elevatedSurface(radius: 14)
-        .shadow(color: .black.opacity(0.28), radius: 32, y: 16)
+        .elevatedSurface(radius: AppTheme.Radius.large, elevation: .overlay)
         .onAppear {
             isSearchFocused = true
             highlightedKey = navigation.searchResults.first?.key
@@ -133,10 +132,10 @@ private struct CommandPaletteRow: View {
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(destination.title)
-                        .font(AppTheme.Typography.sidebarEmphasized)
+                        .font(AppTheme.Typography.calloutMedium)
                         .foregroundStyle(AppTheme.Colors.primaryText)
                     Text(destination.subtitle)
-                        .font(AppTheme.Typography.metadata)
+                        .font(AppTheme.Typography.caption)
                         .foregroundStyle(AppTheme.Colors.secondaryText)
                 }
 
@@ -153,10 +152,10 @@ private struct CommandPaletteRow: View {
             .contentShape(Rectangle())
             .background {
                 RoundedRectangle(
-                    cornerRadius: AppTheme.Metrics.controlRadius,
+                    cornerRadius: AppTheme.Radius.medium,
                     style: .continuous
                 )
-                .fill(isHighlighted ? AppTheme.Colors.selection : .clear)
+                .fill(isHighlighted ? AppTheme.Colors.accentSoft : .clear)
             }
         }
         .buttonStyle(.plain)

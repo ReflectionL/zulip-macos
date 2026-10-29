@@ -38,7 +38,7 @@ struct WindowShellView<Sidebar: View, Content: View>: View {
                 SidebarToggleButton(
                     isSidebarVisible: columnVisibility != .detailOnly
                 ) {
-                    withAnimation(.easeInOut(duration: 0.16)) {
+                    withAnimation(AppTheme.Motion.base) {
                         columnVisibility = columnVisibility == .detailOnly
                             ? .all
                             : .detailOnly
@@ -67,15 +67,17 @@ private struct SidebarToggleButton: View {
 
     var body: some View {
         Button(action: action) {
+            // Toolbar chrome keeps the system size at every text size.
             Image(systemName: "sidebar.left")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(AppTheme.Colors.secondaryText)
                 .frame(width: 24, height: 24)
                 .background(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(isHovered ? AppTheme.Colors.hover : .clear)
+                    RoundedRectangle(cornerRadius: AppTheme.Radius.small, style: .continuous)
+                        .fill(isHovered ? AppTheme.Colors.fillHover : .clear)
                 )
                 .contentShape(Rectangle())
+                .animation(AppTheme.Motion.fast, value: isHovered)
         }
         .buttonStyle(.plain)
         .help(label)
@@ -196,7 +198,7 @@ struct PrototypeWindowView: View {
             .frame(width: 0, height: 0)
             .opacity(0)
         }
-        .animation(.snappy(duration: 0.2), value: navigation.isCommandPalettePresented)
+        .animation(AppTheme.Motion.base, value: navigation.isCommandPalettePresented)
         .onChange(of: navigation.selection) {
             navigation.dismissCommandPalette()
         }

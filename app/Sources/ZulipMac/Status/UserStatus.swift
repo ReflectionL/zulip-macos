@@ -130,7 +130,7 @@ struct ProfileStatusPopover: View {
                 avatar
                 VStack(alignment: .leading, spacing: 2) {
                     Text(name)
-                        .font(AppTheme.Typography.bodyEmphasized)
+                        .font(AppTheme.Typography.bodyStrong)
                         .lineLimit(1)
                     HStack(spacing: 4) {
                         Circle()
@@ -141,7 +141,7 @@ struct ProfileStatusPopover: View {
                             )
                             .frame(width: 7, height: 7)
                         Text(control.isInvisible ? "Invisible" : "Active")
-                            .font(AppTheme.Typography.metadata)
+                            .font(AppTheme.Typography.caption)
                             .foregroundStyle(AppTheme.Colors.secondaryText)
                     }
                 }
@@ -197,7 +197,7 @@ struct ProfileStatusPopover: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Invisible mode")
                     Text("Others see you as offline.")
-                        .font(AppTheme.Typography.metadata)
+                        .font(AppTheme.Typography.caption)
                         .foregroundStyle(AppTheme.Colors.secondaryText)
                 }
             }
@@ -269,7 +269,7 @@ struct UserStatusEditor: View {
                         }
                     }
                     .frame(width: 32, height: 32)
-                    .background(AppTheme.Colors.hover, in: Circle())
+                    .background(AppTheme.Colors.fillHover, in: Circle())
                     .contentShape(Circle())
                 }
                 .buttonStyle(.plain)
@@ -371,11 +371,11 @@ private struct SuggestionButtonStyle: ButtonStyle {
         var body: some View {
             configuration.label
                 .background(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    RoundedRectangle(cornerRadius: AppTheme.Radius.small, style: .continuous)
                         .fill(
                             configuration.isPressed
-                                ? AppTheme.Colors.selection
-                                : isHovered ? AppTheme.Colors.hover : .clear
+                                ? AppTheme.Colors.accentSoft
+                                : isHovered ? AppTheme.Colors.fillHover : .clear
                         )
                 )
                 .onHover { isHovered = $0 }

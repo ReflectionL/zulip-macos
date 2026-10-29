@@ -18,6 +18,9 @@ struct ZulipMacApp: App {
     var body: some Scene {
         WindowGroup(AppIdentity.displayName) {
             AppRootView(session: session)
+                // System controls (prominent buttons, toggles, focus rings) use
+                // the app's accent rather than the system one.
+                .tint(AppTheme.Colors.accent)
                 .environment(updates)
                 .task { await updates.checkAutomatically() }
         }
@@ -51,6 +54,7 @@ struct ZulipMacApp: App {
                 }
             }
             .formStyle(.grouped)
+            .tint(AppTheme.Colors.accent)
             .padding()
             .frame(width: 460)
         }

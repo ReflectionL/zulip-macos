@@ -95,15 +95,15 @@ private struct TimelineLoadingView: View {
             ForEach(0..<7, id: \.self) { index in
                 HStack(alignment: .top, spacing: AppTheme.Spacing.medium) {
                     Circle()
-                        .fill(AppTheme.Colors.hover)
+                        .fill(AppTheme.Colors.fillHover)
                         .frame(width: 32, height: 32)
 
                     VStack(alignment: .leading, spacing: AppTheme.Spacing.small) {
-                        RoundedRectangle(cornerRadius: 3)
-                            .fill(AppTheme.Colors.hover)
+                        RoundedRectangle(cornerRadius: AppTheme.Radius.extraSmall, style: .continuous)
+                            .fill(AppTheme.Colors.fillHover)
                             .frame(width: 120, height: 11)
-                        RoundedRectangle(cornerRadius: 3)
-                            .fill(AppTheme.Colors.hover)
+                        RoundedRectangle(cornerRadius: AppTheme.Radius.extraSmall, style: .continuous)
+                            .fill(AppTheme.Colors.fillHover)
                             .frame(
                                 maxWidth: index.isMultiple(of: 2) ? 520 : 390,
                                 minHeight: 12

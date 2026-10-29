@@ -37,6 +37,15 @@ struct MessageTimestampTests {
         #expect(MessageTimestamp.format(sent, now: now, calendar: calendar, locale: locale) == "09:30")
     }
 
+    @Test("A message's clock time keeps two-digit minutes")
+    func clockTimeMinutes() throws {
+        let calendar = try calendar()
+        let fivePast = try date(2026, 10, 12, 12, 5, in: calendar)
+        let early = try date(2026, 10, 12, 9, 0, in: calendar)
+        #expect(MessageTimestamp.clockTime(fivePast, calendar: calendar, locale: locale) == "12:05")
+        #expect(MessageTimestamp.clockTime(early, calendar: calendar, locale: locale) == "09:00")
+    }
+
     @Test("Yesterday is named, with the time")
     func yesterday() throws {
         let calendar = try calendar()

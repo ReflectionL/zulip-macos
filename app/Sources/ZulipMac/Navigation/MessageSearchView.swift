@@ -18,8 +18,7 @@ struct MessageSearchView: View {
             footer
         }
         .frame(width: 620)
-        .elevatedSurface(radius: 14)
-        .shadow(color: .black.opacity(0.28), radius: 32, y: 16)
+        .elevatedSurface(radius: AppTheme.Radius.large, elevation: .overlay)
         .task {
             await Task.yield()
             isSearchFocused = true
@@ -77,12 +76,12 @@ struct MessageSearchView: View {
             }
 
             Text("esc")
-                .font(AppTheme.Typography.metadata)
+                .font(AppTheme.Typography.caption)
                 .foregroundStyle(AppTheme.Colors.tertiaryText)
                 .padding(.horizontal, 6)
-                .padding(.vertical, 3)
-                .background(AppTheme.Colors.hover)
-                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                .padding(.vertical, AppTheme.Spacing.extraExtraSmall)
+                .background(AppTheme.Colors.fillHover)
+                .clipShape(RoundedRectangle(cornerRadius: AppTheme.Radius.extraSmall, style: .continuous))
         }
         .padding(.horizontal, AppTheme.Spacing.large)
         .frame(minHeight: 52)
@@ -97,7 +96,7 @@ struct MessageSearchView: View {
             VStack(spacing: AppTheme.Spacing.medium) {
                 ProgressView()
                 Text("Searching your Zulip history…")
-                    .font(AppTheme.Typography.metadata)
+                    .font(AppTheme.Typography.caption)
                     .foregroundStyle(AppTheme.Colors.secondaryText)
             }
             .frame(maxWidth: .infinity, minHeight: 260)
@@ -158,7 +157,7 @@ struct MessageSearchView: View {
             Spacer()
             Text(resultCount == 1 ? "1 result" : "\(resultCount) results")
         }
-        .font(AppTheme.Typography.metadata)
+        .font(AppTheme.Typography.caption)
         .foregroundStyle(AppTheme.Colors.tertiaryText)
         .padding(.horizontal, AppTheme.Spacing.large)
         .frame(minHeight: 34)
@@ -218,12 +217,12 @@ private struct MessageSearchRow: View {
                 VStack(alignment: .leading, spacing: AppTheme.Spacing.extraSmall) {
                     HStack(spacing: AppTheme.Spacing.small) {
                         Text(result.title)
-                            .font(AppTheme.Typography.sidebarEmphasized)
+                            .font(AppTheme.Typography.calloutMedium)
                             .foregroundStyle(AppTheme.Colors.primaryText)
                             .lineLimit(1)
 
                         Text(result.subtitle)
-                            .font(AppTheme.Typography.metadata)
+                            .font(AppTheme.Typography.caption)
                             .foregroundStyle(AppTheme.Colors.secondaryText)
                             .lineLimit(1)
 
@@ -234,7 +233,7 @@ private struct MessageSearchRow: View {
                     }
 
                     Text(result.senderName)
-                        .font(AppTheme.Typography.metadata)
+                        .font(AppTheme.Typography.caption)
                         .foregroundStyle(AppTheme.Colors.secondaryText)
 
                     Text(result.contentPreview)
@@ -256,10 +255,10 @@ private struct MessageSearchRow: View {
             .contentShape(Rectangle())
             .background {
                 RoundedRectangle(
-                    cornerRadius: AppTheme.Metrics.controlRadius,
+                    cornerRadius: AppTheme.Radius.medium,
                     style: .continuous
                 )
-                .fill(isHighlighted ? AppTheme.Colors.selection : .clear)
+                .fill(isHighlighted ? AppTheme.Colors.accentSoft : .clear)
             }
         }
         .buttonStyle(.plain)

@@ -49,4 +49,17 @@ struct ConversationSurfaceTests {
 
         #expect(message.plainText == "Review the plan with @Hua Hai👍")
     }
+
+    @Test("The timeline follows new messages only near its end")
+    func timelineFollowThreshold() {
+        let atEnd = TimelineScrollMetrics(contentHeight: 2_000, offset: 1_400, containerHeight: 600)
+        let justAbove = TimelineScrollMetrics(contentHeight: 2_000, offset: 1_340, containerHeight: 600)
+        let scrolledUp = TimelineScrollMetrics(contentHeight: 2_000, offset: 900, containerHeight: 600)
+        let short = TimelineScrollMetrics(contentHeight: 300, offset: 0, containerHeight: 600)
+
+        #expect(atEnd.isNearBottom)
+        #expect(justAbove.isNearBottom)
+        #expect(!scrolledUp.isNearBottom)
+        #expect(short.isNearBottom)
+    }
 }

@@ -61,18 +61,17 @@ struct LinkPreviewCard: View {
             }
             VStack(alignment: .leading, spacing: 2) {
                 Text(shownTitle)
-                    .font(AppTheme.Typography.body)
-                    .fontWeight(.semibold)
+                    .font(AppTheme.Typography.bodyStrong)
                     .foregroundStyle(AppTheme.Colors.primaryText)
                     .lineLimit(2)
                 if let description {
                     Text(description)
-                        .font(AppTheme.Typography.metadata)
+                        .font(AppTheme.Typography.caption)
                         .foregroundStyle(AppTheme.Colors.secondaryText)
                         .lineLimit(3)
                 }
                 Text(site)
-                    .font(AppTheme.Typography.metadata)
+                    .font(AppTheme.Typography.caption)
                     .foregroundStyle(AppTheme.Colors.tertiaryText)
                     .lineLimit(1)
             }
@@ -81,13 +80,13 @@ struct LinkPreviewCard: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(maxWidth: Self.maximumWidth, alignment: .leading)
-        .background(AppTheme.Colors.sidebar)
+        .background(AppTheme.Colors.surfaceSunken)
         .clipShape(
-            RoundedRectangle(cornerRadius: AppTheme.Metrics.panelRadius, style: .continuous)
+            RoundedRectangle(cornerRadius: AppTheme.Radius.large, style: .continuous)
         )
         .overlay {
-            RoundedRectangle(cornerRadius: AppTheme.Metrics.panelRadius, style: .continuous)
-                .stroke(AppTheme.Colors.subtleStroke, lineWidth: 1)
+            RoundedRectangle(cornerRadius: AppTheme.Radius.large, style: .continuous)
+                .strokeBorder(AppTheme.Colors.stroke, lineWidth: AppTheme.Metrics.hairline)
         }
         .contentShape(Rectangle())
         .onTapGesture(perform: open)

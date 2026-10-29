@@ -42,11 +42,11 @@ struct CreateChannelSheet: View {
                     ? "Only the members you add can see this channel."
                     : "Anyone in the organization can find and join this channel."
             )
-            .font(AppTheme.Typography.metadata)
+            .font(AppTheme.Typography.caption)
             .foregroundStyle(AppTheme.Colors.secondaryText)
 
             Text("Add people (\(selectedMembers.count) selected)")
-                .font(AppTheme.Typography.bodyEmphasized)
+                .font(AppTheme.Typography.bodyStrong)
             TextField("Search people", text: $memberFilter)
                 .textFieldStyle(.roundedBorder)
             List(visibleMembers) { person in
@@ -56,7 +56,7 @@ struct CreateChannelSheet: View {
 
             if case let .failed(message) = session.channelCreationState {
                 Text(message)
-                    .font(AppTheme.Typography.metadata)
+                    .font(AppTheme.Typography.caption)
                     .foregroundStyle(AppTheme.Colors.destructive)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -116,7 +116,7 @@ struct CreateChannelSheet: View {
                     )
                 Text(person.name)
                 Text(person.detail)
-                    .font(AppTheme.Typography.metadata)
+                    .font(AppTheme.Typography.caption)
                     .foregroundStyle(AppTheme.Colors.secondaryText)
                     .lineLimit(1)
                 Spacer(minLength: 0)
