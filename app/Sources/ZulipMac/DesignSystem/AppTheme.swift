@@ -16,7 +16,7 @@ enum AppTheme {
         /// Vertical padding around a message row: a message that continues a block,
         /// and the first message of a block (more space above it than below).
         static let continuationInset: CGFloat = 4
-        static let blockTopInset: CGFloat = 16
+        static let blockTopInset: CGFloat = 14
         static let blockBottomInset: CGFloat = 4
         /// How far a topic row is indented under its channel, the width of the
         /// channel's disclosure chevron.
