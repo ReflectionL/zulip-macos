@@ -667,26 +667,37 @@ private struct AvatarView: View {
             requestMedia: requestMedia
         )
             .overlay(alignment: .bottomTrailing) {
-                Circle()
-                    .fill(presenceColor)
-                    .frame(width: 6, height: 6)
-                    .overlay {
-                        Circle()
-                            .stroke(Color(nsColor: .windowBackgroundColor), lineWidth: 1)
-                    }
+                presenceDot
+                    .offset(x: 2, y: 2)
             }
     }
 
-    private var presenceColor: Color {
-        switch presence {
-        case .active:
-            AppTheme.Colors.success
-        case .idle:
-            AppTheme.Colors.warning
-        case .offline:
-            AppTheme.Colors.tertiaryText
+    /// A vivid filled dot when the person is around, a hollow ring when not, so
+    /// the state shows by shape as well as by colour. It sits on a ring of the
+    /// sidebar's background that separates it from the avatar.
+    private var presenceDot: some View {
+        ZStack {
+            Circle()
+                .fill(Color(nsColor: .windowBackgroundColor))
+            switch presence {
+            case .active:
+                Circle()
+                    .fill(AppTheme.Colors.presenceActive)
+                    .padding(Self.ringWidth)
+            case .idle:
+                Circle()
+                    .fill(AppTheme.Colors.presenceIdle)
+                    .padding(Self.ringWidth)
+            case .offline:
+                Circle()
+                    .strokeBorder(AppTheme.Colors.tertiaryText, lineWidth: 1.5)
+                    .padding(Self.ringWidth)
+            }
         }
+        .frame(width: 10, height: 10)
     }
+
+    private static let ringWidth: CGFloat = 1.5
 }
 
 #Preview("Sidebar") {

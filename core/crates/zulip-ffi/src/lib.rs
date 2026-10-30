@@ -1664,9 +1664,10 @@ struct AccountSession {
     /// The newest message the event queue has delivered, so that messages
     /// arriving while a lost queue was replaced can be fetched and notified.
     newest_message_id: i64,
-    /// Where a finished mark-read request reports back to the actor, which
-    /// applies it to the unread counts. Set when the actor takes the session.
-    marked_read: Option<UnboundedSender<MarkedRead>>,
+    /// Where a finished mark-read or status request reports back to the
+    /// actor, which applies it to the synced state. Set when the actor takes
+    /// the session.
+    local_changes: Option<UnboundedSender<LocalChange>>,
 }
 
 /// A session that finished signing in and registering beside the actor.
@@ -1702,10 +1703,27 @@ struct MissedMessages {
     messages: Vec<MessageSummary>,
 }
 
-/// Messages the server accepted as read for this client.
-struct MarkedRead {
-    account_id: String,
-    message_ids: Vec<i64>,
+/// A change this client made and the server accepted, applied to the synced
+/// state at once instead of waiting for the event queue to report it.
+enum LocalChange {
+    /// Messages the server accepted as read.
+    Read {
+        account_id: String,
+        message_ids: Vec<i64>,
+    },
+    /// The account's own status, as the server accepted it.
+    OwnStatus {
+        account_id: String,
+        status: UserStatus,
+    },
+}
+
+impl LocalChange {
+    fn account_id(&self) -> &str {
+        match self {
+            Self::Read { account_id, .. } | Self::OwnStatus { account_id, .. } => account_id,
+        }
+    }
 }
 
 /// How many messages that arrived during a queue gap are fetched at most.
@@ -1717,7 +1735,7 @@ enum ActorInput {
     Topics(Option<TopicRefresh>),
     Session(Option<Box<SessionStart>>),
     Missed(Option<MissedMessages>),
-    Marked(Option<MarkedRead>),
+    Local(Option<LocalChange>),
 }
 
 /// Whether a command needs the live session, and so waits while one is starting.
@@ -1755,8 +1773,8 @@ async fn run_actor(
     // Messages that arrived while a lost event queue was replaced never come
     // through the new queue; they are fetched beside the actor.
     let (missed_sender, mut missed_receiver) = unbounded_channel::<MissedMessages>();
-    // Reads this client made are applied to the unread counts once accepted.
-    let (marked_sender, mut marked_receiver) = unbounded_channel::<MarkedRead>();
+    // Reads and statuses this client set are applied once the server accepts them.
+    let (local_sender, mut local_receiver) = unbounded_channel::<LocalChange>();
 
     loop {
         let input = if let Some(session) = account.as_mut() {
@@ -1771,7 +1789,7 @@ async fn run_actor(
                 refresh = topic_receiver.recv() => ActorInput::Topics(refresh),
                 start = session_receiver.recv() => ActorInput::Session(start.map(Box::new)),
                 missed = missed_receiver.recv() => ActorInput::Missed(missed),
-                marked = marked_receiver.recv() => ActorInput::Marked(marked),
+                change = local_receiver.recv() => ActorInput::Local(change),
             }
         } else {
             tokio::select! {
@@ -1838,7 +1856,7 @@ async fn run_actor(
                     continue;
                 };
                 if let Some(mut started) = start.started {
-                    started.session.marked_read = Some(marked_sender.clone());
+                    started.session.local_changes = Some(local_sender.clone());
                     account = Some(started.session);
                     poll_not_before = Instant::now();
                     retrying = false;
@@ -1914,11 +1932,21 @@ async fn run_actor(
                     });
                 }
             }
-            ActorInput::Marked(Some(marked)) => {
+            ActorInput::Local(Some(change)) => {
                 if let Some(session) = account
                     .as_mut()
-                    .filter(|session| session.account_id == marked.account_id)
-                    && let Some(snapshot) = session.sync.mark_read_locally(&marked.message_ids)
+                    .filter(|session| session.account_id == change.account_id())
+                    && let Some(snapshot) = match change {
+                        LocalChange::Read { message_ids, .. } => {
+                            session.sync.mark_read_locally(&message_ids)
+                        }
+                        LocalChange::OwnStatus { status, .. } => {
+                            session.sync.set_status_locally(UserStatus {
+                                user_id: session.own_user_id,
+                                ..status
+                            })
+                        }
+                    }
                 {
                     cache_snapshot_throttled(session, &snapshot);
                     event_sink.handle_event(CoreEvent::SnapshotUpdated {
@@ -1930,7 +1958,7 @@ async fn run_actor(
             ActorInput::Topics(None)
             | ActorInput::Session(None)
             | ActorInput::Missed(None)
-            | ActorInput::Marked(None) => {}
+            | ActorInput::Local(None) => {}
         }
     }
 }
@@ -2494,6 +2522,8 @@ fn set_user_status(
     };
     let messages = Arc::clone(&session.messages);
     let event_sink = Arc::clone(event_sink);
+    let local_changes = session.local_changes.clone();
+    let account_id = session.account_id.clone();
     tokio::spawn(async move {
         match messages
             .set_user_status(
@@ -2504,7 +2534,13 @@ fn set_user_status(
             )
             .await
         {
-            Ok(()) => event_sink.handle_event(CoreEvent::NotificationSettingSaved { request_id }),
+            Ok(()) => {
+                // Shown at once: the event queue's report of it may come late.
+                if let Some(local_changes) = local_changes {
+                    let _ = local_changes.send(LocalChange::OwnStatus { account_id, status });
+                }
+                event_sink.handle_event(CoreEvent::NotificationSettingSaved { request_id });
+            }
             Err(error) => emit_error(Some(request_id), error, &event_sink),
         }
     });
@@ -3409,13 +3445,13 @@ fn mark_read(
     };
     let messages = Arc::clone(&session.messages);
     let event_sink = Arc::clone(event_sink);
-    let marked_read = session.marked_read.clone();
+    let local_changes = session.local_changes.clone();
     let account_id = session.account_id.clone();
     tokio::spawn(async move {
         match messages.mark_read(&message_ids).await {
             Ok(()) => {
-                if let Some(marked_read) = marked_read {
-                    let _ = marked_read.send(MarkedRead {
+                if let Some(local_changes) = local_changes {
+                    let _ = local_changes.send(LocalChange::Read {
                         account_id,
                         message_ids: message_ids.clone(),
                     });
@@ -3639,7 +3675,7 @@ async fn start_session(
                     last_snapshot_cache_seconds: AtomicU64::new(now_seconds()),
                     send_order: Arc::new(AsyncMutex::new(())),
                     newest_message_id,
-                    marked_read: None,
+                    local_changes: None,
                 },
                 started: CoreEvent::SessionStarted {
                     request_id,

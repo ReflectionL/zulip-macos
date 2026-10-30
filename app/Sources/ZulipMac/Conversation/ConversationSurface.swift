@@ -66,6 +66,9 @@ struct ConversationSurface: View {
     /// sent message in the box.
     @State private var acceptsSavedDraft = true
     @State private var followsNewest = true
+    /// Scrolled by edge, not to a row: the end of a lazy timeline is only known
+    /// once its rows are measured, and an edge follows it as it moves.
+    @State private var scrollPosition = ScrollPosition(edge: .bottom)
     /// How far the toolbar reaches into the timeline's top edge.
     @State private var toolbarInset: CGFloat = 0
     /// How far below the composer's outer top edge the typing line's bottom sits:
@@ -82,7 +85,6 @@ struct ConversationSurface: View {
     /// stays on screen past midnight does not keep yesterday's labels.
     @State private var labelsReferenceDate = Date.now
     @FocusState private var isComposerFocused: Bool
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(
         page: ConversationPage,
@@ -200,202 +202,195 @@ struct ConversationSurface: View {
                 .accessibilityLabel("Offline, showing cached messages")
             }
 
-            ScrollViewReader { proxy in
-                ZStack(alignment: .bottomTrailing) {
-                    ScrollView {
-                        LazyVStack(spacing: 0) {
-                            if page.beforeCursor != nil {
-                                Button {
-                                    loadEarlier?()
-                                } label: {
-                                    if isLoadingEarlier {
-                                        HStack(spacing: AppTheme.Spacing.small) {
-                                            ProgressView()
-                                                .controlSize(.small)
-                                            Text("Loading earlier messages…")
-                                        }
-                                    } else {
-                                        Text("Load earlier messages")
-                                    }
-                                }
-                                .buttonStyle(.borderless)
-                                .disabled(isLoadingEarlier || loadEarlier == nil)
-                                .font(AppTheme.Typography.caption)
-                                .foregroundStyle(AppTheme.Colors.secondaryText)
-                                .padding(.vertical, AppTheme.Spacing.large)
-                            }
-
-                            let continuations = MessageGrouping.continuationIDs(in: messages)
-                            let dayStarts = MessageGrouping.dayStartIDs(in: messages)
-                            ForEach(messages, id: \.rowID) { message in
-                                VStack(spacing: 0) {
-                                    if dayStarts.contains(message.id) {
-                                        DateSeparator(date: message.timestamp, now: labelsReferenceDate)
-                                    }
-                                    MessageRow(
-                                        message: message,
-                                        isContinuation: continuations.contains(message.id),
-                                        isFocusedSearchResult: page.focusedMessageID == message.id,
-                                        react: { target in
-                                            if let reactToMessage {
-                                                _ = reactToMessage(message, target)
-                                            } else {
-                                                toggleReaction(target, for: message.id)
-                                            }
-                                        },
-                                        toggleStar: {
-                                            if let starMessage {
-                                                _ = starMessage(message)
-                                            } else {
-                                                toggleStar(for: message.id)
-                                            }
-                                        },
-                                        moveToTopic: message.sourceStreamID == nil
-                                            ? nil
-                                            : { moveMessage?(message) },
-                                        edit: message.isOwnMessage && editMessage != nil
-                                            ? { editingMessage = message }
-                                            : nil,
-                                        delete: message.isOwnMessage && deleteMessage != nil
-                                            ? { deletingMessage = message }
-                                            : nil,
-                                        quote: quoteMessage == nil
-                                            ? nil
-                                            : { quoteMessage?(message) },
-                                        forward: forwardMessage == nil || forwardDestinations == nil
-                                            ? nil
-                                            : { forwardingMessage = message },
-                                        toggleRead: setMessageRead == nil
-                                            ? nil
-                                            : { _ = setMessageRead?(message, !message.isRead) },
-                                        retryAction: {
-                                            retryMessageAction?(message)
-                                        },
-                                        retrySend: {
-                                            retrySend?(message)
-                                        },
-                                        cancelSend: {
-                                            cancelSend?(message)
-                                        },
-                                        cancelAction: {
-                                            cancelMessageAction?(message)
-                                        },
-                                        mediaLocalURLs: mediaLocalURLs,
-                                        mediaFailures: mediaFailures,
-                                        requestMedia: requestMedia,
-                                        retryMedia: retryMedia,
-                                        readers: readReceipts?.messageID == message.id
-                                            ? readReceipts?.readers ?? []
-                                            : [],
-                                        senderStatus: continuations.contains(message.id)
-                                            ? nil
-                                            : userStatus?(message.senderID),
-                                        sourceLabel: continuations.contains(message.id)
-                                            ? nil
-                                            : sourceLabel?(message)
-                                    )
-                                }
-                                .id(message.rowID)
-                            }
-
-                            Color.clear
-                                .frame(height: 1)
-                                .id(TimelineAnchor.bottom)
-                        }
-                        .frame(maxWidth: AppTheme.Metrics.messageMaximumWidth)
-                        .frame(maxWidth: .infinity)
-                        .padding(.horizontal, AppTheme.Spacing.extraLarge)
-                        // Keep the first and newest messages clear of the fades
-                        // while the timeline is at rest.
-                        .padding(.top, TimelineEdgeFade.topClearance)
-                        .padding(.bottom, TimelineEdgeFade.bottomLength)
-                    }
-                    .defaultScrollAnchor(.bottom, for: .initialOffset)
-                    .defaultScrollAnchor(.bottom, for: .sizeChanges)
-                    // The window has no title bar, so messages scroll under the
-                    // toolbar's breadcrumb; fade them out before they reach it,
-                    // and before they meet the composer at the bottom.
-                    .onGeometryChange(for: CGFloat.self) { geometry in
-                        geometry.safeAreaInsets.top
-                    } action: { inset in
-                        toolbarInset = inset
-                    }
-                    .overlay {
-                        TimelineEdgeFade(toolbarInset: toolbarInset)
-                            .allowsHitTesting(false)
-                            .accessibilityHidden(true)
-                    }
-                    .onScrollGeometryChange(for: TimelineScrollMetrics.self) { geometry in
-                        TimelineScrollMetrics(
-                            contentHeight: geometry.contentSize.height,
-                            offset: geometry.contentOffset.y,
-                            containerHeight: geometry.containerSize.height
-                        )
-                    } action: { old, new in
-                        // Content that grows under a still scroll position (a new
-                        // message, a picture that finished loading) is not the
-                        // user scrolling away. Judging it by the distance left
-                        // used to stop following whenever the new content was
-                        // taller than the threshold, before the scroll to the
-                        // newest message ran.
-                        if new.contentHeight > old.contentHeight,
-                           abs(new.offset - old.offset) < 1
-                        {
-                            if followsNewest {
-                                proxy.scrollTo(TimelineAnchor.bottom, anchor: .bottom)
-                            }
-                            return
-                        }
-                        followsNewest = new.isNearBottom
-                    }
-                    .task(
-                        id: TimelineFocus(
-                            key: page.key,
-                            messageID: page.focusedMessageID
-                        )
-                    ) {
-                        await Task.yield()
-                        if let messageID = page.focusedMessageID,
-                           messages.contains(where: { $0.id == messageID })
-                        {
-                            followsNewest = false
-                            proxy.scrollTo(rowID(for: messageID), anchor: .center)
-                        } else {
-                            followsNewest = true
-                            proxy.scrollTo(TimelineAnchor.bottom, anchor: .bottom)
-                        }
-                    }
-                    .onChange(of: messages.count) {
-                        guard followsNewest else {
-                            return
-                        }
-                        proxy.scrollTo(TimelineAnchor.bottom, anchor: .bottom)
-                    }
-
-                    // Its own stack, so the fade animates only the button and
-                    // never a scroll that happens in the same update.
-                    ZStack {
-                        if !followsNewest {
+            ZStack(alignment: .bottomTrailing) {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        if page.beforeCursor != nil {
                             Button {
-                                withAnimation(reduceMotion ? nil : AppTheme.Motion.slow) {
-                                    proxy.scrollTo(TimelineAnchor.bottom, anchor: .bottom)
-                                }
+                                loadEarlier?()
                             } label: {
-                                Label("Jump to latest", systemImage: "arrow.down")
-                                    .labelStyle(.iconOnly)
-                                    .frame(width: 32, height: 32)
+                                if isLoadingEarlier {
+                                    HStack(spacing: AppTheme.Spacing.small) {
+                                        ProgressView()
+                                            .controlSize(.small)
+                                        Text("Loading earlier messages…")
+                                    }
+                                } else {
+                                    Text("Load earlier messages")
+                                }
                             }
-                            .buttonStyle(.plain)
-                            // Half its size: a circle.
-                            .elevatedSurface(radius: 16)
-                            .padding(AppTheme.Spacing.large)
-                            .help("Jump to latest")
-                            .accessibilityLabel("Jump to latest message")
-                            .transition(.opacity)
+                            .buttonStyle(.borderless)
+                            .disabled(isLoadingEarlier || loadEarlier == nil)
+                            .font(AppTheme.Typography.caption)
+                            .foregroundStyle(AppTheme.Colors.secondaryText)
+                            .padding(.vertical, AppTheme.Spacing.large)
+                        }
+
+                        let continuations = MessageGrouping.continuationIDs(in: messages)
+                        let dayStarts = MessageGrouping.dayStartIDs(in: messages)
+                        ForEach(messages, id: \.rowID) { message in
+                            VStack(spacing: 0) {
+                                if dayStarts.contains(message.id) {
+                                    DateSeparator(date: message.timestamp, now: labelsReferenceDate)
+                                }
+                                MessageRow(
+                                    message: message,
+                                    isContinuation: continuations.contains(message.id),
+                                    isFocusedSearchResult: page.focusedMessageID == message.id,
+                                    react: { target in
+                                        if let reactToMessage {
+                                            _ = reactToMessage(message, target)
+                                        } else {
+                                            toggleReaction(target, for: message.id)
+                                        }
+                                    },
+                                    toggleStar: {
+                                        if let starMessage {
+                                            _ = starMessage(message)
+                                        } else {
+                                            toggleStar(for: message.id)
+                                        }
+                                    },
+                                    moveToTopic: message.sourceStreamID == nil
+                                        ? nil
+                                        : { moveMessage?(message) },
+                                    edit: message.isOwnMessage && editMessage != nil
+                                        ? { editingMessage = message }
+                                        : nil,
+                                    delete: message.isOwnMessage && deleteMessage != nil
+                                        ? { deletingMessage = message }
+                                        : nil,
+                                    quote: quoteMessage == nil
+                                        ? nil
+                                        : { quoteMessage?(message) },
+                                    forward: forwardMessage == nil || forwardDestinations == nil
+                                        ? nil
+                                        : { forwardingMessage = message },
+                                    toggleRead: setMessageRead == nil
+                                        ? nil
+                                        : { _ = setMessageRead?(message, !message.isRead) },
+                                    retryAction: {
+                                        retryMessageAction?(message)
+                                    },
+                                    retrySend: {
+                                        retrySend?(message)
+                                    },
+                                    cancelSend: {
+                                        cancelSend?(message)
+                                    },
+                                    cancelAction: {
+                                        cancelMessageAction?(message)
+                                    },
+                                    mediaLocalURLs: mediaLocalURLs,
+                                    mediaFailures: mediaFailures,
+                                    requestMedia: requestMedia,
+                                    retryMedia: retryMedia,
+                                    readers: readReceipts?.messageID == message.id
+                                        ? readReceipts?.readers ?? []
+                                        : [],
+                                    senderStatus: continuations.contains(message.id)
+                                        ? nil
+                                        : userStatus?(message.senderID),
+                                    sourceLabel: continuations.contains(message.id)
+                                        ? nil
+                                        : sourceLabel?(message)
+                                )
+                            }
+                            .id(message.rowID)
                         }
                     }
-                    .animation(AppTheme.Motion.fast, value: followsNewest)
+                    .frame(maxWidth: AppTheme.Metrics.messageMaximumWidth)
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, AppTheme.Spacing.extraLarge)
+                    // Keep the first and newest messages clear of the fades
+                    // while the timeline is at rest.
+                    .padding(.top, TimelineEdgeFade.topClearance)
+                    .padding(.bottom, TimelineEdgeFade.bottomLength)
                 }
+                .scrollPosition($scrollPosition)
+                .defaultScrollAnchor(.bottom, for: .initialOffset)
+                .defaultScrollAnchor(.bottom, for: .sizeChanges)
+                // The window has no title bar, so messages scroll under the
+                // toolbar's breadcrumb; fade them out before they reach it,
+                // and before they meet the composer at the bottom.
+                .onGeometryChange(for: CGFloat.self) { geometry in
+                    geometry.safeAreaInsets.top
+                } action: { inset in
+                    toolbarInset = inset
+                }
+                .overlay {
+                    TimelineEdgeFade(toolbarInset: toolbarInset)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
+                .onScrollGeometryChange(for: TimelineScrollMetrics.self) { geometry in
+                    TimelineScrollMetrics(
+                        contentHeight: geometry.contentSize.height,
+                        offset: geometry.contentOffset.y,
+                        containerHeight: geometry.containerSize.height
+                    )
+                } action: { old, new in
+                    // Content that grows under a still scroll position (a new
+                    // message, a picture that finished loading) is not the
+                    // user scrolling away. Judging it by the distance left
+                    // used to stop following whenever the new content was
+                    // taller than the threshold, before the scroll to the
+                    // newest message ran.
+                    if new.contentHeight > old.contentHeight,
+                       abs(new.offset - old.offset) < 1
+                    {
+                        if followsNewest {
+                            scrollPosition.scrollTo(edge: .bottom)
+                        }
+                        return
+                    }
+                    followsNewest = new.isNearBottom
+                }
+                .task(
+                    id: TimelineFocus(
+                        key: page.key,
+                        messageID: page.focusedMessageID
+                    )
+                ) {
+                    await Task.yield()
+                    if let messageID = page.focusedMessageID,
+                       messages.contains(where: { $0.id == messageID })
+                    {
+                        followsNewest = false
+                        scrollPosition.scrollTo(id: rowID(for: messageID), anchor: .center)
+                    } else {
+                        followsNewest = true
+                        scrollPosition.scrollTo(edge: .bottom)
+                    }
+                }
+                .onChange(of: messages.count) {
+                    guard followsNewest else {
+                        return
+                    }
+                    scrollPosition.scrollTo(edge: .bottom)
+                }
+
+                // Its own stack, so the fade animates only the button and
+                // never a scroll that happens in the same update.
+                ZStack {
+                    if !followsNewest {
+                        Button {
+                            scrollPosition.scrollTo(edge: .bottom)
+                        } label: {
+                            Label("Jump to latest", systemImage: "arrow.down")
+                                .labelStyle(.iconOnly)
+                                .frame(width: 32, height: 32)
+                        }
+                        .buttonStyle(.plain)
+                        // Half its size: a circle.
+                        .elevatedSurface(radius: 16)
+                        .padding(AppTheme.Spacing.large)
+                        .help("Jump to latest")
+                        .accessibilityLabel("Jump to latest message")
+                        .transition(.opacity)
+                    }
+                }
+                .animation(AppTheme.Motion.fast, value: followsNewest)
             }
 
             ComposerView(
@@ -638,10 +633,6 @@ struct ConversationSurface: View {
         consumeAttachmentInsertion?(attachmentInsertion.id)
         isComposerFocused = true
     }
-}
-
-private enum TimelineAnchor: Hashable {
-    case bottom
 }
 
 /// Where the timeline is scrolled, for deciding whether it follows the newest message.

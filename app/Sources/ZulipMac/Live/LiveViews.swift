@@ -103,6 +103,37 @@ private struct ConnectionStatusPill: View {
     }
 }
 
+/// A short message about something the user did, such as a status that could
+/// not be saved, shown at the top of the window.
+private struct NoticeToast: View {
+    let text: String
+    let dismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: AppTheme.Spacing.small) {
+            Image(systemName: "info.circle")
+                .foregroundStyle(AppTheme.Colors.secondaryText)
+            Text(text)
+                .font(AppTheme.Typography.callout)
+                .foregroundStyle(AppTheme.Colors.primaryText)
+                .lineLimit(3)
+            Button(action: dismiss) {
+                Image(systemName: "xmark")
+                    .font(AppTheme.Typography.caption)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(AppTheme.Colors.tertiaryText)
+            .help("Dismiss")
+            .accessibilityLabel("Dismiss")
+        }
+        .padding(.horizontal, AppTheme.Spacing.medium)
+        .padding(.vertical, AppTheme.Spacing.small)
+        .frame(maxWidth: 520)
+        .elevatedSurface(radius: AppTheme.Radius.medium, elevation: .overlay)
+        .accessibilityElement(children: .contain)
+    }
+}
+
 private struct LiveWindowView: View {
     let session: LiveSessionViewModel
 
@@ -239,6 +270,12 @@ private struct LiveWindowView: View {
                 ConnectionStatusPill(text: statusText)
                     .padding(.top, AppTheme.Spacing.small)
                     .transition(panelTransition)
+            } else if let notice = session.notice {
+                NoticeToast(text: notice) {
+                    session.notice = nil
+                }
+                .padding(.top, AppTheme.Spacing.small)
+                .transition(panelTransition)
             }
 
             Button("Open quick switcher") {
@@ -281,6 +318,18 @@ private struct LiveWindowView: View {
         .animation(AppTheme.Motion.base, value: navigation.isCommandPalettePresented)
         .animation(AppTheme.Motion.base, value: isMessageSearchPresented)
         .animation(AppTheme.Motion.base, value: session.connectionState)
+        .animation(AppTheme.Motion.base, value: session.notice)
+        // A notice (a failed save, a renamed channel) stays long enough to read,
+        // then goes; a newer one restarts the wait.
+        .task(id: session.notice) {
+            guard session.notice != nil else {
+                return
+            }
+            try? await Task.sleep(for: .seconds(6))
+            if !Task.isCancelled {
+                session.notice = nil
+            }
+        }
         .onChange(of: navigation.selection) {
             navigation.dismissCommandPalette()
             if suppressedSelectionOpen == navigation.selection {

@@ -1041,6 +1041,12 @@ impl SyncSession {
         self.reducer.mark_read_locally(message_ids)
     }
 
+    /// Applies a status this client set, once the server accepted it.
+    /// Returns the new snapshot when it changed anything.
+    pub fn set_status_locally(&mut self, status: UserStatus) -> Option<SyncSnapshot> {
+        self.reducer.set_status_locally(status)
+    }
+
     /// Polls or continues a pending full resynchronization.
     ///
     /// Queue expiry and fresh `restart` events immediately attempt an atomic
@@ -1457,6 +1463,25 @@ impl SyncReducer {
     pub fn mark_read_locally(&mut self, message_ids: &[i64]) -> Option<SyncSnapshot> {
         let mut changed = self.apply_flag_change(true, "read", message_ids);
         changed |= self.apply_read_change(true, message_ids, &[]);
+        changed.then(|| {
+            self.revision = self.revision.saturating_add(1);
+            self.snapshot()
+        })
+    }
+
+    /// Applies a status this client set once the server accepted it, so the
+    /// status shows at once rather than when (or if) the event queue reports it.
+    pub fn set_status_locally(&mut self, status: UserStatus) -> Option<SyncSnapshot> {
+        let reaction_type = if status.emoji_name.is_empty() || !status.reaction_type.is_empty() {
+            status.reaction_type
+        } else {
+            "unicode_emoji".to_owned()
+        };
+        let changed = self.apply_user_status(UserStatusUpdate {
+            user_id: status.user_id,
+            status_text: Some(status.status_text.trim().to_owned()),
+            emoji: Some((status.emoji_name, status.emoji_code, reaction_type)),
+        });
         changed.then(|| {
             self.revision = self.revision.saturating_add(1);
             self.snapshot()
@@ -2835,7 +2860,7 @@ mod tests {
         BootstrapState, ChannelSummary, EventQueueClient, MessageSummary, MessageUpdate,
         RecoveryPolicy, ResyncReason, RetryBackoff, RetryOperation, SyncCycle, SyncError,
         SyncEvent, SyncReducer, SyncSession, TopicVisibility, TypingNotice, TypingPreferences,
-        TypingScope, UnreadBucket, UserSummary, Value, parse_unread_messages,
+        TypingScope, UnreadBucket, UserStatus, UserSummary, Value, parse_unread_messages,
     };
     use crate::auth::SecretString;
 
@@ -3623,6 +3648,42 @@ mod tests {
         );
         let snapshot = reducer.mark_read_locally(&[2]).expect("changed");
         assert!(snapshot.unread.is_empty());
+    }
+
+    #[test]
+    fn a_status_this_client_set_shows_without_waiting_for_the_queue() {
+        let mut reducer = SyncReducer::new(0, BootstrapState::default());
+        let snapshot = reducer
+            .set_status_locally(UserStatus {
+                user_id: 7,
+                status_text: " In a meeting ".to_owned(),
+                emoji_name: "calendar".to_owned(),
+                emoji_code: "1f4c6".to_owned(),
+                reaction_type: String::new(),
+            })
+            .expect("changed");
+        assert_eq!(snapshot.user_statuses.len(), 1);
+        assert_eq!(snapshot.user_statuses[0].status_text, "In a meeting");
+        assert_eq!(snapshot.user_statuses[0].reaction_type, "unicode_emoji");
+        assert!(
+            reducer
+                .set_status_locally(UserStatus {
+                    user_id: 7,
+                    status_text: "In a meeting".to_owned(),
+                    emoji_name: "calendar".to_owned(),
+                    emoji_code: "1f4c6".to_owned(),
+                    reaction_type: "unicode_emoji".to_owned(),
+                })
+                .is_none(),
+            "the same status changes nothing"
+        );
+        let snapshot = reducer
+            .set_status_locally(UserStatus {
+                user_id: 7,
+                ..UserStatus::default()
+            })
+            .expect("cleared");
+        assert!(snapshot.user_statuses.is_empty());
     }
 
     #[test]
