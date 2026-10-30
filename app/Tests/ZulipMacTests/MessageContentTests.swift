@@ -111,4 +111,34 @@ struct MessageContentTests {
         let rejected = await NativeImageDecoder.load(URL(string: "https://example.com/a.png")!)
         #expect(rejected.image == nil)
     }
+
+    @Test("Large pictures are decoded at a reduced size when a limit is given")
+    @MainActor
+    func downsampledImageDecode() async throws {
+        let bitmap = try #require(
+            NSBitmapImageRep(
+                bitmapDataPlanes: nil,
+                pixelsWide: 2000,
+                pixelsHigh: 1000,
+                bitsPerSample: 8,
+                samplesPerPixel: 4,
+                hasAlpha: true,
+                isPlanar: false,
+                colorSpaceName: .deviceRGB,
+                bytesPerRow: 0,
+                bitsPerPixel: 0
+            )
+        )
+        let png = try #require(bitmap.representation(using: .png, properties: [:]))
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("zulip-large-image-\(UUID().uuidString).png")
+        try png.write(to: fileURL, options: .atomic)
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+
+        let reduced = await NativeImageDecoder.load(fileURL, maxPixelSize: 500)
+        #expect(reduced.image?.size.width == 500)
+        #expect(reduced.image?.size.height == 250)
+        let whole = await NativeImageDecoder.load(fileURL, maxPixelSize: 4000)
+        #expect(whole.image != nil)
+    }
 }

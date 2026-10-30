@@ -33,10 +33,12 @@ struct InterfaceScaleShortcuts: View {
     }
 }
 
-/// Text-size and message-density rows for the Settings window.
+/// Text-size, font and message-density rows for the Settings window.
 struct TextSizeSettingsSection: View {
     private var scale: InterfaceScale { InterfaceScale.shared }
     private var densityPreference: MessageDensityPreference { MessageDensityPreference.shared }
+    private var interfaceFont: InterfaceFont { InterfaceFont.shared }
+    @State private var families: [String] = []
 
     var body: some View {
         Section("Appearance") {
@@ -53,6 +55,27 @@ struct TextSizeSettingsSection: View {
                         .disabled(scale.isStandard)
                 }
             }
+            LabeledContent("Font") {
+                Picker(
+                    "Font",
+                    selection: Binding(
+                        get: { interfaceFont.family },
+                        set: { interfaceFont.select($0) }
+                    )
+                ) {
+                    Text("System Font").tag(String?.none)
+                    Divider()
+                    ForEach(families, id: \.self) { family in
+                        Text(family).tag(String?.some(family))
+                    }
+                }
+                .labelsHidden()
+                .fixedSize()
+            }
+            Text("The quick brown fox jumps over the lazy dog. 敏捷的棕色狐狸 0123456789")
+                .font(AppTheme.Typography.body)
+                .foregroundStyle(AppTheme.Colors.secondaryText)
+                .frame(maxWidth: .infinity, alignment: .leading)
             LabeledContent("Message density") {
                 Picker(
                     "Message density",
@@ -68,6 +91,11 @@ struct TextSizeSettingsSection: View {
                 .labelsHidden()
                 .pickerStyle(.segmented)
                 .fixedSize()
+            }
+        }
+        .onAppear {
+            if families.isEmpty {
+                families = InterfaceFont.installedFamilies()
             }
         }
     }

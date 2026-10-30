@@ -530,7 +530,10 @@ private struct NativeImageBlock: View {
                 return
             }
             decodeFailed = false
-            let decoded = await NativeImageDecoder.load(fileURL)
+            let decoded = await NativeImageDecoder.load(
+                fileURL,
+                maxPixelSize: Self.maximumDecodedPixels
+            )
             guard !Task.isCancelled else { return }
             nativeImage = decoded.image
             decodeFailed = decoded.image == nil
@@ -540,6 +543,8 @@ private struct NativeImageBlock: View {
     /// Images are shown no larger than this; clicking one opens it full size.
     private static let maximumWidth: CGFloat = 520
     private static let maximumHeight: CGFloat = 420
+    /// Twice the largest size a picture is shown at, for a Retina display.
+    private static let maximumDecodedPixels = 1100
 
     /// The picture's own shape once it is loaded, else the server's dimensions,
     /// else a placeholder shape. Images linked from other sites carry no
@@ -612,10 +617,22 @@ enum NativeImageDecoder {
         }.value
     }
 
-    nonisolated static func load(_ fileURL: URL) async -> SendableNativeImage {
+    /// Decodes a cached picture off the main actor. With `maxPixelSize`, a picture
+    /// larger than that on its longer side is decoded at that size instead of in
+    /// full: a screenshot shown in a few hundred points would otherwise be
+    /// scaled down from its full resolution on every frame of a scroll.
+    nonisolated static func load(
+        _ fileURL: URL,
+        maxPixelSize: Int? = nil
+    ) async -> SendableNativeImage {
         await Task.detached(priority: .utility) {
             guard fileURL.isFileURL else {
                 return SendableNativeImage(image: nil)
+            }
+            if let maxPixelSize,
+               let reduced = downsampled(fileURL, maxPixelSize: maxPixelSize)
+            {
+                return SendableNativeImage(image: reduced)
             }
             if let image = NSImage(contentsOf: fileURL),
                image.size.width > 0, image.size.height > 0
@@ -638,6 +655,36 @@ enum NativeImageDecoder {
                 )
             )
         }.value
+    }
+}
+
+extension NativeImageDecoder {
+    /// The picture at no more than `maxPixelSize` on its longer side, or nil when
+    /// it is already that small or cannot be read (the caller then decodes it whole).
+    nonisolated fileprivate static func downsampled(_ fileURL: URL, maxPixelSize: Int) -> NSImage? {
+        let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithURL(fileURL as CFURL, sourceOptions),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, sourceOptions)
+                as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? Int,
+              let height = properties[kCGImagePropertyPixelHeight] as? Int,
+              max(width, height) > maxPixelSize
+        else {
+            return nil
+        }
+        let thumbnailOptions = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
+        ] as CFDictionary
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions) else {
+            return nil
+        }
+        return NSImage(
+            cgImage: cgImage,
+            size: NSSize(width: cgImage.width, height: cgImage.height)
+        )
     }
 }
 

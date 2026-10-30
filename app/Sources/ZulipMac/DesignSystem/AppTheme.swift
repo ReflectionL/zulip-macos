@@ -54,7 +54,8 @@ enum AppTheme {
         static let section: CGFloat = 32
     }
 
-    /// Fonts follow the user's text-size preference (`InterfaceScale`). Three
+    /// Fonts follow the user's text-size preference (`InterfaceScale`) and typeface
+    /// preference (`InterfaceFont`, which leaves code and math alone). Three
     /// weights only: regular, medium and semibold. Text is never smaller than
     /// `caption`; smaller sizes are for SF Symbols.
     @MainActor
@@ -83,13 +84,18 @@ enum AppTheme {
         /// English paragraphs do not sit too tightly.
         static var bodyLineSpacing: CGFloat { 3 * InterfaceScale.shared.factor }
 
-        /// A system font of `size` points at the user's current text size.
+        /// A font of `size` points at the user's current text size: the chosen
+        /// typeface, or the system font when none is chosen.
         static func scaled(
             _ size: CGFloat,
             weight: Font.Weight = .regular,
             design: Font.Design = .default
         ) -> Font {
-            .system(size: size * InterfaceScale.shared.factor, weight: weight, design: design)
+            let pointSize = size * InterfaceScale.shared.factor
+            if design == .default, let family = InterfaceFont.shared.family {
+                return .custom(family, size: pointSize).weight(weight)
+            }
+            return .system(size: pointSize, weight: weight, design: design)
         }
     }
 

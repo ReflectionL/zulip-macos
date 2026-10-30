@@ -320,7 +320,11 @@ struct ConversationSurface: View {
                     } action: { inset in
                         toolbarInset = inset
                     }
-                    .mask { TimelineEdgeFade(toolbarInset: toolbarInset) }
+                    .overlay {
+                        TimelineEdgeFade(toolbarInset: toolbarInset)
+                            .allowsHitTesting(false)
+                            .accessibilityHidden(true)
+                    }
                     .onScrollGeometryChange(for: TimelineScrollMetrics.self) { geometry in
                         TimelineScrollMetrics(
                             contentHeight: geometry.contentSize.height,
@@ -694,6 +698,10 @@ extension View {
 ///
 /// The bands are long and follow an ease-in-out curve: short linear ramps (18
 /// and 16 pt before) showed a visible line where the fade began.
+///
+/// It paints the canvas colour over the timeline rather than masking the
+/// timeline with a gradient: a mask makes the whole scroll view render into an
+/// offscreen layer on every frame of a scroll, which is what made it stutter.
 private struct TimelineEdgeFade: View {
     let toolbarInset: CGFloat
 
@@ -708,15 +716,16 @@ private struct TimelineEdgeFade: View {
         max(topLength - leadIn - AppTheme.Metrics.blockTopInset, 0)
     }
 
-    /// Opacity stops of a smoothstep curve, from clear to opaque.
+    /// Opacity stops of a smoothstep curve, from the canvas to clear.
     private static let easedStops: [Gradient.Stop] = (0...8).map { step in
         let t = Double(step) / 8
-        return Gradient.Stop(color: .black.opacity(t * t * (3 - 2 * t)), location: t)
+        let covered = 1 - t * t * (3 - 2 * t)
+        return Gradient.Stop(color: AppTheme.Colors.canvas.opacity(covered), location: t)
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            Color.clear
+            AppTheme.Colors.canvas
                 .frame(height: max(toolbarInset - Self.leadIn, 0))
             LinearGradient(
                 stops: Self.easedStops,
@@ -724,7 +733,7 @@ private struct TimelineEdgeFade: View {
                 endPoint: .bottom
             )
             .frame(height: Self.topLength)
-            Color.black
+            Color.clear
             LinearGradient(
                 stops: Self.easedStops,
                 startPoint: .bottom,
@@ -934,11 +943,20 @@ private struct MessageRow: View {
     @State private var isHovered = false
     @State private var isHoveringActions = false
     @State private var isPickingReaction = false
+    /// The action bar is built the first time the pointer reaches the row, not
+    /// with the row: it carries a menu, a popover and two shadows, and a bar for
+    /// every row on screen made scrolling stutter. Once built it stays, so a
+    /// menu that is open never loses the bar it belongs to.
+    @State private var hasBuiltActions = false
 
     /// The pointer is over the message or its action bar, which floats above the
     /// row's top edge and so partly outside the row's own hover area.
     private var isActive: Bool {
         isHovered || isHoveringActions
+    }
+
+    private var showsActions: Bool {
+        hasBuiltActions || isActive || isPickingReaction
     }
 
     var body: some View {
@@ -1041,30 +1059,38 @@ private struct MessageRow: View {
             }
         }
         .overlay(alignment: .topTrailing) {
-            MessageActions(
-                isStarred: message.isStarred,
-                isPickingReaction: $isPickingReaction,
-                reactions: message.reactions,
-                react: react,
-                toggleStar: toggleStar,
-                moveToTopic: moveToTopic,
-                edit: edit,
-                delete: delete,
-                quote: quote,
-                forward: forward,
-                toggleRead: toggleRead,
-                isRead: message.isRead,
-                isDisabled: message.actionState.isPending || message.deliveryState != .sent
-            )
-            .onHover { isHoveringActions = $0 }
-            // Straddles the top edge, above the row's right corner, so it never
-            // covers the read receipts at the bottom of a one-line message.
-            .alignmentGuide(.top) { $0[.bottom] - Self.actionBarOverlap }
-            .padding(.trailing, AppTheme.Spacing.small)
-            .opacity(isActive || isPickingReaction ? 1 : 0)
-            // While hidden it must not catch the pointer over the row above.
-            .allowsHitTesting(isActive || isPickingReaction)
-            .accessibilityHidden(!isActive && !isPickingReaction)
+            if showsActions {
+                MessageActions(
+                    isStarred: message.isStarred,
+                    isPickingReaction: $isPickingReaction,
+                    reactions: message.reactions,
+                    react: react,
+                    toggleStar: toggleStar,
+                    moveToTopic: moveToTopic,
+                    edit: edit,
+                    delete: delete,
+                    quote: quote,
+                    forward: forward,
+                    toggleRead: toggleRead,
+                    isRead: message.isRead,
+                    isDisabled: message.actionState.isPending || message.deliveryState != .sent
+                )
+                .onHover { isHoveringActions = $0 }
+                // Straddles the top edge, above the row's right corner, so it never
+                // covers the read receipts at the bottom of a one-line message.
+                .alignmentGuide(.top) { $0[.bottom] - Self.actionBarOverlap }
+                .padding(.trailing, AppTheme.Spacing.small)
+                .opacity(isActive || isPickingReaction ? 1 : 0)
+                // While hidden it must not catch the pointer over the row above.
+                .allowsHitTesting(isActive || isPickingReaction)
+                .accessibilityHidden(!isActive && !isPickingReaction)
+                .transition(.opacity)
+            }
+        }
+        .onChange(of: isActive) {
+            if isActive {
+                hasBuiltActions = true
+            }
         }
         // Only opacities and fills depend on `isActive`, so this fades the
         // hover affordances without animating the row's layout.
