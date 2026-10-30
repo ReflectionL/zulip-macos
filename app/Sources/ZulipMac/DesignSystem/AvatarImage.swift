@@ -76,7 +76,7 @@ struct AvatarImage: View {
             if AvatarImageCache.image(for: localURL) != nil {
                 return
             }
-            let decoded = await NativeImageDecoder.load(fileURL)
+            let decoded = await NativeImageDecoder.load(fileURL, maxPixelSize: 160)
             guard !Task.isCancelled else { return }
             if let decodedImage = decoded.image {
                 AvatarImageCache.store(decodedImage, for: localURL)
