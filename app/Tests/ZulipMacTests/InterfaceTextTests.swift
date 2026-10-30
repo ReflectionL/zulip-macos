@@ -255,3 +255,35 @@ struct MessageDensityTests {
         #expect(MessageDensity.compact.blockBottomInset < MessageDensity.normal.blockBottomInset)
     }
 }
+
+@Suite("Interface font")
+@MainActor
+struct InterfaceFontTests {
+    private func defaults() throws -> UserDefaults {
+        try #require(UserDefaults(suiteName: "InterfaceFontTests-\(UUID().uuidString)"))
+    }
+
+    @Test("The system font is the default, and a choice is remembered")
+    func selection() throws {
+        let store = try defaults()
+        let font = InterfaceFont(defaults: store, isInstalled: { _ in true })
+        #expect(font.family == nil)
+
+        font.select("Helvetica Neue")
+        #expect(font.family == "Helvetica Neue")
+        #expect(InterfaceFont(defaults: store, isInstalled: { _ in true }).family == "Helvetica Neue")
+
+        font.select(nil)
+        #expect(font.family == nil)
+        #expect(InterfaceFont(defaults: store, isInstalled: { _ in true }).family == nil)
+    }
+
+    @Test("A font that is no longer installed falls back to the system font")
+    func missingFont() throws {
+        let store = try defaults()
+        InterfaceFont(defaults: store, isInstalled: { _ in true }).select("Gone Sans")
+
+        #expect(InterfaceFont(defaults: store, isInstalled: { _ in false }).family == nil)
+        #expect(InterfaceFont(defaults: store, isInstalled: { _ in true }).family == "Gone Sans")
+    }
+}

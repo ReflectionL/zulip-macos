@@ -39,8 +39,8 @@ Progress is tracked in [`TRACKER.md`](TRACKER.md) and the roadmap in
   Muted levels synced to Zulip, an unread Dock badge, and catch-up after
   reconnecting. Messages are never marked read while the app is in the
   background or the screen is locked.
-- **Appearance** — light and dark mode, adjustable text size, and Normal or
-  Compact message density.
+- **Appearance** — light and dark mode, adjustable text size, any installed
+  font for the interface, and Normal or Compact message density.
 - **Updates** — checks GitHub releases at launch and from **Check for
   Updates…**; installing verifies the SHA-256 and code signature.
 
