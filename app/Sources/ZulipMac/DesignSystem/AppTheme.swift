@@ -126,6 +126,11 @@ enum AppTheme {
         static let accentOutline = Color.dynamic(light: 0x4553D0, dark: 0x8C95FF, lightAlpha: 0.5, darkAlpha: 0.5)
         static let success = Color.dynamic(light: 0x1A7F45, dark: 0x5FCB8E)
         static let warning = Color.dynamic(light: 0xA5600B, dark: 0xE5A64B)
+        /// Presence dots. Brighter than `success` and `warning`, which are tuned
+        /// for text: a dot a few points wide on top of an avatar needs a vivid
+        /// hue to read at a glance.
+        static let presenceActive = Color.dynamic(light: 0x2DB84D, dark: 0x32D158)
+        static let presenceIdle = Color.dynamic(light: 0xF29A0E, dark: 0xFFB340)
         static let destructive = Color.dynamic(light: 0xC4313B, dark: 0xFF7A7A)
         /// Disabled controls are drawn at this opacity.
         static let disabledOpacity: Double = 0.45

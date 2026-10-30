@@ -137,7 +137,7 @@ struct ProfileStatusPopover: View {
                             .fill(
                                 control.isInvisible
                                     ? AppTheme.Colors.tertiaryText
-                                    : AppTheme.Colors.success
+                                    : AppTheme.Colors.presenceActive
                             )
                             .frame(width: 7, height: 7)
                         Text(control.isInvisible ? "Invisible" : "Active")
