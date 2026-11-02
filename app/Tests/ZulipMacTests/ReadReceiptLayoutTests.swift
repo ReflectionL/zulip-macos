@@ -9,7 +9,10 @@ struct ReadReceiptLayoutTests {
         // Each avatar has a 1.5 pt ring and covers a third of the one before it.
         #expect(ReadReceiptStack.width(readerCount: 0, avatarSize: 14) == 0)
         #expect(ReadReceiptStack.width(readerCount: 1, avatarSize: 14) == 17)
-        #expect(ReadReceiptStack.width(readerCount: 2, avatarSize: 14) == 17 + 17 * 2 / 3)
+        // Written in CGFloat: as integer literals the thirds would round down.
+        let item: CGFloat = 17
+        let two = ReadReceiptStack.width(readerCount: 2, avatarSize: 14)
+        #expect(abs(two - (item + item * 2 / 3)) < 0.001)
         // Four avatars, then one "+N" chip however many more there are.
         let limit = ReadReceiptPolicy.visibleReaderLimit
         #expect(
