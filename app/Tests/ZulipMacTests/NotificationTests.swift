@@ -366,7 +366,7 @@ struct NotificationTests {
         #expect(notifier.posted.first?.body == "Again")
     }
 
-    @Test("Muted channels do not count toward the badge, mentions in others do")
+    @Test("Muted channels and group chats do not count toward the badge, mentions in others do")
     func badgeCountsDirectMessagesAndMentions() {
         let summary = UnreadSummary(
             buckets: [
@@ -379,7 +379,8 @@ struct NotificationTests {
             mutedChannels: [6]
         )
 
-        #expect(summary.badge == 2 + 1 + 2)
+        // The group chat has no row to read it in, so it is not on the badge.
+        #expect(summary.badge == 2 + 2)
         #expect(summary.mentions == 3)
         #expect(summary.unreadCount(streamID: 5) == 10)
         #expect(summary.unreadCount(streamID: 6) == 0)

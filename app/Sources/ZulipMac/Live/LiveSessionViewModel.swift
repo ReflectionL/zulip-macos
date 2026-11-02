@@ -3355,9 +3355,11 @@ final class LiveSessionViewModel {
             currentUserID: identity.userID,
             serverConversations: snapshot.recentDirectConversations
         )
+        // A deactivated account's unread messages still count on the Dock badge,
+        // so its conversation stays listed until they are read.
         let directMessages = snapshot.users
             .filter {
-                $0.isActive
+                $0.isActive || unread.unreadCount(directMessageWith: $0.userID) > 0
             }
             .map {
                 DirectMessageSnapshot(
