@@ -402,10 +402,7 @@ struct ConversationSurface: View {
             ComposerView(
                 conversationTitle: page.title,
                 hint: composerHint,
-                draft: Binding(
-                    get: { composerText.value },
-                    set: { composerText.value = $0 }
-                ),
+                draft: $composerText.value,
                 isFocused: $isComposerFocused,
                 isDisabled: isOffline,
                 quote: pendingQuote,
