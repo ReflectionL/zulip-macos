@@ -241,13 +241,19 @@ struct SidebarView: View {
                                     let topicKey = model.key(for: topic)
                                     SidebarRow(
                                         title: TopicName.display(topic.name),
-                                        systemImage: "text.bubble",
                                         unreadCount: topic.unreadCount,
                                         isSelected: selection == topicKey,
                                         isMuted: topic.notification == .muted
                                             || (channel.isMuted && topic.notification != .unmuted
                                                 && topic.notification != .followed),
-                                        isFollowed: topic.notification == .followed
+                                        isFollowed: topic.notification == .followed,
+                                        leading: {
+                                            // The channel's hue, smaller and less saturated than
+                                            // the channel's own dot.
+                                            Circle()
+                                                .fill(ChannelColor.topicColor(hex: channel.colorHex))
+                                                .frame(width: 6, height: 6)
+                                        }
                                     ) {
                                         selection = topicKey
                                     }

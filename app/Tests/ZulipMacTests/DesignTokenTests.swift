@@ -84,6 +84,18 @@ struct DesignTokenTests {
             }
         }
 
+        // Topic dots keep the hue but are less saturated than the channel's dot.
+        for hex in Self.zulipDefaultChannelColors {
+            let channel = OKLCHColor(rgb: ChannelColor.normalized(hex, dark: false))
+            let topic = OKLCHColor(
+                rgb: ChannelColor.normalized(
+                    hex, dark: false, maximumChroma: ChannelColor.topicMaximumChroma
+                )
+            )
+            #expect(topic.chroma <= ChannelColor.topicMaximumChroma + 0.01)
+            #expect(topic.chroma <= channel.chroma)
+        }
+
         // A gray channel stays gray.
         let gray = ChannelColor.normalized(0xC2C2C2, dark: false)
         #expect((gray >> 16) & 0xFF == gray & 0xFF)
