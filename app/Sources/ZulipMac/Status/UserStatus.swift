@@ -80,7 +80,7 @@ struct UserStatusDisplay: Equatable, Sendable {
 
     /// The choices Zulip's web app offers, with its emoji names.
     static let suggestions: [UserStatusDisplay] = [
-        suggestion("In a meeting", name: "calendar", code: "1f4c6"),
+        suggestion("In a meeting", name: "calendar", code: "1f4c5"),
         suggestion("Commuting", name: "bus", code: "1f68c"),
         suggestion("Out sick", name: "sick", code: "1f912"),
         suggestion("Vacationing", name: "palm_tree", code: "1f334"),

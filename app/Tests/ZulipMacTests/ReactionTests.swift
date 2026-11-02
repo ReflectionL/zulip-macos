@@ -95,6 +95,36 @@ struct ReactionTests {
         #expect(EmojiCatalog.recommended.allSatisfy { EmojiCatalog.glyph(forCode: $0.code) != nil })
     }
 
+    @Test("Catalog entries use Zulip's own names and zero-padded codes")
+    func entriesFollowZulip() {
+        // Zulip's status endpoint rejects an emoji whose name is not one of its
+        // names for that code, so a name from another emoji list is a bad request.
+        #expect(EmojiCatalog.all.first { $0.code == "00a9" }?.name == "copyright")
+        #expect(EmojiCatalog.all.first { $0.code == "0023-20e3" }?.name == "hash")
+        #expect(EmojiCatalog.all.first { $0.code == "2139" }?.name == "info")
+        #expect(EmojiCatalog.all.first { $0.code == "1f4c5" }?.name == "calendar")
+        #expect(!EmojiCatalog.all.contains { $0.name == "information_source" })
+        let digits = Set("0123456789abcdef")
+        #expect(
+            EmojiCatalog.all.allSatisfy { entry in
+                entry.code.split(separator: "-").allSatisfy {
+                    $0.count >= 4 && $0.allSatisfy(digits.contains)
+                }
+            }
+        )
+        #expect(Set(EmojiCatalog.all.map(\.code)).count == EmojiCatalog.all.count)
+    }
+
+    @Test("The status presets carry Zulip's emoji codes")
+    func statusPresets() {
+        let codes = Dictionary(
+            uniqueKeysWithValues: UserStatusDisplay.suggestions.map { ($0.text, $0.emojiCode) }
+        )
+        #expect(codes["In a meeting"] == "1f4c5")
+        #expect(codes["Commuting"] == "1f68c")
+        #expect(codes["Out sick"] == "1f912")
+    }
+
     @Test("The catalog is searchable by word and by pasted emoji")
     func search() {
         #expect(EmojiCatalog.all.count > 1000)
