@@ -285,7 +285,7 @@ struct ConversationSurface: View {
                                     mediaFailures: mediaFailures,
                                     requestMedia: requestMedia,
                                     retryMedia: retryMedia,
-                                    readers: readReceipts?.messageID == message.id
+                                    readers: readReceipts?.shownMessageID == message.id
                                         ? readReceipts?.readers ?? []
                                         : [],
                                     senderStatus: continuations.contains(message.id)

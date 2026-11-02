@@ -345,14 +345,14 @@ struct LiveSessionTests {
         await eventually { model.connectionState == .connected }
 
         let key = ConversationKey.directMessage(accountID: "account-1", recipientIDs: [22])
-        func page(ownMessageID: Int64) -> ConversationPage {
+        func page(ownMessageID: Int64, earlierOwnMessageID: Int64? = nil) -> ConversationPage {
             ConversationPage(
                 key: key,
                 title: "Theo Martin",
                 subtitle: "",
-                messages: [
+                messages: [earlierOwnMessageID, ownMessageID].compactMap { $0 }.map { id in
                     MessageViewData(
-                        id: ownMessageID,
+                        id: id,
                         accountID: "account-1",
                         conversationKey: key,
                         senderID: 9,
@@ -361,8 +361,8 @@ struct LiveSessionTests {
                         timestamp: Date(timeIntervalSince1970: 1_700_000_000),
                         content: [],
                         isOwnMessage: true
-                    ),
-                ]
+                    )
+                }
             )
         }
         func receiptRequests() -> Int {
@@ -399,6 +399,24 @@ struct LiveSessionTests {
         )
         // Everyone in the direct message has read it, so there is nothing left to ask.
         #expect(!model.pollReadReceipts(messageID: 70, key: key))
+
+        // A newer message with no answer yet: its readers are asked for, and the
+        // earlier message keeps its avatars until the answer comes.
+        let sent = model.readReceiptDisplay(for: page(ownMessageID: 74, earlierOwnMessageID: 70))
+        #expect(sent?.messageID == 74)
+        #expect(sent?.shownMessageID == 70)
+        #expect(sent?.readers.map(\.userID) == [22])
+        core.emit(
+            .readReceiptsLoaded(accountID: "account-1", messageID: 74, userIDs: [], isAvailable: true)
+        )
+        await eventually {
+            model.readReceiptDisplay(for: page(ownMessageID: 74, earlierOwnMessageID: 70))?
+                .shownMessageID == 74
+        }
+        #expect(
+            model.readReceiptDisplay(for: page(ownMessageID: 74, earlierOwnMessageID: 70))?
+                .readers.isEmpty == true
+        )
 
         // Two messages in a row the server cannot report: stop for the session.
         core.emit(
