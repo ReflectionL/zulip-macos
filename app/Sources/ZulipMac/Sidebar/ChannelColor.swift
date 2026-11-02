@@ -9,6 +9,8 @@ enum ChannelColor {
     static let lightLightness = 0.62
     static let darkLightness = 0.74
     static let maximumChroma = 0.12
+    /// Topics wear their channel's hue, quieter than the channel's own dot.
+    static let topicMaximumChroma = 0.05
 
     /// The server's `#rrggbb` color; a mid gray when it cannot be read.
     static func rgb(fromHex hex: String) -> UInt32 {
@@ -21,7 +23,11 @@ enum ChannelColor {
 
     /// The same hue at the lightness for dark or light appearance, with its
     /// chroma capped.
-    static func normalized(_ rgb: UInt32, dark: Bool) -> UInt32 {
+    static func normalized(
+        _ rgb: UInt32,
+        dark: Bool,
+        maximumChroma: Double = ChannelColor.maximumChroma
+    ) -> UInt32 {
         let color = OKLCHColor(rgb: rgb)
         return OKLCHColor(
             lightness: dark ? darkLightness : lightLightness,
@@ -35,6 +41,15 @@ enum ChannelColor {
         return Color.dynamic(
             light: normalized(value, dark: false),
             dark: normalized(value, dark: true)
+        )
+    }
+
+    /// The channel's colour with less saturation, for the dots of its topics.
+    static func topicColor(hex: String) -> Color {
+        let value = rgb(fromHex: hex)
+        return Color.dynamic(
+            light: normalized(value, dark: false, maximumChroma: topicMaximumChroma),
+            dark: normalized(value, dark: true, maximumChroma: topicMaximumChroma)
         )
     }
 }
