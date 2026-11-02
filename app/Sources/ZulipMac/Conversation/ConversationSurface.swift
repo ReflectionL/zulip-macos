@@ -428,17 +428,17 @@ struct ConversationSurface: View {
         .onReceive(Self.dayLabelRefreshes) { _ in
             labelsReferenceDate = .now
         }
-        .dropDestination(for: URL.self) { urls, _ in
-            guard let uploadDroppedFiles, !isOffline, !urls.isEmpty else {
+        .onDrop(of: DroppedFiles.acceptedTypes, isTargeted: $isDropTargeted) { providers in
+            guard let upload = uploadDroppedFiles, !isOffline else {
                 return false
             }
-            uploadDroppedFiles(urls)
+            Task { @MainActor in
+                upload(await DroppedFiles.urls(from: providers))
+            }
             return true
-        } isTargeted: { targeted in
-            isDropTargeted = targeted && uploadDroppedFiles != nil && !isOffline
         }
         .overlay {
-            if isDropTargeted {
+            if isDropTargeted, uploadDroppedFiles != nil, !isOffline {
                 RoundedRectangle(cornerRadius: AppTheme.Radius.large, style: .continuous)
                     .strokeBorder(
                         AppTheme.Colors.accentOutline,
