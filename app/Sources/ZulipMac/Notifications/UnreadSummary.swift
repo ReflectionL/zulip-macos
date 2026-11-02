@@ -17,8 +17,10 @@ struct UnreadSummary: Equatable {
     private(set) var directMessages: [Int64: Int] = [:]
     /// Unread messages anywhere that mention the user.
     private(set) var mentions = 0
-    /// What the Dock badge shows: every unread direct message, group ones too,
-    /// plus unread mentions in channels that are not muted.
+    /// What the Dock badge shows: every unread one-to-one direct message (notes
+    /// to self too), plus unread mentions in channels that are not muted. Group
+    /// chats are left out until the sidebar lists them: an unread one had no
+    /// conversation to read it in, so the badge could never clear.
     private(set) var badge = 0
     /// What the account chose for channels and topics, when the summary knows it.
     private(set) var settings: ChannelNotificationSettings?
@@ -58,8 +60,8 @@ struct UnreadSummary: Equatable {
                 }
                 if participants.count == 1, let only = participants.first {
                     directMessages[only, default: 0] += bucket.count
+                    badge += bucket.count
                 }
-                badge += bucket.count
             }
         }
     }

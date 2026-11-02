@@ -13,8 +13,19 @@ struct ReadReceiptReader: Identifiable, Equatable, Sendable {
 
 /// The user's latest sent message in a conversation and who has read it so far.
 struct ReadReceiptDisplay: Equatable, Sendable {
+    /// The message whose readers are being asked for.
     let messageID: Int64
     let readers: [ReadReceiptReader]
+    /// The message the readers are shown under. Until the server first answers
+    /// for a newly sent message, the previous message keeps its receipts, so they
+    /// move once instead of vanishing and coming back a moment later.
+    var shownMessageID: Int64
+
+    init(messageID: Int64, readers: [ReadReceiptReader], shownMessageID: Int64? = nil) {
+        self.messageID = messageID
+        self.readers = readers
+        self.shownMessageID = shownMessageID ?? messageID
+    }
 }
 
 /// When read receipts apply and how often they are refreshed.

@@ -1972,6 +1972,13 @@ struct RegisterDocument {
     zulip_feature_level: u64,
     #[serde(default)]
     realm_users: Vec<UserDocument>,
+    /// Deactivated accounts. Their old direct messages can still be unread.
+    #[serde(default)]
+    realm_non_active_users: Vec<UserDocument>,
+    /// Bots shared by every organization, such as Welcome Bot and Notification
+    /// Bot, which write to new members. They are not in `realm_users`.
+    #[serde(default)]
+    cross_realm_bots: Vec<UserDocument>,
     #[serde(default)]
     subscriptions: Vec<ChannelDocument>,
     #[serde(default)]
@@ -2057,9 +2064,17 @@ impl RegisterDocument {
 
         // A single unusable user, channel, or message must not make the whole
         // account impossible to register.
-        let users = self
-            .realm_users
-            .into_iter()
+        // Without the people behind them, unread direct messages from system
+        // bots and deactivated accounts still counted on the Dock badge but had
+        // no conversation in the sidebar to read them in. Later entries win, so
+        // an organization's own record of a user takes precedence.
+        let non_active = self.realm_non_active_users.into_iter().map(|mut user| {
+            user.is_active = false;
+            user
+        });
+        let users = non_active
+            .chain(self.cross_realm_bots)
+            .chain(self.realm_users)
             .filter_map(|user| user.normalize().ok())
             .collect();
         let channels = self
@@ -2847,6 +2862,7 @@ struct ApiErrorDocument {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::BTreeMap,
         io::{Read, Write},
         net::TcpListener,
         sync::mpsc,
@@ -2858,9 +2874,10 @@ mod tests {
 
     use super::{
         BootstrapState, ChannelSummary, EventQueueClient, MessageSummary, MessageUpdate,
-        RecoveryPolicy, ResyncReason, RetryBackoff, RetryOperation, SyncCycle, SyncError,
-        SyncEvent, SyncReducer, SyncSession, TopicVisibility, TypingNotice, TypingPreferences,
-        TypingScope, UnreadBucket, UserStatus, UserSummary, Value, parse_unread_messages,
+        RecoveryPolicy, RegisterDocument, ResyncReason, RetryBackoff, RetryOperation, SyncCycle,
+        SyncError, SyncEvent, SyncReducer, SyncSession, TopicVisibility, TypingNotice,
+        TypingPreferences, TypingScope, UnreadBucket, UserStatus, UserSummary, Value,
+        parse_unread_messages,
     };
     use crate::auth::SecretString;
 
@@ -2996,6 +3013,45 @@ mod tests {
 
         let poll_request = requests.recv().expect("poll request");
         assert_poll_request(&poll_request);
+    }
+
+    #[test]
+    fn register_keeps_system_bots_and_deactivated_users_for_their_direct_messages() {
+        let document: RegisterDocument = serde_json::from_str(
+            r#"{
+                "result":"success",
+                "queue_id":"queue",
+                "last_event_id":1,
+                "realm_users":[
+                    {"user_id":7,"full_name":"Maya","is_active":true,"is_bot":false}
+                ],
+                "realm_non_active_users":[
+                    {"user_id":8,"full_name":"Former colleague","is_active":true,"is_bot":false},
+                    {"user_id":7,"full_name":"Stale Maya","is_active":false,"is_bot":false}
+                ],
+                "cross_realm_bots":[
+                    {"user_id":3,"full_name":"Notification Bot","is_bot":true}
+                ]
+            }"#,
+        )
+        .expect("register document");
+        let registered = document.normalize().expect("normalized register");
+        let reducer = SyncReducer::new(1, registered.bootstrap);
+        let users: BTreeMap<i64, UserSummary> = reducer
+            .snapshot()
+            .users
+            .into_iter()
+            .map(|user| (user.id, user))
+            .collect();
+
+        assert_eq!(users.len(), 3);
+        assert!(users[&3].is_bot && users[&3].is_active);
+        assert_eq!(users[&3].full_name, "Notification Bot");
+        // A deactivated account stays inactive whatever its record says.
+        assert!(!users[&8].is_active);
+        // The organization's own list wins over a stale duplicate.
+        assert_eq!(users[&7].full_name, "Maya");
+        assert!(users[&7].is_active);
     }
 
     #[test]

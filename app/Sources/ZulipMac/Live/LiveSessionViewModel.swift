@@ -1495,7 +1495,16 @@ final class LiveSessionViewModel {
         else {
             return nil
         }
-        let readers = (readReceiptReaders[messageID] ?? []).compactMap { userID -> ReadReceiptReader? in
+        // A message just sent has no answer yet. Its readers used to be empty
+        // until the first poll came back, so the previous message's avatars
+        // faded out and straight back in under the new one.
+        let shownMessageID = readReceiptReaders[messageID] == nil
+            ? page.messages.last {
+                $0.isOwnMessage && $0.id > 0 && $0.id < messageID
+                    && $0.deliveryState == .sent && readReceiptReaders[$0.id] != nil
+            }?.id ?? messageID
+            : messageID
+        let readers = (readReceiptReaders[shownMessageID] ?? []).compactMap { userID -> ReadReceiptReader? in
             guard userID != identity.userID, let name = userNames[userID] else {
                 return nil
             }
@@ -1506,7 +1515,11 @@ final class LiveSessionViewModel {
                 avatarURL: avatarURLs[userID]
             )
         }
-        return ReadReceiptDisplay(messageID: messageID, readers: readers)
+        return ReadReceiptDisplay(
+            messageID: messageID,
+            readers: readers,
+            shownMessageID: shownMessageID
+        )
     }
 
     /// Asks who has read `messageID` unless the app is inactive, offline or asked
@@ -3355,9 +3368,11 @@ final class LiveSessionViewModel {
             currentUserID: identity.userID,
             serverConversations: snapshot.recentDirectConversations
         )
+        // A deactivated account's unread messages still count on the Dock badge,
+        // so its conversation stays listed until they are read.
         let directMessages = snapshot.users
             .filter {
-                $0.isActive
+                $0.isActive || unread.unreadCount(directMessageWith: $0.userID) > 0
             }
             .map {
                 DirectMessageSnapshot(
