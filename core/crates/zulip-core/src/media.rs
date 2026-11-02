@@ -4,7 +4,7 @@ use std::{
     fmt::Write as _,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use futures_util::StreamExt;
@@ -42,6 +42,11 @@ const AVATAR_ROUTE_PREFIX: &str = "/user_avatars/";
 /// Where the server proxies images linked from other sites; no credentials needed.
 const EXTERNAL_CONTENT_ROUTE_PREFIX: &str = "/external_content/";
 const MAX_JSON_BYTES: usize = 1_048_576;
+/// What one account's media cache may hold before the pictures used least
+/// recently are deleted.
+const MAX_CACHE_BYTES: u64 = 512 * 1_048_576;
+/// A partial download older than this was left by a session that quit midway.
+const ABANDONED_DOWNLOAD_AGE: Duration = Duration::from_hours(1);
 /// Deadline for a whole picture download; a stalled connection
 /// is cut off much sooner by the client's read timeout.
 const TRANSFER_DEADLINE: Duration = Duration::from_mins(3);
@@ -273,6 +278,7 @@ impl MediaClient {
                 // An earlier build cached an error page as if it were the picture.
                 let _ = fs::remove_file(&final_path).await;
             } else {
+                mark_used(&final_path).await;
                 return cached_media(remote_url, final_path, None, byte_count, true);
             }
         }
@@ -312,6 +318,7 @@ impl MediaClient {
         let byte_count = self
             .write_download_atomically(response, &final_path, &digest, MAX_DOWNLOAD_BYTES)
             .await?;
+        trim_cache(&self.account_cache_directory, MAX_CACHE_BYTES, &final_path).await;
         cached_media(remote_url, final_path, content_type, byte_count, false)
     }
 
@@ -323,6 +330,7 @@ impl MediaClient {
         self.prepare_cache_directory().await?;
 
         if let Some(byte_count) = valid_cached_file(&final_path).await? {
+            mark_used(&final_path).await;
             return cached_media(key, final_path, None, byte_count, true);
         }
 
@@ -356,6 +364,7 @@ impl MediaClient {
         let byte_count = self
             .write_download_atomically(response, &final_path, &digest, MAX_PUBLIC_IMAGE_BYTES)
             .await?;
+        trim_cache(&self.account_cache_directory, MAX_CACHE_BYTES, &final_path).await;
         cached_media(key, final_path, content_type, byte_count, false)
     }
 
@@ -658,6 +667,62 @@ async fn valid_cached_file(path: &Path) -> Result<Option<u64>, MediaError> {
         return Err(MediaError::CacheUnavailable);
     }
     Ok(Some(metadata.len()))
+}
+
+/// Stamps a cached file as used now, so [`trim_cache`] deletes what nobody opens.
+/// Best effort: a file that cannot be stamped is simply trimmed sooner.
+async fn mark_used(path: &Path) {
+    if let Ok(file) = OpenOptions::new().write(true).open(path).await {
+        let _ = file.into_std().await.set_modified(SystemTime::now());
+    }
+}
+
+/// Keeps a cache directory within `limit` bytes by deleting the least recently
+/// used files, never `keep` (the file just written), and clears partial downloads
+/// that a session abandoned. Best effort: the cache is only a copy of the server.
+async fn trim_cache(directory: &Path, limit: u64, keep: &Path) {
+    let Ok(mut entries) = fs::read_dir(directory).await else {
+        return;
+    };
+    let now = SystemTime::now();
+    let mut cached = Vec::new();
+    let mut total = 0_u64;
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        let Ok(metadata) = entry.metadata().await else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+        match path.extension().and_then(std::ffi::OsStr::to_str) {
+            Some("media") => {
+                total = total.saturating_add(metadata.len());
+                cached.push((modified, metadata.len(), path));
+            }
+            Some("part")
+                if now
+                    .duration_since(modified)
+                    .is_ok_and(|age| age > ABANDONED_DOWNLOAD_AGE) =>
+            {
+                let _ = fs::remove_file(&path).await;
+            }
+            _ => {}
+        }
+    }
+    if total <= limit {
+        return;
+    }
+    cached.sort_by_key(|(modified, ..)| *modified);
+    for (_, length, path) in cached {
+        if total <= limit {
+            break;
+        }
+        if path != keep && fs::remove_file(&path).await.is_ok() {
+            total = total.saturating_sub(length);
+        }
+    }
 }
 
 /// Whether a response type is a web page or data document rather than a picture.
@@ -1023,6 +1088,68 @@ mod tests {
             tokio::fs::read(local_path).await.expect("cached bytes"),
             b"fixture-png"
         );
+    }
+
+    #[tokio::test]
+    async fn trimming_deletes_the_least_recently_used_files_and_abandoned_downloads() {
+        use std::time::{Duration, SystemTime};
+
+        let fixture = TempDir::new().expect("fixture directory");
+        let now = SystemTime::now();
+        let write = |name: &str, age: Duration| {
+            let path = fixture.path().join(name);
+            std::fs::write(&path, [0_u8; 10]).expect("fixture file");
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .and_then(|file| file.set_modified(now - age))
+                .expect("fixture time");
+            path
+        };
+        let oldest = write("a.media", Duration::from_mins(5));
+        let older = write("b.media", Duration::from_secs(200));
+        let newest = write("c.media", Duration::from_secs(100));
+        let abandoned = write(".d.1.part", Duration::from_hours(2));
+        let running = write(".e.2.part", Duration::from_secs(5));
+
+        super::trim_cache(fixture.path(), 15, &newest).await;
+
+        assert!(!oldest.exists());
+        assert!(!older.exists());
+        assert!(newest.exists());
+        assert!(!abandoned.exists());
+        assert!(running.exists());
+
+        // Under the limit nothing else goes.
+        super::trim_cache(fixture.path(), 15, &newest).await;
+        assert!(newest.exists());
+    }
+
+    #[tokio::test]
+    async fn using_a_cached_file_protects_it_from_trimming() {
+        use std::time::{Duration, SystemTime};
+
+        let fixture = TempDir::new().expect("fixture directory");
+        let path = fixture.path().join("a.media");
+        std::fs::write(&path, [0_u8; 10]).expect("fixture file");
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .and_then(|file| file.set_modified(SystemTime::now() - Duration::from_hours(5)))
+            .expect("fixture time");
+        let other = fixture.path().join("b.media");
+        std::fs::write(&other, [0_u8; 10]).expect("fixture file");
+        std::fs::File::options()
+            .write(true)
+            .open(&other)
+            .and_then(|file| file.set_modified(SystemTime::now() - Duration::from_hours(1)))
+            .expect("fixture time");
+
+        super::mark_used(&path).await;
+        super::trim_cache(fixture.path(), 10, fixture.path().join("none").as_path()).await;
+
+        assert!(path.exists());
+        assert!(!other.exists());
     }
 
     #[tokio::test]

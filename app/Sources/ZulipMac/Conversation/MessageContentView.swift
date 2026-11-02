@@ -16,6 +16,10 @@ struct MessageContentView: View {
     /// Small gray text that continues the last paragraph on its line, such as
     /// "(edited)". Only shown when [`canInlineTrailingNote`] is true.
     var trailingNote: String?
+    /// Blank room, in points, kept at the end of the last paragraph for
+    /// something drawn over it (read receipts). It wraps to a line of its own
+    /// when the last line is full. Only used when [`canInlineTrailingNote`] is true.
+    var trailingReservation: CGFloat = 0
 
     /// Whether the content ends in a paragraph that can carry a trailing note.
     static func canInlineTrailingNote(_ blocks: [ContentBlock]) -> Bool {
@@ -51,7 +55,8 @@ struct MessageContentView: View {
                         mediaFailures: mediaFailures,
                         requestMedia: requestMedia,
                         retryMedia: retryMedia,
-                        trailingNote: index == blocks.count - 1 ? trailingNote : nil
+                        trailingNote: index == blocks.count - 1 ? trailingNote : nil,
+                        trailingReservation: index == blocks.count - 1 ? trailingReservation : 0
                     )
                 }
             }
@@ -129,12 +134,17 @@ private struct ContentBlockView: View {
     let requestMedia: ((String) -> Void)?
     let retryMedia: ((String) -> Void)?
     var trailingNote: String?
+    var trailingReservation: CGFloat = 0
 
     @ViewBuilder
     var body: some View {
         switch block {
         case let .paragraph(content):
-            InlineContentText(content: content, trailingNote: trailingNote)
+            InlineContentText(
+                content: content,
+                trailingNote: trailingNote,
+                trailingReservation: trailingReservation
+            )
 
         case let .heading(level, content):
             InlineContentText(content: content, font: Self.headingFont(level: level))
@@ -349,6 +359,7 @@ private struct InlineContentText: View {
     let content: [InlineContent]
     var font: Font = AppTheme.Typography.body
     var trailingNote: String?
+    var trailingReservation: CGFloat = 0
 
     var body: some View {
         Text(attributedContent)
@@ -367,6 +378,14 @@ private struct InlineContentText: View {
             note.font = AppTheme.Typography.caption
             note.foregroundColor = AppTheme.Colors.tertiaryText
             result.append(note)
+        }
+        if trailingReservation > 0 {
+            // A breakable space, then one no-break space widened by kerning:
+            // the room stays in one piece and moves to the next line whole.
+            var room = AttributedString("\u{00A0}")
+            room.kern = trailingReservation
+            result.append(AttributedString(" "))
+            result.append(room)
         }
         return result
     }

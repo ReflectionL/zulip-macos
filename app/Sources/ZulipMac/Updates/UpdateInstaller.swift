@@ -158,6 +158,8 @@ struct SystemUpdateInstaller: UpdateInstalling {
           else
             mv "$backup" "$app"
           fi
+        else
+          rm -rf "$staged"
         fi
         open "$app"
         rm -rf "$work"

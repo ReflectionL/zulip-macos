@@ -74,8 +74,8 @@ file. Do not disable Gatekeeper globally.
   one line of text, and unknown commands are shown as written.
 - Tables hold inline content only and are cut to 200 rows and 24 columns.
 - A moved message shows "(edited)", like an edited one.
-- The media cache has no size limit yet, and read receipts rely on polling
-  (`REL-001`).
+- Read receipts rely on polling (`REL-001`). The media cache keeps up to
+  512 MiB per account and then drops the pictures used least recently.
 - Releases are not notarized and the self-hosted smoke test is pending
   (`REL-005`).
 
