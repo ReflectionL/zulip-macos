@@ -39,6 +39,14 @@ struct MessageGroupingTests {
         #expect(MessageGrouping.continuationIDs(in: messages) == [2])
     }
 
+    @Test("A direct message without a topic still joins its sender's block")
+    func missingTopicMatchesEmptyTopic() {
+        let server = directMessage(1, topic: "")
+        let echo = directMessage(2, topic: nil)
+        #expect(MessageGrouping.continuationIDs(in: [server, echo]) == [2])
+        #expect(MessageGrouping.continuationIDs(in: [echo, server]) == [1])
+    }
+
     @Test("Each pause is measured from the previous message, not the block start")
     func chainedWindow() {
         let messages = [
@@ -85,6 +93,22 @@ struct MessageGroupingTests {
         #expect(SenderColor.index(for: 22) == SenderColor.index(for: 22))
         #expect(SenderColor.index(for: 22) != SenderColor.index(for: 23))
         #expect((0..<SenderColor.palette.count).contains(SenderColor.index(for: -5)))
+    }
+
+    private func directMessage(_ id: Int64, topic: String?) -> MessageViewData {
+        MessageViewData(
+            id: id,
+            accountID: "acme",
+            conversationKey: .directMessage(accountID: "acme", recipientIDs: [22]),
+            senderID: 9,
+            senderName: "Sender 9",
+            senderInitials: "S",
+            timestamp: base.addingTimeInterval(TimeInterval(id)),
+            content: [.paragraph([.text("m\(id)")])],
+            isOwnMessage: true,
+            sourceStreamID: nil,
+            sourceTopic: topic
+        )
     }
 
     private func message(

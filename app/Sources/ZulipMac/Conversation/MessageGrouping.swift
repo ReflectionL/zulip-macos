@@ -47,8 +47,10 @@ enum MessageGrouping {
         current.senderID == previous.senderID
             && current.conversationKey == previous.conversationKey
             && current.sourceStreamID == previous.sourceStreamID
-            // Zulip treats topic names case-insensitively.
-            && current.sourceTopic?.lowercased() == previous.sourceTopic?.lowercased()
+            // Zulip treats topic names case-insensitively. A direct message has no
+            // topic: the server reports it as an empty string, a just-sent echo as
+            // none, and the two must not split a block (the echo flashed a header).
+            && (current.sourceTopic ?? "").lowercased() == (previous.sourceTopic ?? "").lowercased()
             && abs(current.timestamp.timeIntervalSince(previous.timestamp)) < window
             && calendar.isDate(current.timestamp, inSameDayAs: previous.timestamp)
     }

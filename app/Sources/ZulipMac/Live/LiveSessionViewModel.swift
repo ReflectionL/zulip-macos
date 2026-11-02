@@ -2666,7 +2666,8 @@ final class LiveSessionViewModel {
                 content: message.content,
                 isOwnMessage: message.senderID == identity?.userID,
                 sourceStreamID: message.streamID,
-                sourceTopic: message.topic,
+                // Zulip sends direct messages with an empty topic; they have none.
+                sourceTopic: message.streamID == nil ? nil : message.topic,
                 isStarred: message.flags.contains("starred"),
                 reactions: Self.groupReactions(message.reactions, me: identity?.userID),
                 isRead: message.flags.contains("read"),
