@@ -3172,6 +3172,8 @@ final class LiveSessionViewModel {
             return
         }
         let topics = Array(knownTopics.values)
+        // Grouped once, not filtered out of every topic for each channel.
+        let topicsByChannel = Dictionary(grouping: topics, by: \.streamID)
         let channels = sidebar.channels.map { channel in
             ChannelSnapshot(
                 streamID: channel.streamID,
@@ -3180,8 +3182,7 @@ final class LiveSessionViewModel {
                 unreadCount: channel.unreadCount,
                 isMuted: channel.isMuted,
                 notifiesForAllMessages: channel.notifiesForAllMessages,
-                topics: topics
-                    .filter { $0.streamID == channel.streamID }
+                topics: (topicsByChannel[channel.streamID] ?? [])
                     .sorted {
                         if $0.maxMessageID == $1.maxMessageID {
                             return $0.name.localizedCaseInsensitiveCompare($1.name)
@@ -3346,6 +3347,7 @@ final class LiveSessionViewModel {
         presence: [Int64: PresenceState] = [:],
         unread: UnreadSummary = UnreadSummary()
     ) -> SidebarSnapshot {
+        let topicsByChannel = Dictionary(grouping: topics, by: \.streamID)
         let host = URL(string: identity.serverURL)?.host ?? identity.serverURL
         let organization = host.split(separator: ".").first
             .map { String($0).capitalized } ?? host
@@ -3399,8 +3401,7 @@ final class LiveSessionViewModel {
                 ),
             ],
             channels: snapshot.channels.map { channel in
-                let channelTopics = topics
-                    .filter { $0.streamID == channel.streamID }
+                let channelTopics = topicsByChannel[channel.streamID] ?? []
                 return ChannelSnapshot(
                     streamID: channel.streamID,
                     name: channel.name,

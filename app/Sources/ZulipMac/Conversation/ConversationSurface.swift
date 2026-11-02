@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import Observation
 import SwiftUI
 import UniformTypeIdentifiers
 import ZulipCoreBindings
@@ -59,7 +60,10 @@ struct ConversationSurface: View {
     var sourceLabel: ((MessageViewData) -> String?)?
 
     @State private var messages: [MessageViewData]
-    @State private var draft = ""
+    /// The composer's text. Held in an observable box that only the composer's
+    /// own body reads: as plain `@State` here, every keystroke re-evaluated this
+    /// whole view, regrouping every message and rebuilding every visible row.
+    @State private var composerText: ComposerText
     /// Whether a saved draft arriving later may still fill the composer. Cleared
     /// by a send: re-evaluating this view right after submitting can pass the
     /// just-sent text as `initialDraft` again, and restoring it would leave the
@@ -179,7 +183,7 @@ struct ConversationSurface: View {
         self.userStatus = userStatus
         self.sourceLabel = sourceLabel
         _messages = State(initialValue: page.messages)
-        _draft = State(initialValue: initialDraft)
+        _composerText = State(initialValue: ComposerText(initialDraft))
     }
 
     var body: some View {
@@ -344,7 +348,9 @@ struct ConversationSurface: View {
                         }
                         return
                     }
-                    followsNewest = new.isNearBottom
+                    if followsNewest != new.isNearBottom {
+                        followsNewest = new.isNearBottom
+                    }
                 }
                 .task(
                     id: TimelineFocus(
@@ -396,7 +402,10 @@ struct ConversationSurface: View {
             ComposerView(
                 conversationTitle: page.title,
                 hint: composerHint,
-                draft: $draft,
+                draft: Binding(
+                    get: { composerText.value },
+                    set: { composerText.value = $0 }
+                ),
                 isFocused: $isComposerFocused,
                 isDisabled: isOffline,
                 quote: pendingQuote,
@@ -499,8 +508,8 @@ struct ConversationSurface: View {
         }
         .onChange(of: initialDraft) {
             // Persisted drafts can arrive after the surface appears.
-            if draft.isEmpty, acceptsSavedDraft {
-                draft = initialDraft
+            if composerText.value.isEmpty, acceptsSavedDraft {
+                composerText.value = initialDraft
             }
         }
         .task(id: attachmentInsertion?.id) {
@@ -577,7 +586,7 @@ struct ConversationSurface: View {
     }
 
     private func sendDraft() {
-        let typed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let typed = composerText.value.trimmingCharacters(in: .whitespacesAndNewlines)
         let content = [pendingQuote?.markdown, typed.isEmpty ? nil : typed]
             .compactMap { $0 }
             .joined(separator: "\n\n")
@@ -612,7 +621,7 @@ struct ConversationSurface: View {
         // Forget the saved text now, not on the next change callback, so a
         // re-evaluation in between cannot read the sent message back as a draft.
         draftChanged?("")
-        draft = ""
+        composerText.value = ""
         followsNewest = true
     }
 
@@ -626,12 +635,25 @@ struct ConversationSurface: View {
             isComposerFocused = true
             return
         }
-        if !draft.isEmpty, draft.last?.isWhitespace == false {
-            draft.append("\n")
+        if !composerText.value.isEmpty, composerText.value.last?.isWhitespace == false {
+            composerText.value.append("\n")
         }
-        draft.append(attachmentInsertion.markdown)
+        composerText.value.append(attachmentInsertion.markdown)
         consumeAttachmentInsertion?(attachmentInsertion.id)
         isComposerFocused = true
+    }
+}
+
+/// The text being composed. A reference type, so that the surface can hand it
+/// to the composer without reading it: only views that read `value` in their
+/// body are redrawn when it changes.
+@MainActor
+@Observable
+private final class ComposerText {
+    var value: String
+
+    init(_ value: String = "") {
+        self.value = value
     }
 }
 

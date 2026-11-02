@@ -438,8 +438,8 @@ become active; completed rows are never removed.
   conditional for the beta release.
 - `REL-005` must pass one real standard HTTPS self-hosted smoke target before
   a GitHub Beta can be published; the Zulip Cloud target already passes.
-- The media cache has a strict 32 MiB per-file bound but no aggregate LRU quota
-  yet; aggregate eviction belongs in `REL-001` performance/cache work.
+- The media cache has a strict 32 MiB per-file bound and a 512 MiB per-account
+  quota; the least recently used files are deleted after a download.
 
 - The live snapshot still carries every message received since launch and is
   copied across FFI on each change; a busy organization will slow down over a
