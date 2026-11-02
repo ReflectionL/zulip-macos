@@ -1136,8 +1136,23 @@ private struct MessageRow: View {
                 mediaFailures: mediaFailures,
                 requestMedia: requestMedia,
                 retryMedia: retryMedia,
-                trailingNote: statusContinuesText ? trailingStatus : nil
+                trailingNote: statusContinuesText ? trailingStatus : nil,
+                trailingReservation: receiptsInline
+                    ? ReadReceiptStack.width(
+                        readerCount: readers.count,
+                        avatarSize: Self.inlineReceiptSize
+                    )
+                    : 0
             )
+            // Read receipts sit inside the message, at the end of its last line,
+            // in room the text leaves for them. On a line of their own they made
+            // the message grow and shrink, and everything below jump, each time
+            // they moved to a newer message.
+            .overlay(alignment: .bottomTrailing) {
+                if receiptsInline {
+                    receiptStack(avatarSize: Self.inlineReceiptSize)
+                }
+            }
 
             // Content that does not end in a paragraph (a picture, code, a list)
             // has no line to continue, so the note gets a line of its own.
@@ -1174,14 +1189,10 @@ private struct MessageRow: View {
                 )
             }
 
-            if !readers.isEmpty {
-                ReadReceiptStack(
-                    readers: readers,
-                    mediaLocalURLs: mediaLocalURLs,
-                    requestMedia: requestMedia
-                )
-                .frame(maxWidth: .infinity, alignment: .trailing)
-                .transition(.opacity)
+            // Content that does not end in a paragraph has no line to share.
+            if !readers.isEmpty, !receiptsInline {
+                receiptStack(avatarSize: 16)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
             }
         }
         .animation(AppTheme.Motion.base, value: readers)
@@ -1214,6 +1225,25 @@ private struct MessageRow: View {
         .buttonStyle(.borderless)
         .foregroundStyle(AppTheme.Colors.secondaryText)
         .font(AppTheme.Typography.caption)
+    }
+
+    /// Read receipts small enough to sit on a line of body text.
+    private static var inlineReceiptSize: CGFloat {
+        14 * InterfaceScale.shared.factor
+    }
+
+    private var receiptsInline: Bool {
+        !readers.isEmpty && MessageContentView.canInlineTrailingNote(message.content)
+    }
+
+    private func receiptStack(avatarSize: CGFloat) -> some View {
+        ReadReceiptStack(
+            readers: readers,
+            avatarSize: avatarSize,
+            mediaLocalURLs: mediaLocalURLs,
+            requestMedia: requestMedia
+        )
+        .transition(.opacity)
     }
 
     /// The small gray note after the message: "Sending…" until the server has it,
