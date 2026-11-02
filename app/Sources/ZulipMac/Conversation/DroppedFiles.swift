@@ -46,12 +46,17 @@ enum DroppedFiles {
         return "\(base).\(preferred)"
     }
 
+    /// Main-actor isolated like `urls(from:)`, so the provider, which is not
+    /// `Sendable`, never leaves the actor; only its results cross back.
+    @MainActor
     private static func fileURL(from provider: NSItemProvider) async -> URL? {
         guard provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) else {
             return nil
         }
         return await withCheckedContinuation { continuation in
-            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+            // `@Sendable`, so the callback (which runs on a background queue) is
+            // not taken to belong to the main actor.
+            _ = provider.loadObject(ofClass: URL.self) { @Sendable url, _ in
                 continuation.resume(returning: url.flatMap { $0.isFileURL ? $0 : nil })
             }
         }
@@ -59,6 +64,7 @@ enum DroppedFiles {
 
     /// Copies the picture the provider offers into a folder of its own: the file
     /// the system hands over is deleted as soon as the callback returns.
+    @MainActor
     private static func copiedPicture(from provider: NSItemProvider) async -> URL? {
         guard let type = provider.registeredContentTypes.first(where: { $0.conforms(to: .image) })
         else {
@@ -66,7 +72,7 @@ enum DroppedFiles {
         }
         let name = fileName(suggested: provider.suggestedName, type: type)
         return await withCheckedContinuation { continuation in
-            _ = provider.loadFileRepresentation(forTypeIdentifier: type.identifier) { source, _ in
+            _ = provider.loadFileRepresentation(forTypeIdentifier: type.identifier) { @Sendable source, _ in
                 continuation.resume(returning: source.flatMap { copy($0, as: name) })
             }
         }
