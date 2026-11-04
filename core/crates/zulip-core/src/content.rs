@@ -262,10 +262,7 @@ impl ContentParser {
                 "head" => Vec::new(),
                 "script" | "style" | "iframe" | "object" | "embed" | "template" | "svg"
                 | "math" => self.block(unsafe_block()),
-                "p" => {
-                    let inline = self.parse_inline_children(node, depth + 1);
-                    self.paragraph_blocks(inline)
-                }
+                "p" => self.parse_paragraph(node, depth + 1),
                 "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
                     let level = element.name().as_bytes()[1] - b'0';
                     let content = self.parse_inline_children(node, depth + 1);
@@ -346,6 +343,71 @@ impl ContentParser {
             }
         }
         self.block(ContentBlock::List { items, ordered })
+    }
+
+    /// A paragraph. A picture written inline (an `<img>`, alone or inside a
+    /// link) is lifted out as an image block of its own, the way the server's
+    /// `message_inline_image` previews are, instead of being reduced to its
+    /// alt text; the text around it stays in paragraphs.
+    fn parse_paragraph(&mut self, node: NodeRef<'_, Node>, depth: usize) -> Vec<ContentBlock> {
+        let mut blocks = Vec::new();
+        let mut run: Vec<InlineContent> = Vec::new();
+        for child in node.children() {
+            if let Some(image) = self.inline_picture(child, depth) {
+                if !run.iter().all(is_blank_text) {
+                    let inline = coalesce_text(std::mem::take(&mut run));
+                    blocks.extend(self.paragraph_blocks(inline));
+                }
+                run.clear();
+                blocks.extend(image);
+            } else {
+                run.extend(self.parse_inline_node(child, depth));
+            }
+            if self.exhausted() {
+                break;
+            }
+        }
+        if !run.iter().all(is_blank_text) {
+            blocks.extend(self.paragraph_blocks(coalesce_text(run)));
+        }
+        blocks
+    }
+
+    /// The image block for a paragraph child that is a picture: an `<img>`
+    /// that is not an emoji, or a link whose only content is one.
+    fn inline_picture(
+        &mut self,
+        node: NodeRef<'_, Node>,
+        depth: usize,
+    ) -> Option<Vec<ContentBlock>> {
+        let element = node.value().as_element()?;
+        match element.name() {
+            "img" if !is_emoji(element) => {
+                let url = element
+                    .attr("data-original-src")
+                    .or_else(|| element.attr("src"))
+                    .and_then(safe_url)
+                    .filter(|url| !is_static_placeholder(url))?;
+                self.visit(depth)
+                    .then(|| self.parse_image_with_url(element, url))
+            }
+            "a" => {
+                let has_picture = node.children().any(|child| {
+                    child
+                        .value()
+                        .as_element()
+                        .is_some_and(|inner| inner.name() == "img" && !is_emoji(inner))
+                });
+                let has_text = node.children().any(|child| {
+                    child
+                        .value()
+                        .as_text()
+                        .is_some_and(|t| !t.trim().is_empty())
+                });
+                (has_picture && !has_text).then(|| self.parse_inline_image(node))
+            }
+            _ => None,
+        }
     }
 
     /// A paragraph, with each display formula lifted out as a block of its own.
@@ -599,7 +661,10 @@ impl ContentParser {
         if let Some(original) = &original_url {
             self.previewed_links.push(original.clone());
         }
-        let preview_url = image.attr("src").and_then(safe_url);
+        let preview_url = image
+            .attr("src")
+            .and_then(safe_url)
+            .filter(|url| !is_static_placeholder(url));
         // Uploads show their original. Anything else (a picture linked from another
         // site, a video thumbnail) shows the server's preview, because the link
         // itself may be a web page, plain HTTP, or far too large.
@@ -1090,6 +1155,11 @@ fn image_dimensions(element: &Element) -> (Option<u32>, Option<u32>) {
     (image_dimension(Some(width)), image_dimension(Some(height)))
 }
 
+/// The server's stand-in while it makes a preview (`/static/images/loading/…`).
+fn is_static_placeholder(url: &str) -> bool {
+    url.starts_with("/static/images/loading/")
+}
+
 fn is_emoji(element: &Element) -> bool {
     has_class(element, "emoji")
 }
@@ -1538,6 +1608,41 @@ mod tests {
                 width: Some(1920),
                 height: Some(1080),
             } if url == "/user_uploads/original.png" && alt == "Preview"
+        ));
+    }
+
+    #[test]
+    fn pictures_written_inline_in_a_paragraph_become_image_blocks() {
+        let blocks = parse_zulip_html(
+            r#"<p>look<br><a href="/user_uploads/2/ab/xyz/a.jpg"><img alt="a.jpg"
+                    src="/user_uploads/thumbnail/2/ab/xyz/a.jpg/840x560.webp"></a><br>
+                nice</p>
+                <p><img alt="b.png" src="/user_uploads/2/cd/xyz/b.png"></p>"#,
+        );
+
+        assert!(matches!(&blocks[0], ContentBlock::Paragraph(_)));
+        assert!(matches!(
+            &blocks[1],
+            ContentBlock::Image { url, .. } if url == "/user_uploads/2/ab/xyz/a.jpg"
+        ));
+        assert!(matches!(&blocks[2], ContentBlock::Paragraph(_)));
+        assert!(matches!(
+            &blocks[3],
+            ContentBlock::Image { url, alt, .. }
+                if url == "/user_uploads/2/cd/xyz/b.png" && alt == "b.png"
+        ));
+    }
+
+    #[test]
+    fn a_loading_placeholder_never_stands_in_for_the_picture() {
+        let blocks = parse_zulip_html(
+            r#"<div class="message_inline_image"><a href="https://example.com/page">
+                <img class="image-loading-placeholder"
+                    src="/static/images/loading/loader-black.svg"></a></div>"#,
+        );
+        assert!(matches!(
+            blocks.as_slice(),
+            [ContentBlock::Image { url, .. }] if url == "https://example.com/page"
         ));
     }
 
