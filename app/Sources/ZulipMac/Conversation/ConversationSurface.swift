@@ -915,6 +915,8 @@ private struct MessageRow: View {
     }
 
     @State private var isHovered = false
+    /// Whether the pointer is over the sender's avatar link.
+    @State private var isAvatarHovered = false
     @State private var isHoveringActions = false
     @State private var isPickingReaction = false
     /// The action bar is built the first time the pointer reaches the row, not
@@ -1104,12 +1106,27 @@ private struct MessageRow: View {
             requestMedia: requestMedia
         )
         if let openSenderConversation {
-            Button(action: openSenderConversation) {
+            Button {
+                openSenderConversation()
+                // The click replaces this conversation, so the avatar never
+                // hears the pointer leave and the pointing hand would stay
+                // until the pointer crossed another view. Put the arrow back
+                // once the new conversation is in place.
+                DispatchQueue.main.async { NSCursor.arrow.set() }
+            } label: {
                 avatar
                     .contentShape(Circle())
             }
             .buttonStyle(.plain)
             .pointerStyle(.link)
+            .onHover { isAvatarHovered = $0 }
+            .onDisappear {
+                // Scrolled or switched away while under the pointer.
+                if isAvatarHovered {
+                    isAvatarHovered = false
+                    NSCursor.arrow.set()
+                }
+            }
             .help("Message \(message.senderName) directly")
             .accessibilityLabel("Message \(message.senderName) directly")
         } else {
