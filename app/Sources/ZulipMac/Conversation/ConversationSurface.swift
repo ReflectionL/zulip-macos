@@ -58,6 +58,8 @@ struct ConversationSurface: View {
     /// Where a message was posted ("#channel › topic"), shown on hover in
     /// timelines that mix topics; nil where the header already names it.
     var sourceLabel: ((MessageViewData) -> String?)?
+    /// Opens the one-to-one conversation with a sender, from their avatar.
+    var openDirectMessage: ((Int64) -> Void)?
 
     @State private var messages: [MessageViewData]
     /// The composer's text. Held in an observable box that only the composer's
@@ -135,7 +137,8 @@ struct ConversationSurface: View {
         readReceipts: ReadReceiptDisplay? = nil,
         pollReadReceipts: ((Int64) -> Bool)? = nil,
         userStatus: ((Int64) -> UserStatusDisplay?)? = nil,
-        sourceLabel: ((MessageViewData) -> String?)? = nil
+        sourceLabel: ((MessageViewData) -> String?)? = nil,
+        openDirectMessage: ((Int64) -> Void)? = nil
     ) {
         self.page = page
         self.isOffline = isOffline
@@ -182,6 +185,7 @@ struct ConversationSurface: View {
         self.pollReadReceipts = pollReadReceipts
         self.userStatus = userStatus
         self.sourceLabel = sourceLabel
+        self.openDirectMessage = openDirectMessage
         _messages = State(initialValue: page.messages)
         _composerText = State(initialValue: ComposerText(initialDraft))
     }
@@ -297,7 +301,8 @@ struct ConversationSurface: View {
                                         : userStatus?(message.senderID),
                                     sourceLabel: continuations.contains(message.id)
                                         ? nil
-                                        : sourceLabel?(message)
+                                        : sourceLabel?(message),
+                                    openSenderConversation: directMessageAction(for: message)
                                 )
                             }
                             .id(message.rowID)
@@ -867,6 +872,20 @@ private struct ConversationToolbarModifier: ViewModifier {
 }
 
 extension ConversationSurface {
+    /// What clicking a sender's avatar does: open the one-to-one conversation
+    /// with them. Not for the user's own messages, and not inside that very
+    /// conversation, where it would lead nowhere.
+    fileprivate func directMessageAction(for message: MessageViewData) -> (() -> Void)? {
+        guard let openDirectMessage, !message.isOwnMessage, message.senderID > 0 else {
+            return nil
+        }
+        if case let .directMessage(_, recipientIDs) = page.key, recipientIDs == [message.senderID] {
+            return nil
+        }
+        let senderID = message.senderID
+        return { openDirectMessage(senderID) }
+    }
+
     /// The moments after which "Today" and "Yesterday" may name other days.
     /// Built once and shared, so redrawing the surface does not resubscribe.
     @MainActor private static let dayLabelRefreshes: AnyPublisher<Void, Never> = {
@@ -945,6 +964,9 @@ private struct MessageRow: View {
     var readers: [ReadReceiptReader] = []
     var senderStatus: UserStatusDisplay?
     var sourceLabel: String?
+    /// Opens the one-to-one conversation with the sender; nil for the user's
+    /// own messages and inside that very conversation.
+    var openSenderConversation: (() -> Void)?
 
     private var density: MessageDensity {
         MessageDensityPreference.shared.density
@@ -976,13 +998,7 @@ private struct MessageRow: View {
         VStack(alignment: .leading, spacing: AppTheme.Spacing.extraSmall) {
             if !isContinuation {
                 HStack(alignment: .center, spacing: AppTheme.Spacing.medium) {
-                    AvatarImage(
-                        initials: message.senderInitials,
-                        remoteURL: message.senderAvatarURL,
-                        size: Self.avatarSize,
-                        mediaLocalURLs: mediaLocalURLs,
-                        requestMedia: requestMedia
-                    )
+                    senderAvatar
                     Text(message.senderName)
                         .font(AppTheme.Typography.calloutStrong)
                         .foregroundStyle(SenderColor.color(for: message.senderID))
@@ -1135,6 +1151,30 @@ private struct MessageRow: View {
     }
 
     private static let avatarSize: CGFloat = 30
+
+    @ViewBuilder
+    private var senderAvatar: some View {
+        let avatar = AvatarImage(
+            initials: message.senderInitials,
+            remoteURL: message.senderAvatarURL,
+            size: Self.avatarSize,
+            mediaLocalURLs: mediaLocalURLs,
+            requestMedia: requestMedia
+        )
+        if let openSenderConversation {
+            Button(action: openSenderConversation) {
+                avatar
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .pointerStyle(.link)
+            .help("Message \(message.senderName) directly")
+            .accessibilityLabel("Message \(message.senderName) directly")
+        } else {
+            avatar
+        }
+    }
+
     /// How far the floating action bar reaches down into its own row.
     private static let actionBarOverlap: CGFloat = 10
 

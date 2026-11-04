@@ -1199,6 +1199,174 @@ struct LiveSessionTests {
         #expect(UserStatusDisplay.clampedText("short") == "short")
     }
 
+    @Test("Name and photo changes go to Zulip and the new name shows everywhere")
+    func profileEditing() async throws {
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(client: core, credentialStore: MemoryCredentialStore())
+        model.startObserving()
+        let accountID = "account-1"
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: accountID),
+                credential: StoredAPICredential(accountID: accountID, apiKey: "key"),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.connectionState == .connected }
+        #expect(model.ownFullName == "Maya Chen")
+
+        // A name Zulip would refuse never reaches the server.
+        let commandsBefore = core.commands.count
+        model.saveProfile(fullName: "M", avatarFile: nil)
+        #expect(core.commands.count == commandsBefore)
+        guard case .failed = model.profileSaveState else {
+            Issue.record("Expected the short name to be refused")
+            return
+        }
+
+        let photo = FileManager.default.temporaryDirectory
+            .appendingPathComponent("profile-test-\(UUID().uuidString).jpg")
+        try Data("jpeg".utf8).write(to: photo)
+        model.resetProfileSave()
+        model.saveProfile(fullName: "  Maya C.  ", avatarFile: photo)
+        #expect(model.profileSaveState == .saving)
+        let profileCommands = core.commands.suffix(2)
+        guard case let .setFullName(nameRequestID, nameAccountID, "Maya C.") = profileCommands.first,
+              case let .uploadAvatar(photoRequestID, _, path) = profileCommands.last
+        else {
+            Issue.record("Expected a name and a photo command, got \(profileCommands)")
+            return
+        }
+        #expect(nameAccountID == accountID)
+        #expect(path == photo.path)
+
+        core.emit(.profileSaved(requestID: nameRequestID))
+        try await Task.sleep(for: .milliseconds(20))
+        #expect(model.profileSaveState == .saving, "the photo is still on its way")
+        core.emit(.profileSaved(requestID: photoRequestID))
+        await eventually { model.profileSaveState == .saved }
+
+        // The renamed user, as the next snapshot reports it, replaces the
+        // session's name in the sidebar and in the open timeline.
+        core.emit(
+            .conversationOpened(
+                requestID: 99,
+                page: LiveConversationPage(
+                    key: .mentions(accountID: accountID),
+                    messages: [
+                        LiveMessageSnapshot(
+                            messageID: 44,
+                            senderID: 9,
+                            senderFullName: "Maya Chen",
+                            timestamp: Date(timeIntervalSince1970: 1_700_000_000),
+                            content: [.paragraph([.text("Hello")])],
+                            streamID: 5,
+                            topic: "macOS",
+                            recipientIDs: []
+                        ),
+                    ],
+                    foundOldest: true,
+                    foundNewest: true
+                )
+            )
+        )
+        await eventually { loadedMessage(model)?.senderName == "Maya Chen" }
+        let base = snapshot
+        core.emit(
+            .snapshotUpdated(
+                accountID: accountID,
+                snapshot: LiveSnapshot(
+                    revision: 2,
+                    lastEventID: 11,
+                    users: [
+                        LiveUserSnapshot(
+                            userID: 9,
+                            fullName: "Maya C.",
+                            email: "maya@example.com",
+                            isActive: true,
+                            isBot: false,
+                            avatarURL: "/user_avatars/2/maya-new.png?version=2"
+                        ),
+                    ] + base.users.filter { $0.userID != 9 },
+                    channels: base.channels,
+                    topics: base.topics,
+                    messages: base.messages
+                )
+            )
+        )
+        await eventually { model.sidebarSnapshot?.currentUserName == "Maya C." }
+        #expect(model.ownFullName == "Maya C.")
+        #expect(model.sidebarSnapshot?.currentUserAvatarURL == "/user_avatars/2/maya-new.png?version=2")
+        await eventually { loadedMessage(model)?.senderName == "Maya C." }
+        #expect(loadedMessage(model)?.senderAvatarURL == "/user_avatars/2/maya-new.png?version=2")
+        #expect(loadedMessage(model)?.senderInitials == "MC")
+
+        // An organization that forbids the change answers with BAD_REQUEST.
+        model.resetProfileSave()
+        model.saveProfile(fullName: "Maya Chen", avatarFile: nil)
+        guard case let .setFullName(refusedRequestID, _, _) = core.commands.last else {
+            Issue.record("Expected a name command")
+            return
+        }
+        core.emit(
+            .failed(
+                requestID: refusedRequestID,
+                message: "Zulip rejected the message operation: BAD_REQUEST"
+            )
+        )
+        await eventually {
+            if case let .failed(message) = model.profileSaveState {
+                return message.contains("may not allow name changes")
+            }
+            return false
+        }
+        #expect(model.connectionState == .connected)
+    }
+
+    @Test("Display names follow Zulip's rules")
+    func profileNameRules() {
+        #expect(ProfileName.problem(with: "Maya Chen") == nil)
+        #expect(ProfileName.problem(with: "华海") == nil)
+        #expect(ProfileName.problem(with: "Maya | Ops") == nil)
+        #expect(ProfileName.problem(with: "M") != nil)
+        #expect(ProfileName.problem(with: String(repeating: "x", count: 101)) != nil)
+        #expect(ProfileName.problem(with: "Maya*") != nil)
+        #expect(ProfileName.problem(with: "a@b") != nil)
+        #expect(ProfileName.problem(with: "Maya|12") != nil)
+    }
+
+    @Test("Clicking a sender's avatar opens the direct message with them")
+    func avatarOpensDirectMessage() async {
+        let core = RecordingCoreClient()
+        let model = LiveSessionViewModel(client: core, credentialStore: MemoryCredentialStore())
+        model.startObserving()
+        let accountID = "account-1"
+        core.emit(
+            .sessionStarted(
+                requestID: 1,
+                identity: identity(accountID: accountID),
+                credential: StoredAPICredential(accountID: accountID, apiKey: "key"),
+                snapshot: snapshot
+            )
+        )
+        await eventually { model.connectionState == .connected }
+
+        model.openDirectMessage(with: 9)
+        #expect(model.requestedTopicNavigation == nil, "not with yourself")
+
+        model.openDirectMessage(with: 22)
+        #expect(
+            model.requestedTopicNavigation
+                == .directMessage(accountID: accountID, recipientIDs: [22])
+        )
+        model.clearRequestedTopicNavigation()
+
+        model.openDirectMessage(with: 404)
+        #expect(model.requestedTopicNavigation == nil)
+        #expect(model.notice?.contains("cannot receive direct messages") == true)
+    }
+
     @Test("Mixed timelines label each message with its topic")
     func messageSourceLabel() async {
         let core = RecordingCoreClient()

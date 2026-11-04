@@ -414,6 +414,14 @@ struct SidebarView: View {
             Spacer()
 
             Menu {
+                if let editProfile = profileStatus?.editProfile {
+                    Button(action: editProfile) {
+                        Label("Edit Photo and Name…", systemImage: "person.crop.circle")
+                    }
+
+                    Divider()
+                }
+
                 if let sessionControl {
                     Button(role: sessionControl.action.role) {
                         sessionControl.perform()

@@ -145,6 +145,7 @@ private struct LiveWindowView: View {
     @State private var isCreatingChannel = false
     @State private var channelRenameTarget: ChannelSnapshot?
     @State private var isEditingStatus = false
+    @State private var isEditingProfile = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// Panels slide down from the top, or only fade in with Reduce Motion on.
@@ -221,7 +222,8 @@ private struct LiveWindowView: View {
                         isInvisible: session.isInvisible,
                         editStatus: { isEditingStatus = true },
                         clearStatus: session.clearStatus,
-                        setInvisible: session.setInvisible
+                        setInvisible: session.setInvisible,
+                        editProfile: { isEditingProfile = true }
                     ),
                     sessionControl: SidebarSessionControl(
                         action: .disconnect,
@@ -375,6 +377,11 @@ private struct LiveWindowView: View {
                 dismiss: { isEditingStatus = false }
             )
         }
+        .sheet(isPresented: $isEditingProfile) {
+            ProfileEditor(session: session) {
+                isEditingProfile = false
+            }
+        }
         .sheet(item: $channelRenameTarget) { channel in
             RenameChannelSheet(session: session, channel: channel) {
                 channelRenameTarget = nil
@@ -480,7 +487,8 @@ private struct LiveWindowView: View {
                 readReceipts: session.readReceiptDisplay(for: page),
                 pollReadReceipts: { session.pollReadReceipts(messageID: $0, key: page.key) },
                 userStatus: { session.userStatus(forUserID: $0) },
-                sourceLabel: { session.messageSourceLabel(for: $0, in: page.key) }
+                sourceLabel: { session.messageSourceLabel(for: $0, in: page.key) },
+                openDirectMessage: { session.openDirectMessage(with: $0) }
             )
             // A fresh surface per conversation: switching straight from one loaded
             // chat to another used to reuse the old scroll view (which could stay
@@ -496,7 +504,8 @@ private struct LiveWindowView: View {
                 openParent: parentAction(for: page),
                 headerStatus: session.conversationHeaderStatus(for: page.key),
                 initialDraft: session.draft(for: page.key),
-                draftChanged: { session.updateDraft($0, for: page.key) }
+                draftChanged: { session.updateDraft($0, for: page.key) },
+                openDirectMessage: { session.openDirectMessage(with: $0) }
             )
             .id(page.key)
         case let .loading(title, subtitle):

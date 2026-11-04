@@ -147,6 +147,21 @@ enum ChannelRenameState: Equatable, Sendable {
     case renamed(name: String)
 }
 
+/// Saving the user's own name and photo from the profile editor.
+enum ProfileSaveState: Equatable, Sendable {
+    case idle
+    case saving
+    case failed(message: String)
+    case saved
+}
+
+/// One profile change waiting for the server.
+private enum ProfileChange: Sendable {
+    case name
+    /// The prepared picture, a temporary file deleted once the server answers.
+    case avatar(file: URL)
+}
+
 /// A message whose Markdown source is being fetched to quote or forward it.
 private struct PendingMessageSource: Sendable {
     enum Purpose: Sendable {
@@ -301,6 +316,9 @@ final class LiveSessionViewModel {
     private var notificationSettingRequests = Set<UInt64>()
     /// Status and invisible-mode changes waiting for the server.
     @ObservationIgnored private var statusRequests = Set<UInt64>()
+    /// Name and photo changes waiting for the server.
+    @ObservationIgnored private var profileRequests: [UInt64: ProfileChange] = [:]
+    private(set) var profileSaveState = ProfileSaveState.idle
     /// Messages the user marked unread in the open conversation. Opening or
     /// refreshing it marks every message read, which used to undo "Mark as
     /// Unread" at once (the flag change itself refreshes the conversation), so
@@ -390,6 +408,25 @@ final class LiveSessionViewModel {
             return
         }
         applicationBecameActive()
+    }
+
+    /// Takes the user to their one-to-one conversation with `userID`, as
+    /// clicking someone's avatar in a timeline does.
+    func openDirectMessage(with userID: Int64) {
+        guard let identity, userID != identity.userID else {
+            return
+        }
+        let key = ConversationKey.directMessage(
+            accountID: identity.accountID,
+            recipientIDs: [userID]
+        )
+        guard navigationDirectory.destination(for: key) != nil else {
+            // Deactivated accounts are not listed and cannot be written to.
+            let name = userNames[userID] ?? "This person"
+            notice = "\(name) cannot receive direct messages."
+            return
+        }
+        requestedTopicNavigation = key
     }
 
     /// Takes the user to the conversation a notification was about.
@@ -1386,6 +1423,95 @@ final class LiveSessionViewModel {
         }
     }
 
+    /// The user's own name as Zulip has it, for the profile editor.
+    var ownFullName: String {
+        identity?.fullName ?? ""
+    }
+
+    /// Saves a new name, a new photo, or both, from the profile editor. The
+    /// sidebar, the timeline and everyone else see them once the server accepts.
+    /// `avatarFile` is a picture `AvatarImagePreparation` wrote; it is deleted
+    /// once the server has answered.
+    func saveProfile(fullName: String?, avatarFile: URL?) {
+        guard let identity, hasLiveSession else {
+            if let avatarFile {
+                AvatarImagePreparation.discard(avatarFile)
+            }
+            profileSaveState = .failed(message: "Your profile can be changed once you are connected.")
+            return
+        }
+        if case .saving = profileSaveState {
+            return
+        }
+        let name = fullName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let name, let problem = ProfileName.problem(with: name) {
+            if let avatarFile {
+                AvatarImagePreparation.discard(avatarFile)
+            }
+            profileSaveState = .failed(message: problem)
+            return
+        }
+        let changesName = name.map { $0 != identity.fullName } ?? false
+        guard changesName || avatarFile != nil else {
+            profileSaveState = .saved
+            return
+        }
+        profileSaveState = .saving
+        if changesName, let name {
+            let id = nextRequestID()
+            profileRequests[id] = .name
+            client.submit(.setFullName(requestID: id, accountID: identity.accountID, fullName: name))
+        }
+        if let avatarFile {
+            let id = nextRequestID()
+            profileRequests[id] = .avatar(file: avatarFile)
+            client.submit(
+                .uploadAvatar(
+                    requestID: id,
+                    accountID: identity.accountID,
+                    localPath: avatarFile.path
+                )
+            )
+        }
+    }
+
+    func resetProfileSave() {
+        if case .saving = profileSaveState {
+            return
+        }
+        profileSaveState = .idle
+    }
+
+    private func finishProfileRequest(_ requestID: UInt64, failure: String?) {
+        guard let change = profileRequests.removeValue(forKey: requestID) else {
+            return
+        }
+        if case let .avatar(file) = change {
+            AvatarImagePreparation.discard(file)
+        }
+        if let failure {
+            profileSaveState = .failed(message: Self.profileFailureMessage(failure, for: change))
+        } else if profileRequests.isEmpty, case .saving = profileSaveState {
+            profileSaveState = .saved
+        }
+    }
+
+    /// Zulip turns down a change the organization does not allow with a plain
+    /// `BAD_REQUEST`; say what that most likely means.
+    private static func profileFailureMessage(_ message: String, for change: ProfileChange) -> String {
+        let isRefusal = message.contains("BAD_REQUEST")
+        switch change {
+        case .name:
+            return isRefusal
+                ? "Zulip did not accept the name. Your organization may not allow name changes."
+                : "Your name could not be saved: \(message)"
+        case .avatar:
+            return isRefusal
+                ? "Zulip did not accept the photo. Your organization may not allow avatar changes, or the picture is too large."
+                : "Your photo could not be saved: \(message)"
+        }
+    }
+
     private func submitStatusCommand(_ command: (UInt64, String) -> BridgeCommand) {
         guard let identity, hasLiveSession else {
             notice = "Your status can be changed once you are connected."
@@ -2031,6 +2157,9 @@ final class LiveSessionViewModel {
             notificationSettingRequests.remove(requestID)
             statusRequests.remove(requestID)
 
+        case let .profileSaved(requestID):
+            finishProfileRequest(requestID, failure: nil)
+
         case let .messageSourceLoaded(requestID, _, source):
             guard let pending = messageSourceRequests.removeValue(forKey: requestID),
                   identity?.accountID == pending.message.accountID
@@ -2116,6 +2245,8 @@ final class LiveSessionViewModel {
                 notice = "The notification setting could not be saved: \(message)"
             } else if let requestID, statusRequests.remove(requestID) != nil {
                 notice = "Your status could not be saved: \(message)"
+            } else if let requestID, profileRequests[requestID] != nil {
+                finishProfileRequest(requestID, failure: message)
             } else if let requestID, requestID == cachedSessionRequestID {
                 // No cached data yet (first run); the live connection continues.
                 cachedSessionRequestID = nil
@@ -2331,6 +2462,11 @@ final class LiveSessionViewModel {
         userStatuses = [:]
         isInvisible = false
         statusRequests = []
+        for case let .avatar(file) in profileRequests.values {
+            AvatarImagePreparation.discard(file)
+        }
+        profileRequests = [:]
+        profileSaveState = .idle
         keptUnreadMessageIDs = []
         draftSaveTasks.values.forEach { $0.cancel() }
         draftSaveTasks = [:]
@@ -2495,8 +2631,23 @@ final class LiveSessionViewModel {
     }
 
     private func apply(_ snapshot: LiveSnapshot) {
-        guard let identity else {
+        guard var identity else {
             return
+        }
+        // The name the session started with goes stale when the user renames
+        // themselves (here or on the web); the synced user list has the current one.
+        if let ownName = snapshot.users.first(where: { $0.userID == identity.userID })?.fullName,
+           !ownName.isEmpty,
+           ownName != identity.fullName
+        {
+            identity = LiveSessionIdentity(
+                accountID: identity.accountID,
+                serverURL: identity.serverURL,
+                email: identity.email,
+                userID: identity.userID,
+                fullName: ownName
+            )
+            self.identity = identity
         }
         snapshotMessages = Dictionary(
             snapshot.messages.map { ($0.messageID, $0) },
@@ -2507,6 +2658,7 @@ final class LiveSessionViewModel {
         if candidateUsers?.ownUserID != identity.userID || candidateUsers?.users != snapshot.users {
             candidateUsers = (identity.userID, snapshot.users)
             rebuildUserIndexes(snapshot.users, identity: identity)
+            refreshOpenPageSenders()
         }
         replaceKnownTopics(from: snapshot)
         channelNotificationsDefault = snapshot.channelNotificationsDefault
@@ -2660,8 +2812,10 @@ final class LiveSessionViewModel {
                 accountID: livePage.key.accountID,
                 conversationKey: livePage.key,
                 senderID: message.senderID,
-                senderName: message.senderFullName,
-                senderInitials: Self.initials(for: message.senderFullName),
+                senderName: userNames[message.senderID] ?? message.senderFullName,
+                senderInitials: Self.initials(
+                    for: userNames[message.senderID] ?? message.senderFullName
+                ),
                 timestamp: message.timestamp,
                 content: message.content,
                 isOwnMessage: message.senderID == identity?.userID,
@@ -3236,6 +3390,52 @@ final class LiveSessionViewModel {
         sidebarSnapshot = updated
         navigationDirectory = Self.makeDirectory(sidebar: updated, topics: topics)
         refreshOpenPageTitle()
+    }
+
+    /// Keeps the open conversation's senders current when someone (the user
+    /// included) changes their name or photo.
+    private func refreshOpenPageSenders() {
+        switch conversationState {
+        case let .loaded(page):
+            if let updated = withCurrentSenders(page) {
+                conversationState = .loaded(updated)
+            }
+        case let .offline(page):
+            if let updated = withCurrentSenders(page) {
+                conversationState = .offline(updated)
+            }
+        default:
+            break
+        }
+    }
+
+    private func withCurrentSenders(_ page: ConversationPage) -> ConversationPage? {
+        var changed = false
+        let messages = page.messages.map { message -> MessageViewData in
+            let name = userNames[message.senderID] ?? message.senderName
+            let avatarURL = avatarURLs[message.senderID] ?? message.senderAvatarURL
+            guard name != message.senderName || avatarURL != message.senderAvatarURL else {
+                return message
+            }
+            changed = true
+            var updated = message
+            updated.senderName = name
+            updated.senderInitials = Self.initials(for: name)
+            updated.senderAvatarURL = avatarURL
+            return updated
+        }
+        guard changed else {
+            return nil
+        }
+        return ConversationPage(
+            key: page.key,
+            title: page.title,
+            subtitle: page.subtitle,
+            messages: messages,
+            beforeCursor: page.beforeCursor,
+            afterCursor: page.afterCursor,
+            focusedMessageID: page.focusedMessageID
+        )
     }
 
     /// Keeps the open conversation's title current when its channel is renamed.

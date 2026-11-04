@@ -22,11 +22,13 @@ Progress is tracked in [`TRACKER.md`](TRACKER.md) and the roadmap in
 
 - **Account and sync** — password or API-key login (the key lives only in
   Keychain); live event sync that recovers from sleep, drops and expired
-  queues; cached offline reading and per-conversation drafts.
+  queues; cached offline reading and per-conversation drafts. Your photo,
+  name, status and invisible mode can be changed in the app.
 - **Reading** — **Mentions** and **Starred** (the app opens on Mentions),
   channels with topics, and direct messages with presence, status and unread
-  counts. Element-style message blocks, older-history paging, server-side
-  search, a quick switcher, and read receipts (Zulip 6.0+).
+  counts. Element-style message blocks (click a sender's avatar to message
+  them directly), older-history paging, server-side search, a quick switcher,
+  and read receipts (Zulip 6.0+).
 - **Content** — Markdown, links and link cards, mentions, emoji, quotes, lists,
   code, images, tables and LaTeX formulas, all rendered natively. Untrusted
   HTML is sanitized in Rust and never shown in a web view.

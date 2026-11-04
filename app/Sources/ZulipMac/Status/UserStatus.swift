@@ -115,6 +115,8 @@ struct ProfileStatusControl {
     let editStatus: () -> Void
     let clearStatus: () -> Void
     let setInvisible: (Bool) -> Void
+    /// Opens the editor for the user's photo and name.
+    var editProfile: (() -> Void)?
 }
 
 /// The popover behind the user's own avatar: their status, and invisible mode.
@@ -145,6 +147,18 @@ struct ProfileStatusPopover: View {
                             .foregroundStyle(AppTheme.Colors.secondaryText)
                     }
                 }
+            }
+
+            if let editProfile = control.editProfile {
+                Button {
+                    close()
+                    editProfile()
+                } label: {
+                    Label("Edit photo and name…", systemImage: "person.crop.circle")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
             }
 
             Divider()

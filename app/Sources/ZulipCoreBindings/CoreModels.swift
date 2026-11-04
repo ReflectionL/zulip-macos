@@ -427,8 +427,9 @@ public struct MessageViewData: Identifiable, Equatable, Sendable {
     public let accountID: String
     public let conversationKey: ConversationKey
     public let senderID: Int64
-    public let senderName: String
-    public let senderInitials: String
+    /// The sender's current name; it follows a rename while the message is shown.
+    public var senderName: String
+    public var senderInitials: String
     public let timestamp: Date
     public var content: [ContentBlock]
     public let isOwnMessage: Bool

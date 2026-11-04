@@ -559,6 +559,10 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
     )
     /// Turns invisible mode (others see the account as offline) on or off.
     case setInvisible(requestID: UInt64, accountID: String, invisible: Bool)
+    /// Changes the account's display name.
+    case setFullName(requestID: UInt64, accountID: String, fullName: String)
+    /// Replaces the account's avatar with the image file at `localPath`.
+    case uploadAvatar(requestID: UInt64, accountID: String, localPath: String)
     case disconnect(requestID: UInt64)
     case loadCachedSession(requestID: UInt64, accountID: String)
     case saveDraft(requestID: UInt64, key: ConversationKey, content: String)
@@ -600,6 +604,8 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
              let .setTopicNotification(requestID, _, _, _, _),
              let .setUserStatus(requestID, _, _, _, _, _),
              let .setInvisible(requestID, _, _),
+             let .setFullName(requestID, _, _),
+             let .uploadAvatar(requestID, _, _),
              let .disconnect(requestID),
              let .loadCachedSession(requestID, _),
              let .saveDraft(requestID, _, _),
@@ -668,6 +674,10 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
             "BridgeCommand.setUserStatus"
         case .setInvisible:
             "BridgeCommand.setInvisible"
+        case .setFullName:
+            "BridgeCommand.setFullName"
+        case .uploadAvatar:
+            "BridgeCommand.uploadAvatar(localPath: [REDACTED])"
         case .disconnect:
             "BridgeCommand.disconnect"
         case .loadCachedSession:
@@ -871,6 +881,10 @@ public enum BridgeCommand: Equatable, Sendable, CustomStringConvertible,
             )
         case let .setInvisible(requestID, accountID, invisible):
             .setInvisible(requestId: requestID, accountId: accountID, invisible: invisible)
+        case let .setFullName(requestID, accountID, fullName):
+            .setFullName(requestId: requestID, accountId: accountID, fullName: fullName)
+        case let .uploadAvatar(requestID, accountID, localPath):
+            .uploadAvatar(requestId: requestID, accountId: accountID, localPath: localPath)
         case let .fetchMessageSource(requestID, accountID, messageID):
             .fetchMessageSource(
                 requestId: requestID,
@@ -946,6 +960,8 @@ public enum BridgeEvent:
     case channelCreated(requestID: UInt64, name: String)
     case channelRenamed(requestID: UInt64, streamID: Int64, name: String)
     case notificationSettingSaved(requestID: UInt64)
+    /// The server accepted a new display name or avatar; a snapshot showing it follows.
+    case profileSaved(requestID: UInt64)
     case retryScheduled(accountID: String, delayMilliseconds: UInt64)
     case syncResumed(accountID: String)
     case presenceUpdated(accountID: String, presences: [LivePresence])
@@ -987,6 +1003,7 @@ public enum BridgeEvent:
              let .channelCreated(requestID, _),
              let .channelRenamed(requestID, _, _),
              let .notificationSettingSaved(requestID),
+             let .profileSaved(requestID),
              let .disconnected(requestID):
             requestID
         case let .failed(requestID, _):
@@ -1045,6 +1062,8 @@ public enum BridgeEvent:
             "Channel renamed"
         case .notificationSettingSaved:
             "Notification setting saved"
+        case .profileSaved:
+            "Profile saved"
         case .retryScheduled:
             "Retry scheduled"
         case .syncResumed:
@@ -1686,6 +1705,8 @@ private extension BridgeEvent {
             self = .channelRenamed(requestID: requestID, streamID: streamId, name: name)
         case let .notificationSettingSaved(requestId):
             self = .notificationSettingSaved(requestID: requestId)
+        case let .profileSaved(requestId):
+            self = .profileSaved(requestID: requestId)
         case let .messageSourceLoaded(requestID, messageID, content):
             self = .messageSourceLoaded(
                 requestID: requestID,

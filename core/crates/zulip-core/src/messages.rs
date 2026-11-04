@@ -24,6 +24,13 @@ const SETTINGS_PATH: &str = "api/v1/settings";
 const USER_STATUS_PATH: &str = "api/v1/users/me/status";
 /// Zulip rejects longer status texts.
 const MAX_STATUS_TEXT_CHARS: usize = 60;
+/// Zulip's bounds on a display name (`UserProfile.MIN_NAME_LENGTH` and
+/// `MAX_NAME_LENGTH`), counted in characters after trimming.
+const MIN_FULL_NAME_CHARS: usize = 2;
+const MAX_FULL_NAME_CHARS: usize = 100;
+/// Characters Zulip refuses in a display name, because they would break
+/// mention and Markdown syntax.
+const FULL_NAME_FORBIDDEN: &[char] = &['*', '`', '\\', '>', '"', '@'];
 const USER_TOPICS_PATH: &str = "api/v1/user_topics";
 const MAX_CHANNEL_NAME_CHARS: usize = 60;
 const MAX_CHANNEL_DESCRIPTION_CHARS: usize = 1_024;
@@ -969,6 +976,34 @@ impl MessageClient {
         document.validate_result()
     }
 
+    /// Changes the account's display name and returns the name sent, trimmed.
+    /// Whether the user may change it is the organization's decision: the
+    /// server rejects the request when name changes are turned off.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageApiError::InvalidInput`] for a name Zulip would refuse
+    /// (too short, too long, control or reserved characters), and
+    /// [`MessageApiError`] for transport, rejection, size, or response failures.
+    pub async fn set_full_name(&self, full_name: &str) -> Result<String, MessageApiError> {
+        let full_name = full_name.trim();
+        if !is_valid_full_name(full_name) {
+            return Err(MessageApiError::InvalidInput);
+        }
+        let response = self
+            .http
+            .patch(self.base_url.endpoint(SETTINGS_PATH))
+            .basic_auth(&self.email, Some(self.api_key.expose_secret()))
+            .form(&[("full_name", full_name)])
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let document: ApiResultDocument =
+            decode_response(response, MAX_WRITE_RESPONSE_BYTES).await?;
+        document.validate_result()?;
+        Ok(full_name.to_owned())
+    }
+
     /// Turns invisible mode on or off: while it is on, others see the account
     /// as offline (Zulip's `presence_enabled` setting, inverted).
     ///
@@ -1277,6 +1312,22 @@ pub struct UserPresence {
 #[allow(clippy::cast_possible_truncation)]
 fn whole_seconds(timestamp: f64) -> Option<i64> {
     (timestamp.is_finite() && timestamp > 0.0).then(|| timestamp.floor() as i64)
+}
+
+/// Whether Zulip would accept `full_name` (already trimmed) as a display name.
+/// A name ending in `|` and digits is refused too: it reads as the
+/// `@**Name|id**` mention syntax.
+#[must_use]
+pub fn is_valid_full_name(full_name: &str) -> bool {
+    let count = full_name.chars().count();
+    let looks_like_mention_id = full_name
+        .rsplit_once('|')
+        .is_some_and(|(_, id)| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()));
+    (MIN_FULL_NAME_CHARS..=MAX_FULL_NAME_CHARS).contains(&count)
+        && !looks_like_mention_id
+        && !full_name
+            .chars()
+            .any(|character| character.is_control() || FULL_NAME_FORBIDDEN.contains(&character))
 }
 
 /// Applies Zulip's offline threshold to a presence record.
@@ -1595,7 +1646,7 @@ mod tests {
     use super::{
         ConversationTarget, MessageApiError, MessageClient, MessageFlag, MessageWriteOperation,
         OutgoingMessage, PresenceStatus, ReadReceipts, TopicPropagation, TopicVisibilityChoice,
-        TypingTarget,
+        TypingTarget, is_valid_full_name,
     };
     use crate::auth::SecretString;
 
@@ -1937,6 +1988,35 @@ mod tests {
             client.set_user_status(&"x".repeat(61), "", "", "").await,
             Err(MessageApiError::InvalidInput)
         ));
+    }
+
+    #[tokio::test]
+    async fn display_name_is_written_to_the_server() {
+        let (server, requests) = spawn_mock(vec![(
+            StatusCode::OK,
+            r#"{"result":"success","msg":""}"#.to_owned(),
+        )]);
+        let client = MessageClient::new(&server, "maya@example.com", SecretString::new(API_KEY))
+            .expect("message client");
+
+        let saved = client.set_full_name("  Maya Chen ").await.expect("name");
+        assert_eq!(saved, "Maya Chen");
+        let request = requests.recv().expect("name request");
+        assert!(request.starts_with("PATCH /api/v1/settings HTTP/1.1"));
+        assert!(request.contains("full_name=Maya+Chen"));
+        assert!(!request.contains(API_KEY));
+
+        for refused in ["M", "Maya*", "a@b", "Maya|12", &"x".repeat(101)] {
+            assert!(
+                matches!(
+                    client.set_full_name(refused).await,
+                    Err(MessageApiError::InvalidInput)
+                ),
+                "{refused} should be refused"
+            );
+        }
+        assert!(is_valid_full_name("Maya | Ops"));
+        assert!(is_valid_full_name("华海"));
     }
 
     #[tokio::test]

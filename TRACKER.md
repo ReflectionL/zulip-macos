@@ -1,6 +1,6 @@
 # Zulip Mac Development Tracker
 
-Last updated: 2026-10-30
+Last updated: 2026-11-04
 
 ## Current State
 
@@ -63,11 +63,16 @@ Last updated: 2026-10-30
 | FIX-015 | done | 2026-10-15 | 2026-10-15 | Started from the owner's report that the composer keeps the text after sending (`v0.1.0-beta.8`). Cause and design are in the `PLAN.md` row: a regression from `FIX-014`'s unobserved `drafts`; the surface's `onChange(of: initialDraft)` restored the just-sent text because the view was re-evaluated by the local echo before the composer's `onChange` had cleared the saved draft. Fix (Swift only, reviewed by hand, first compiled by macOS CI): `ConversationSurface.sendDraft` calls `draftChanged?("")` before clearing and sets `acceptsSavedDraft = false`, which the `initialDraft` handler checks. Review of `FIX-012` to `FIX-014` at the owner's request (Rust and Swift diffs read; `cargo test --workspace` passes, 102 core and 17 FFI tests): "Mark as Unread" in an open conversation was undone by the refresh that follows it (`keptUnreadMessageIDs`, test `markedUnreadIsKept`), and status text was limited by characters instead of code points (`UserStatusDisplay.clampedText`, cases in the status test). Composer height (owner): `ComposerMetrics` buttons 26 pt and vertical padding 8 pt, one-line composer 42 pt (was 48). Closing evidence: macOS CI on PR #31 passed on the first run (9505809, check "macOS 26 arm64"), PR #31 merged as 55f1a4b, release workflow run 38682783469 published `v0.1.0-beta.9` (DMG and SHA-256), and the owner confirmed the batch and the composer height on 2026-10-15. | — | PR #31 (`v0.1.0-beta.9`) |
 | FIX-016 | done | 2026-10-15 | 2026-10-15 | Welcome screen rework at the owner's request (design and cause in the `PLAN.md` row). Swift only, reviewed by hand, not yet compiled (cloud session; macOS CI is the first compile). New `app/Sources/ZulipMac/AppShell/WelcomeView.swift` (`WelcomeView` in the connected window's `WindowShellView` with a `WelcomeSidebar` and the shared top bar, shared `LoginForm`); `conversationToolbar` gained `showsDetails`; `AppRootView` and `LiveLoginView` in `LiveViews.swift` use them; `LiveSessionViewModel.hasSavedAccount`. Tests added: `welcomeRenders`, `savedAccountFlag`. Closing evidence: macOS CI on PR #35 passed on the first run (c769512, check "macOS 26 arm64"), PR #35 merged as 88b2e43, release workflow run 38692836796 published `v0.1.0-beta.10` (DMG and SHA-256), and the owner confirmed the welcome screen on a Mac on 2026-10-15. | — | PR #35 (`v0.1.0-beta.10`) |
 | FIX-017 | done | 2026-10-29 | 2026-10-30 | Interface polish at the owner's request (causes and design in the `PLAN.md` row; design note with palette and mock-up images in the project files, `ui-polish/`). Swift only, reviewed by hand, not yet compiled (cloud session; macOS CI is the first compile). Rewritten `DesignSystem/AppTheme.swift` (tokens, `Color.dynamic`, `SurfaceElevation`, `Motion`, `motion(_:value:)`); new `DesignSystem/HoverFillButtonStyle.swift` and `Sidebar/ChannelColor.swift` (`ChannelColor`, `OKLCHColor`); `SenderColor` palette replaced; call sites in `Conversation/`, `Sidebar/`, `Navigation/`, `Live/`, `AppShell/`, `Status/` moved to the tokens; `.tint` in `ZulipMacApp`. Tests: `DesignTokenTests` gains radius/height scales, `senderColorContrast`, `channelColorParsing`, `channelColorNormalization`. Clock time: `MessageTimestamp.clockStyle` (two-digit minutes) for both message times, test `clockTimeMinutes`. Edge fades: `TimelineEdgeFade` eased stops, 36/32 pt, `topClearance`. Following new messages: `TimelineScrollMetrics` keeps following when content grows under a still offset, test `timelineFollowThreshold`. Contrast figures were computed with the WCAG formula (Python, same OKLab math) before writing the Swift. Closing evidence: macOS CI on PR #38 first failed one test (normal density block spacing changed to 16 pt; restored to 14 pt), then passed on 257ecb4 (check "macOS 26 arm64"), PR #38 merged as 95038f5, release workflow run 40846399440 published `v0.1.0-beta.11` (DMG and SHA-256), and the owner confirmed it on a Mac on 2026-10-30. | — | PR #38 (`v0.1.0-beta.11`) |
+| FEAT-002 | done | 2026-11-04 | 2026-11-04 | Profile editing (photo and name) and avatar-to-direct-message at the owner's request; design in the `PLAN.md` row. Rust fmt, clippy and tests pass locally (109 core, 18 FFI). Swift reviewed by hand, compiled first on macOS CI. Released as `v0.1.0-beta.17`; awaiting the owner's check on a Mac. | — | — |
 
 Later milestones remain defined in `PLAN.md` and will be added here when they
 become active; completed rows are never removed.
 
 ## Work Log
+
+### 2026-11-04
+
+- `FEAT-002`: photo and name editing in the app, and clicking a sender's avatar opens a direct message with them.
 
 ### 2026-10-30
 
