@@ -12,9 +12,6 @@ struct ConversationSurface: View {
     var reconnect: () -> Void = {}
     var loadEarlier: (() -> Void)?
     var submitMessage: ((String) -> Bool)?
-    var openSearch: (() -> Void)?
-    var renameTopic: (() -> Void)?
-    var renameChannel: (() -> Void)?
     var openParent: (() -> Void)?
     var headerStatus: String?
     var composerHint: String?
@@ -99,9 +96,6 @@ struct ConversationSurface: View {
         reconnect: @escaping () -> Void = {},
         loadEarlier: (() -> Void)? = nil,
         submitMessage: ((String) -> Bool)? = nil,
-        openSearch: (() -> Void)? = nil,
-        renameTopic: (() -> Void)? = nil,
-        renameChannel: (() -> Void)? = nil,
         openParent: (() -> Void)? = nil,
         headerStatus: String? = nil,
         composerHint: String? = nil,
@@ -146,9 +140,6 @@ struct ConversationSurface: View {
         self.reconnect = reconnect
         self.loadEarlier = loadEarlier
         self.submitMessage = submitMessage
-        self.openSearch = openSearch
-        self.renameTopic = renameTopic
-        self.renameChannel = renameChannel
         self.openParent = openParent
         self.headerStatus = headerStatus
         self.composerHint = composerHint
@@ -476,10 +467,7 @@ struct ConversationSurface: View {
             subtitle: page.subtitle,
             isOffline: isOffline,
             status: headerStatus,
-            openParent: openParent,
-            openSearch: openSearch,
-            renameTopic: renameTopic,
-            renameChannel: renameChannel
+            openParent: openParent
         )
         .overlay {
             Button("Focus message composer") {
@@ -684,11 +672,7 @@ extension View {
         subtitle: String,
         isOffline: Bool,
         status: String? = nil,
-        openParent: (() -> Void)? = nil,
-        openSearch: (() -> Void)? = nil,
-        renameTopic: (() -> Void)? = nil,
-        renameChannel: (() -> Void)? = nil,
-        showsDetails: Bool = true
+        openParent: (() -> Void)? = nil
     ) -> some View {
         modifier(
             ConversationToolbarModifier(
@@ -696,11 +680,7 @@ extension View {
                 subtitle: subtitle,
                 isOffline: isOffline,
                 status: status,
-                openParent: openParent,
-                openSearch: openSearch,
-                renameTopic: renameTopic,
-                renameChannel: renameChannel,
-                showsDetails: showsDetails
+                openParent: openParent
             )
         )
     }
@@ -766,10 +746,6 @@ private struct ConversationToolbarModifier: ViewModifier {
     let isOffline: Bool
     let status: String?
     let openParent: (() -> Void)?
-    let openSearch: (() -> Void)?
-    let renameTopic: (() -> Void)?
-    let renameChannel: (() -> Void)?
-    let showsDetails: Bool
 
     private var accessibilitySummary: String {
         var parts = [subtitle, title]
@@ -831,40 +807,6 @@ private struct ConversationToolbarModifier: ViewModifier {
                             .frame(height: 24)
                             .background(AppTheme.Colors.warning.opacity(0.12))
                             .clipShape(Capsule())
-                    }
-
-                    if let openSearch {
-                        Button(action: openSearch) {
-                            Image(systemName: "magnifyingglass")
-                        }
-                        .help("Search messages")
-                        .accessibilityLabel("Search messages")
-                    }
-
-                    if renameTopic != nil || renameChannel != nil {
-                        Menu {
-                            if let renameTopic {
-                                Button("Rename topic…", action: renameTopic)
-                            }
-                            if let renameChannel {
-                                Button("Rename channel…", action: renameChannel)
-                            }
-                        } label: {
-                            Image(systemName: "ellipsis.circle")
-                        }
-                        .menuIndicator(.hidden)
-                        .help("Conversation actions")
-                        .accessibilityLabel("Conversation actions")
-                    }
-
-                    if showsDetails {
-                        Button {
-                            // Conversation details arrive with live membership data.
-                        } label: {
-                            Image(systemName: "info.circle")
-                        }
-                        .help("Conversation details")
-                        .accessibilityLabel("Conversation details")
                     }
                 }
             }
@@ -973,6 +915,8 @@ private struct MessageRow: View {
     }
 
     @State private var isHovered = false
+    /// Whether the pointer is over the sender's avatar link.
+    @State private var isAvatarHovered = false
     @State private var isHoveringActions = false
     @State private var isPickingReaction = false
     /// The action bar is built the first time the pointer reaches the row, not
@@ -1162,12 +1106,27 @@ private struct MessageRow: View {
             requestMedia: requestMedia
         )
         if let openSenderConversation {
-            Button(action: openSenderConversation) {
+            Button {
+                openSenderConversation()
+                // The click replaces this conversation, so the avatar never
+                // hears the pointer leave and the pointing hand would stay
+                // until the pointer crossed another view. Put the arrow back
+                // once the new conversation is in place.
+                DispatchQueue.main.async { NSCursor.arrow.set() }
+            } label: {
                 avatar
                     .contentShape(Circle())
             }
             .buttonStyle(.plain)
             .pointerStyle(.link)
+            .onHover { isAvatarHovered = $0 }
+            .onDisappear {
+                // Scrolled or switched away while under the pointer.
+                if isAvatarHovered {
+                    isAvatarHovered = false
+                    NSCursor.arrow.set()
+                }
+            }
             .help("Message \(message.senderName) directly")
             .accessibilityLabel("Message \(message.senderName) directly")
         } else {

@@ -23,8 +23,7 @@ struct WelcomeView: View {
             .conversationToolbar(
                 title: isRestoring ? "Reconnecting" : "Sign in",
                 subtitle: AppIdentity.displayName,
-                isOffline: false,
-                showsDetails: false
+                isOffline: false
             )
         }
     }

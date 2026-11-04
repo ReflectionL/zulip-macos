@@ -419,9 +419,6 @@ private struct LiveWindowView: View {
                 submitMessage: { content in
                     session.sendText(content, to: page.key)
                 },
-                openSearch: presentMessageSearch,
-                renameTopic: renameAction(for: page),
-                renameChannel: renameChannelAction(for: page),
                 openParent: parentAction(for: page),
                 headerStatus: session.conversationHeaderStatus(for: page.key),
                 composerHint: composerHint(for: page),
@@ -500,7 +497,6 @@ private struct LiveWindowView: View {
                 page: page,
                 isOffline: true,
                 reconnect: session.reconnectNow,
-                openSearch: presentMessageSearch,
                 openParent: parentAction(for: page),
                 headerStatus: session.conversationHeaderStatus(for: page.key),
                 initialDraft: session.draft(for: page.key),
@@ -555,31 +551,6 @@ private struct LiveWindowView: View {
             suppressedSelectionOpen = nil
         }
         isMessageSearchPresented = false
-    }
-
-    private func renameAction(for page: ConversationPage) -> (() -> Void)? {
-        guard case .topic = page.key,
-              let anchor = page.messages.last(where: { $0.id > 0 })?.id
-        else {
-            return nil
-        }
-        return {
-            topicSheet = .rename(key: page.key, anchorMessageID: anchor)
-        }
-    }
-
-    /// Renaming a channel is offered while viewing the channel itself.
-    private func renameChannelAction(for page: ConversationPage) -> (() -> Void)? {
-        guard case let .channel(_, streamID) = page.key,
-              let channel = session.sidebarSnapshot?.channels.first(where: {
-                  $0.streamID == streamID
-              })
-        else {
-            return nil
-        }
-        return {
-            channelRenameTarget = channel
-        }
     }
 
     /// The channel part of a topic's breadcrumb opens the channel.

@@ -147,18 +147,23 @@ struct ProfileStatusPopover: View {
                             .foregroundStyle(AppTheme.Colors.secondaryText)
                     }
                 }
-            }
 
-            if let editProfile = control.editProfile {
-                Button {
-                    close()
-                    editProfile()
-                } label: {
-                    Label("Edit photo and name…", systemImage: "person.crop.circle")
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
+                Spacer(minLength: AppTheme.Spacing.small)
+
+                if let editProfile = control.editProfile {
+                    Button {
+                        close()
+                        editProfile()
+                    } label: {
+                        Image(systemName: "pencil")
+                            .font(AppTheme.Typography.scaled(12, weight: .medium))
+                            .foregroundStyle(AppTheme.Colors.secondaryText)
+                            .frame(width: 24, height: 24)
+                    }
+                    .buttonStyle(HoverFillButtonStyle(cornerRadius: 12))
+                    .help("Edit photo and name")
+                    .accessibilityLabel("Edit photo and name")
                 }
-                .buttonStyle(.plain)
             }
 
             Divider()
