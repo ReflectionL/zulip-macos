@@ -419,7 +419,6 @@ private struct LiveWindowView: View {
                 submitMessage: { content in
                     session.sendText(content, to: page.key)
                 },
-                openSearch: presentMessageSearch,
                 renameTopic: renameAction(for: page),
                 renameChannel: renameChannelAction(for: page),
                 openParent: parentAction(for: page),
@@ -500,7 +499,6 @@ private struct LiveWindowView: View {
                 page: page,
                 isOffline: true,
                 reconnect: session.reconnectNow,
-                openSearch: presentMessageSearch,
                 openParent: parentAction(for: page),
                 headerStatus: session.conversationHeaderStatus(for: page.key),
                 initialDraft: session.draft(for: page.key),

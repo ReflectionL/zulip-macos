@@ -12,7 +12,6 @@ struct ConversationSurface: View {
     var reconnect: () -> Void = {}
     var loadEarlier: (() -> Void)?
     var submitMessage: ((String) -> Bool)?
-    var openSearch: (() -> Void)?
     var renameTopic: (() -> Void)?
     var renameChannel: (() -> Void)?
     var openParent: (() -> Void)?
@@ -99,7 +98,6 @@ struct ConversationSurface: View {
         reconnect: @escaping () -> Void = {},
         loadEarlier: (() -> Void)? = nil,
         submitMessage: ((String) -> Bool)? = nil,
-        openSearch: (() -> Void)? = nil,
         renameTopic: (() -> Void)? = nil,
         renameChannel: (() -> Void)? = nil,
         openParent: (() -> Void)? = nil,
@@ -146,7 +144,6 @@ struct ConversationSurface: View {
         self.reconnect = reconnect
         self.loadEarlier = loadEarlier
         self.submitMessage = submitMessage
-        self.openSearch = openSearch
         self.renameTopic = renameTopic
         self.renameChannel = renameChannel
         self.openParent = openParent
@@ -477,7 +474,6 @@ struct ConversationSurface: View {
             isOffline: isOffline,
             status: headerStatus,
             openParent: openParent,
-            openSearch: openSearch,
             renameTopic: renameTopic,
             renameChannel: renameChannel
         )
@@ -685,10 +681,8 @@ extension View {
         isOffline: Bool,
         status: String? = nil,
         openParent: (() -> Void)? = nil,
-        openSearch: (() -> Void)? = nil,
         renameTopic: (() -> Void)? = nil,
-        renameChannel: (() -> Void)? = nil,
-        showsDetails: Bool = true
+        renameChannel: (() -> Void)? = nil
     ) -> some View {
         modifier(
             ConversationToolbarModifier(
@@ -697,10 +691,8 @@ extension View {
                 isOffline: isOffline,
                 status: status,
                 openParent: openParent,
-                openSearch: openSearch,
                 renameTopic: renameTopic,
-                renameChannel: renameChannel,
-                showsDetails: showsDetails
+                renameChannel: renameChannel
             )
         )
     }
@@ -766,10 +758,8 @@ private struct ConversationToolbarModifier: ViewModifier {
     let isOffline: Bool
     let status: String?
     let openParent: (() -> Void)?
-    let openSearch: (() -> Void)?
     let renameTopic: (() -> Void)?
     let renameChannel: (() -> Void)?
-    let showsDetails: Bool
 
     private var accessibilitySummary: String {
         var parts = [subtitle, title]
@@ -833,14 +823,6 @@ private struct ConversationToolbarModifier: ViewModifier {
                             .clipShape(Capsule())
                     }
 
-                    if let openSearch {
-                        Button(action: openSearch) {
-                            Image(systemName: "magnifyingglass")
-                        }
-                        .help("Search messages")
-                        .accessibilityLabel("Search messages")
-                    }
-
                     if renameTopic != nil || renameChannel != nil {
                         Menu {
                             if let renameTopic {
@@ -855,16 +837,6 @@ private struct ConversationToolbarModifier: ViewModifier {
                         .menuIndicator(.hidden)
                         .help("Conversation actions")
                         .accessibilityLabel("Conversation actions")
-                    }
-
-                    if showsDetails {
-                        Button {
-                            // Conversation details arrive with live membership data.
-                        } label: {
-                            Image(systemName: "info.circle")
-                        }
-                        .help("Conversation details")
-                        .accessibilityLabel("Conversation details")
                     }
                 }
             }
