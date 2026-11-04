@@ -1047,6 +1047,12 @@ impl SyncSession {
         self.reducer.set_status_locally(status)
     }
 
+    /// Applies a profile change this client made, once the server accepted it.
+    /// Returns the new snapshot when it changed anything.
+    pub fn update_user_locally(&mut self, update: UserUpdate) -> Option<SyncSnapshot> {
+        self.reducer.update_user_locally(update)
+    }
+
     /// Polls or continues a pending full resynchronization.
     ///
     /// Queue expiry and fresh `restart` events immediately attempt an atomic
@@ -1488,6 +1494,16 @@ impl SyncReducer {
         })
     }
 
+    /// Applies a profile change this client made (its own name or avatar) once
+    /// the server accepted it, so it shows at once rather than when the event
+    /// queue reports it.
+    pub fn update_user_locally(&mut self, update: UserUpdate) -> Option<SyncSnapshot> {
+        self.apply_user_update(update).then(|| {
+            self.revision = self.revision.saturating_add(1);
+            self.snapshot()
+        })
+    }
+
     /// Records or clears the unread entry for a freshly delivered message.
     fn track_unread(&mut self, message: &MessageSummary) -> bool {
         if message.flags.iter().any(|flag| flag == "read") {
@@ -1749,30 +1765,34 @@ impl SyncReducer {
                 let previous = self.users.insert(user.id, user.clone());
                 previous.as_ref() != Some(&user)
             }
-            SyncEvent::UserUpdated { update, .. } => {
-                let Some(user) = self.users.get_mut(&update.user_id) else {
-                    return false;
-                };
-                let previous = user.clone();
-                if let Some(full_name) = update.full_name {
-                    user.full_name = full_name;
-                }
-                if let Some(email) = update.email {
-                    user.email = Some(email);
-                }
-                if let Some(is_active) = update.is_active {
-                    user.is_active = is_active;
-                }
-                if let Some(is_bot) = update.is_bot {
-                    user.is_bot = is_bot;
-                }
-                if let Some(avatar_url) = update.avatar_url {
-                    user.avatar_url = Some(avatar_url);
-                }
-                *user != previous
-            }
+            SyncEvent::UserUpdated { update, .. } => self.apply_user_update(update),
             SyncEvent::UserRemoved { user_id, .. } => self.users.remove(&user_id).is_some(),
         }
+    }
+
+    /// Applies the fields an update carries to a known user; returns whether
+    /// anything changed.
+    fn apply_user_update(&mut self, update: UserUpdate) -> bool {
+        let Some(user) = self.users.get_mut(&update.user_id) else {
+            return false;
+        };
+        let previous = user.clone();
+        if let Some(full_name) = update.full_name {
+            user.full_name = full_name;
+        }
+        if let Some(email) = update.email {
+            user.email = Some(email);
+        }
+        if let Some(is_active) = update.is_active {
+            user.is_active = is_active;
+        }
+        if let Some(is_bot) = update.is_bot {
+            user.is_bot = is_bot;
+        }
+        if let Some(avatar_url) = update.avatar_url {
+            user.avatar_url = Some(avatar_url);
+        }
+        *user != previous
     }
 }
 
@@ -2876,7 +2896,7 @@ mod tests {
         BootstrapState, ChannelSummary, EventQueueClient, MessageSummary, MessageUpdate,
         RecoveryPolicy, RegisterDocument, ResyncReason, RetryBackoff, RetryOperation, SyncCycle,
         SyncError, SyncEvent, SyncReducer, SyncSession, TopicVisibility, TypingNotice,
-        TypingPreferences, TypingScope, UnreadBucket, UserStatus, UserSummary, Value,
+        TypingPreferences, TypingScope, UnreadBucket, UserStatus, UserSummary, UserUpdate, Value,
         parse_unread_messages,
     };
     use crate::auth::SecretString;
@@ -3740,6 +3760,50 @@ mod tests {
             })
             .expect("cleared");
         assert!(snapshot.user_statuses.is_empty());
+    }
+
+    #[test]
+    fn a_profile_change_this_client_made_shows_without_waiting_for_the_queue() {
+        let mut reducer = SyncReducer::new(
+            0,
+            BootstrapState {
+                users: vec![fixture_user(7, "Maya")],
+                ..BootstrapState::default()
+            },
+        );
+        let snapshot = reducer
+            .update_user_locally(UserUpdate {
+                user_id: 7,
+                full_name: Some("Maya Chen".to_owned()),
+                avatar_url: Some("/user_avatars/7/new.png?version=2".to_owned()),
+                ..UserUpdate::default()
+            })
+            .expect("changed");
+        assert_eq!(snapshot.users[0].full_name, "Maya Chen");
+        assert_eq!(
+            snapshot.users[0].avatar_url.as_deref(),
+            Some("/user_avatars/7/new.png?version=2")
+        );
+        assert!(
+            reducer
+                .update_user_locally(UserUpdate {
+                    user_id: 7,
+                    full_name: Some("Maya Chen".to_owned()),
+                    ..UserUpdate::default()
+                })
+                .is_none(),
+            "the same name changes nothing"
+        );
+        assert!(
+            reducer
+                .update_user_locally(UserUpdate {
+                    user_id: 99,
+                    full_name: Some("Nobody".to_owned()),
+                    ..UserUpdate::default()
+                })
+                .is_none(),
+            "unknown users change nothing"
+        );
     }
 
     #[test]

@@ -32,6 +32,7 @@ use crate::{
 };
 
 const UPLOAD_PATH: &str = "api/v1/user_uploads";
+const AVATAR_UPLOAD_PATH: &str = "api/v1/users/me/avatar";
 const UPLOAD_API_PATH_PREFIX: &str = "api/v1/user_uploads/";
 const UPLOAD_ROUTE_PREFIX: &str = "/user_uploads/";
 const TEMPORARY_ROUTE_PREFIX: &str = "/user_uploads/temporary/";
@@ -197,24 +198,7 @@ impl MediaClient {
         display_filename: &str,
     ) -> Result<UploadedAttachment, MediaError> {
         let filename = validated_filename(display_filename)?;
-        if !local_path.is_absolute() {
-            return Err(MediaError::InvalidInput);
-        }
-        let metadata = fs::symlink_metadata(local_path)
-            .await
-            .map_err(|_| MediaError::FileUnavailable)?;
-        if !metadata.file_type().is_file() {
-            return Err(MediaError::FileUnavailable);
-        }
-        if metadata.len() > MAX_UPLOAD_BYTES as u64 {
-            return Err(MediaError::UploadTooLarge);
-        }
-        let bytes = fs::read(local_path)
-            .await
-            .map_err(|_| MediaError::FileUnavailable)?;
-        if bytes.len() > MAX_UPLOAD_BYTES {
-            return Err(MediaError::UploadTooLarge);
-        }
+        let bytes = read_upload(local_path).await?;
 
         let part = Part::bytes(bytes).file_name(filename.clone());
         let response = self
@@ -249,6 +233,45 @@ impl MediaClient {
             url,
             markdown,
         })
+    }
+
+    /// Replaces the account's avatar with one image file and returns the new
+    /// avatar location as the server reports it (relative to the server or
+    /// absolute). The server crops and scales the picture; whether the user may
+    /// change it is the organization's decision.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MediaError`] for unavailable/oversized files, transport
+    /// failures, server rejection, or an avatar location that is not a public
+    /// image route.
+    pub async fn upload_avatar(&self, local_path: &Path) -> Result<String, MediaError> {
+        let filename = local_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map_or(Ok("avatar.png".to_owned()), validated_filename)?;
+        let bytes = read_upload(local_path).await?;
+        let part = Part::bytes(bytes).file_name(filename);
+        let response = self
+            .upload_http
+            .post(self.base_url.endpoint(AVATAR_UPLOAD_PATH))
+            .timeout(UPLOAD_DEADLINE)
+            .basic_auth(&self.email, Some(self.api_key.expose_secret()))
+            .multipart(Form::new().part("file", part))
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let document: AvatarDocument = decode_json(response).await?;
+        validate_api_result(document.result.as_deref(), document.code.as_deref())?;
+        let avatar_url = document
+            .avatar_url
+            .map(|url| url.trim().to_owned())
+            .ok_or(MediaError::InvalidResponse)?;
+        // Kept as the server wrote it, the form its user events use, so the
+        // queue's later report of the same change reads as no change.
+        self.validated_public_image(&avatar_url)
+            .ok_or(MediaError::InvalidResponse)?;
+        Ok(avatar_url)
     }
 
     /// Resolves a protected Zulip upload and stores it in the account cache.
@@ -600,6 +623,13 @@ impl UploadDocument {
 }
 
 #[derive(Debug, Deserialize)]
+struct AvatarDocument {
+    result: Option<String>,
+    code: Option<String>,
+    avatar_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct TemporaryUrlDocument {
     result: Option<String>,
     code: Option<String>,
@@ -624,6 +654,29 @@ fn validate_api_result(result: Option<&str>, code: Option<&str>) -> Result<(), M
     Err(MediaError::Rejected {
         code: sanitized_code(code),
     })
+}
+
+/// Reads one regular file chosen for upload, within the simple-upload bound.
+async fn read_upload(local_path: &Path) -> Result<Vec<u8>, MediaError> {
+    if !local_path.is_absolute() {
+        return Err(MediaError::InvalidInput);
+    }
+    let metadata = fs::symlink_metadata(local_path)
+        .await
+        .map_err(|_| MediaError::FileUnavailable)?;
+    if !metadata.file_type().is_file() {
+        return Err(MediaError::FileUnavailable);
+    }
+    if metadata.len() > MAX_UPLOAD_BYTES as u64 {
+        return Err(MediaError::UploadTooLarge);
+    }
+    let bytes = fs::read(local_path)
+        .await
+        .map_err(|_| MediaError::FileUnavailable)?;
+    if bytes.len() > MAX_UPLOAD_BYTES {
+        return Err(MediaError::UploadTooLarge);
+    }
+    Ok(bytes)
 }
 
 async fn decode_json<T: DeserializeOwned>(response: Response) -> Result<T, MediaError> {
@@ -996,6 +1049,47 @@ mod tests {
             "[截屏2026-10-14 15.13.06.png](/user_uploads/1/ab/xy/截屏2026-10-14-15.13.06.png)"
         );
         let _ = requests.recv().expect("upload request");
+    }
+
+    #[tokio::test]
+    async fn avatar_upload_returns_the_new_avatar_location() {
+        let responses = vec![
+            MockResponse::json(
+                StatusCode::OK,
+                r#"{"result":"success","msg":"","avatar_url":"/user_avatars/2/ab12.png?version=3"}"#,
+            ),
+            MockResponse::json(
+                StatusCode::BAD_REQUEST,
+                r#"{"result":"error","code":"BAD_REQUEST","msg":"Avatar changes are disabled in this organization."}"#,
+            ),
+        ];
+        let (server, requests) = spawn_mock(responses);
+        let fixture = TempDir::new().expect("fixture directory");
+        let selected_file = fixture.path().join("avatar.png");
+        tokio::fs::write(&selected_file, b"png fixture")
+            .await
+            .expect("write avatar");
+        let client = media_client(&server, &fixture, "account-a");
+
+        let avatar_url = client
+            .upload_avatar(&selected_file)
+            .await
+            .expect("upload avatar");
+        assert_eq!(avatar_url, "/user_avatars/2/ab12.png?version=3");
+        let request = requests.recv().expect("avatar request");
+        assert!(request.starts_with("POST /api/v1/users/me/avatar HTTP/1.1"));
+        assert!(request.contains("filename=\"avatar.png\""));
+        assert!(request.contains("png fixture"));
+        assert!(!request.contains(API_KEY));
+
+        assert!(matches!(
+            client.upload_avatar(&selected_file).await,
+            Err(MediaError::Rejected { code }) if code == "BAD_REQUEST"
+        ));
+        assert!(matches!(
+            client.upload_avatar(Path::new("relative.png")).await,
+            Err(MediaError::InvalidInput)
+        ));
     }
 
     #[tokio::test]

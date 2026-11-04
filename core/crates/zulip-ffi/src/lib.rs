@@ -39,7 +39,7 @@ use zulip_core::{
     sync::{
         EventQueueClient, MessageSummary, RecentDirectConversation, RecoveryPolicy, SyncCycle,
         SyncSession, SyncSnapshot, TopicPolicy, TopicVisibility, TypingNotice, TypingScope,
-        UnreadBucket, UserStatus, UserSummary,
+        UnreadBucket, UserStatus, UserSummary, UserUpdate,
     },
 };
 
@@ -535,6 +535,26 @@ pub enum CoreCommand {
         /// Whether others should see the account as offline.
         invisible: bool,
     },
+    /// Changes the account's display name. The new name comes back through
+    /// the sync snapshot; `ProfileSaved` acknowledges it.
+    SetFullName {
+        /// Correlates the response.
+        request_id: u64,
+        /// Client-owned account partition.
+        account_id: String,
+        /// New display name.
+        full_name: String,
+    },
+    /// Replaces the account's avatar with one image file. The new avatar comes
+    /// back through the sync snapshot; `ProfileSaved` acknowledges it.
+    UploadAvatar {
+        /// Correlates the response.
+        request_id: u64,
+        /// Client-owned account partition.
+        account_id: String,
+        /// Absolute local path of the prepared image.
+        local_path: String,
+    },
     /// Fetches the original Markdown of one message so it can be quoted or forwarded.
     FetchMessageSource {
         /// Correlates the response.
@@ -643,6 +663,8 @@ impl CoreCommand {
             | Self::SetTopicVisibility { request_id, .. }
             | Self::SetUserStatus { request_id, .. }
             | Self::SetInvisible { request_id, .. }
+            | Self::SetFullName { request_id, .. }
+            | Self::UploadAvatar { request_id, .. }
             | Self::Disconnect { request_id } => *request_id,
         }
     }
@@ -1532,6 +1554,12 @@ pub enum CoreEvent {
         /// Matches the originating command.
         request_id: u64,
     },
+    /// The server accepted a new display name or avatar. A snapshot that
+    /// shows it follows.
+    ProfileSaved {
+        /// Matches the originating command.
+        request_id: u64,
+    },
     /// The original Markdown source of a requested message.
     MessageSourceLoaded {
         /// Matches the originating command.
@@ -1716,12 +1744,20 @@ enum LocalChange {
         account_id: String,
         status: UserStatus,
     },
+    /// The account's own name or avatar, as the server accepted it.
+    OwnProfile {
+        account_id: String,
+        full_name: Option<String>,
+        avatar_url: Option<String>,
+    },
 }
 
 impl LocalChange {
     fn account_id(&self) -> &str {
         match self {
-            Self::Read { account_id, .. } | Self::OwnStatus { account_id, .. } => account_id,
+            Self::Read { account_id, .. }
+            | Self::OwnStatus { account_id, .. }
+            | Self::OwnProfile { account_id, .. } => account_id,
         }
     }
 }
@@ -1946,6 +1982,16 @@ async fn run_actor(
                                 ..status
                             })
                         }
+                        LocalChange::OwnProfile {
+                            full_name,
+                            avatar_url,
+                            ..
+                        } => session.sync.update_user_locally(UserUpdate {
+                            user_id: session.own_user_id,
+                            full_name,
+                            avatar_url,
+                            ..UserUpdate::default()
+                        }),
                     }
                 {
                     cache_snapshot_throttled(session, &snapshot);
@@ -2364,6 +2410,28 @@ async fn handle_command(
             account.as_ref(),
             event_sink,
         ),
+        CoreCommand::SetFullName {
+            request_id,
+            account_id,
+            full_name,
+        } => set_full_name(
+            request_id,
+            &account_id,
+            full_name,
+            account.as_ref(),
+            event_sink,
+        ),
+        CoreCommand::UploadAvatar {
+            request_id,
+            account_id,
+            local_path,
+        } => upload_avatar(
+            request_id,
+            &account_id,
+            local_path,
+            account.as_ref(),
+            event_sink,
+        ),
         CoreCommand::FetchMessageSource {
             request_id,
             account_id,
@@ -2540,6 +2608,71 @@ fn set_user_status(
                     let _ = local_changes.send(LocalChange::OwnStatus { account_id, status });
                 }
                 event_sink.handle_event(CoreEvent::NotificationSettingSaved { request_id });
+            }
+            Err(error) => emit_error(Some(request_id), error, &event_sink),
+        }
+    });
+}
+
+fn set_full_name(
+    request_id: u64,
+    account_id: &str,
+    full_name: String,
+    account: Option<&AccountSession>,
+    event_sink: &Arc<dyn CoreEventSink>,
+) {
+    let Some(session) = account.filter(|item| item.account_id == account_id) else {
+        emit_no_session(request_id, event_sink);
+        return;
+    };
+    let messages = Arc::clone(&session.messages);
+    let event_sink = Arc::clone(event_sink);
+    let local_changes = session.local_changes.clone();
+    let account_id = session.account_id.clone();
+    tokio::spawn(async move {
+        match messages.set_full_name(&full_name).await {
+            Ok(full_name) => {
+                // Shown at once: the event queue's report of it may come late.
+                if let Some(local_changes) = local_changes {
+                    let _ = local_changes.send(LocalChange::OwnProfile {
+                        account_id,
+                        full_name: Some(full_name),
+                        avatar_url: None,
+                    });
+                }
+                event_sink.handle_event(CoreEvent::ProfileSaved { request_id });
+            }
+            Err(error) => emit_error(Some(request_id), error, &event_sink),
+        }
+    });
+}
+
+fn upload_avatar(
+    request_id: u64,
+    account_id: &str,
+    local_path: String,
+    account: Option<&AccountSession>,
+    event_sink: &Arc<dyn CoreEventSink>,
+) {
+    let Some(session) = account.filter(|item| item.account_id == account_id) else {
+        emit_no_session(request_id, event_sink);
+        return;
+    };
+    let media = Arc::clone(&session.media);
+    let event_sink = Arc::clone(event_sink);
+    let local_changes = session.local_changes.clone();
+    let account_id = session.account_id.clone();
+    tokio::spawn(async move {
+        match media.upload_avatar(Path::new(&local_path)).await {
+            Ok(avatar_url) => {
+                if let Some(local_changes) = local_changes {
+                    let _ = local_changes.send(LocalChange::OwnProfile {
+                        account_id,
+                        full_name: None,
+                        avatar_url: Some(avatar_url),
+                    });
+                }
+                event_sink.handle_event(CoreEvent::ProfileSaved { request_id });
             }
             Err(error) => emit_error(Some(request_id), error, &event_sink),
         }
@@ -4926,6 +5059,104 @@ mod tests {
     }
 
     #[test]
+    fn own_name_and_avatar_show_once_the_server_accepts_them() {
+        let (server, requests) = spawn_profile_actor_mock();
+        let fixture = TempDir::new().expect("profile fixture directory");
+        let avatar_file = fixture.path().join("avatar.png");
+        std::fs::write(&avatar_file, b"avatar fixture").expect("write avatar fixture");
+        let (signal_sender, signal_receiver) = mpsc::channel();
+        let sink = Arc::new(RecordingSink {
+            events: Mutex::new(Vec::new()),
+            notifier: Mutex::new(Some(signal_sender)),
+        });
+        let client = RustCoreClient::new(
+            sink.clone(),
+            fixture.path().join("cache").to_string_lossy().into_owned(),
+            None,
+        );
+        client.submit(CoreCommand::StartApiKeySession {
+            request_id: 60,
+            account_id: "account-profile".to_owned(),
+            server_url: server,
+            email: "maya@example.com".to_owned(),
+            api_key: "fixture-key-do-not-log".to_owned(),
+        });
+        let _ = wait_for_event(&signal_receiver, &sink, |event| {
+            matches!(event, CoreEvent::SessionStarted { request_id: 60, .. })
+        });
+
+        let own_user = |snapshot: &CoreSnapshot| {
+            snapshot
+                .users
+                .iter()
+                .find(|user| user.user_id == 9)
+                .cloned()
+        };
+
+        client.submit(CoreCommand::SetFullName {
+            request_id: 61,
+            account_id: "account-profile".to_owned(),
+            full_name: " Maya C. ".to_owned(),
+        });
+        let _ = wait_for_event(&signal_receiver, &sink, |event| {
+            matches!(event, CoreEvent::ProfileSaved { request_id: 61 })
+        });
+        let _ = wait_for_event(&signal_receiver, &sink, |event| {
+            matches!(event, CoreEvent::SnapshotUpdated { snapshot, .. }
+                if own_user(snapshot).is_some_and(|user| user.full_name == "Maya C."))
+        });
+
+        client.submit(CoreCommand::UploadAvatar {
+            request_id: 62,
+            account_id: "account-profile".to_owned(),
+            local_path: avatar_file.to_string_lossy().into_owned(),
+        });
+        let _ = wait_for_event(&signal_receiver, &sink, |event| {
+            matches!(event, CoreEvent::ProfileSaved { request_id: 62 })
+        });
+        let _ = wait_for_event(&signal_receiver, &sink, |event| {
+            matches!(event, CoreEvent::SnapshotUpdated { snapshot, .. }
+            if own_user(snapshot).is_some_and(|user| {
+                user.full_name == "Maya C."
+                    && user.avatar_url.as_deref() == Some("/user_avatars/9/new.png?version=2")
+            }))
+        });
+
+        client.submit(CoreCommand::SetFullName {
+            request_id: 63,
+            account_id: "account-profile".to_owned(),
+            full_name: "M".to_owned(),
+        });
+        let _ = wait_for_event(&signal_receiver, &sink, |event| {
+            matches!(
+                event,
+                CoreEvent::Failed {
+                    request_id: Some(63),
+                    ..
+                }
+            )
+        });
+
+        let observed = requests.try_iter().collect::<Vec<_>>();
+        assert!(observed.iter().any(|request| {
+            request.starts_with("PATCH /api/v1/settings HTTP/1.1")
+                && request.contains("full_name=Maya+C.")
+        }));
+        assert!(observed.iter().any(|request| {
+            request.starts_with("POST /api/v1/users/me/avatar HTTP/1.1")
+                && request.contains("avatar fixture")
+        }));
+        assert_eq!(
+            observed
+                .iter()
+                .filter(|request| request.starts_with("PATCH /api/v1/settings"))
+                .count(),
+            1,
+            "a refused name never reaches the server"
+        );
+    }
+
+    #[test]
     fn api_key_session_registers_off_the_calling_thread() {
         let (server, request) = spawn_register_mock();
         let (signal_sender, signal_receiver) = mpsc::channel();
@@ -5820,6 +6051,54 @@ mod tests {
                 };
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        (format!("http://{address}/"), receiver)
+    }
+
+    fn spawn_profile_actor_mock() -> (String, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let address = listener.local_addr().expect("listener address");
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            loop {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let request = read_request(&mut stream);
+                let request_line = request.lines().next().unwrap_or_default().to_owned();
+                if request_line.is_empty() {
+                    continue;
+                }
+                let _ = sender.send(request);
+                let body = if request_line.starts_with("GET /api/v1/users/me HTTP") {
+                    r#"{"result":"success","email":"maya@example.com","full_name":"Maya Chen","user_id":9}"#
+                } else if request_line.starts_with("POST /api/v1/register HTTP") {
+                    r#"{
+                        "result":"success",
+                        "queue_id":"queue-profile",
+                        "last_event_id":10,
+                        "event_queue_longpoll_timeout_seconds":5,
+                        "zulip_feature_level":481,
+                        "realm_users":[{"user_id":9,"full_name":"Maya Chen","email":"maya@example.com",
+                            "is_active":true,"is_bot":false,"avatar_url":"/user_avatars/9/old.png?version=1"}],
+                        "subscriptions":[]
+                    }"#
+                } else if request_line.starts_with("GET /api/v1/events?") {
+                    thread::sleep(Duration::from_millis(50));
+                    r#"{"result":"success","events":[{"id":11,"type":"heartbeat"}]}"#
+                } else if request_line.starts_with("PATCH /api/v1/settings HTTP") {
+                    r#"{"result":"success","msg":""}"#
+                } else if request_line.starts_with("POST /api/v1/users/me/avatar HTTP") {
+                    r#"{"result":"success","msg":"","avatar_url":"/user_avatars/9/new.png?version=2"}"#
+                } else {
+                    r#"{"result":"success"}"#
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 );
                 let _ = stream.write_all(response.as_bytes());
