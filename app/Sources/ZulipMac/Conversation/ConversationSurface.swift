@@ -12,8 +12,6 @@ struct ConversationSurface: View {
     var reconnect: () -> Void = {}
     var loadEarlier: (() -> Void)?
     var submitMessage: ((String) -> Bool)?
-    var renameTopic: (() -> Void)?
-    var renameChannel: (() -> Void)?
     var openParent: (() -> Void)?
     var headerStatus: String?
     var composerHint: String?
@@ -98,8 +96,6 @@ struct ConversationSurface: View {
         reconnect: @escaping () -> Void = {},
         loadEarlier: (() -> Void)? = nil,
         submitMessage: ((String) -> Bool)? = nil,
-        renameTopic: (() -> Void)? = nil,
-        renameChannel: (() -> Void)? = nil,
         openParent: (() -> Void)? = nil,
         headerStatus: String? = nil,
         composerHint: String? = nil,
@@ -144,8 +140,6 @@ struct ConversationSurface: View {
         self.reconnect = reconnect
         self.loadEarlier = loadEarlier
         self.submitMessage = submitMessage
-        self.renameTopic = renameTopic
-        self.renameChannel = renameChannel
         self.openParent = openParent
         self.headerStatus = headerStatus
         self.composerHint = composerHint
@@ -473,9 +467,7 @@ struct ConversationSurface: View {
             subtitle: page.subtitle,
             isOffline: isOffline,
             status: headerStatus,
-            openParent: openParent,
-            renameTopic: renameTopic,
-            renameChannel: renameChannel
+            openParent: openParent
         )
         .overlay {
             Button("Focus message composer") {
@@ -680,9 +672,7 @@ extension View {
         subtitle: String,
         isOffline: Bool,
         status: String? = nil,
-        openParent: (() -> Void)? = nil,
-        renameTopic: (() -> Void)? = nil,
-        renameChannel: (() -> Void)? = nil
+        openParent: (() -> Void)? = nil
     ) -> some View {
         modifier(
             ConversationToolbarModifier(
@@ -690,9 +680,7 @@ extension View {
                 subtitle: subtitle,
                 isOffline: isOffline,
                 status: status,
-                openParent: openParent,
-                renameTopic: renameTopic,
-                renameChannel: renameChannel
+                openParent: openParent
             )
         )
     }
@@ -758,8 +746,6 @@ private struct ConversationToolbarModifier: ViewModifier {
     let isOffline: Bool
     let status: String?
     let openParent: (() -> Void)?
-    let renameTopic: (() -> Void)?
-    let renameChannel: (() -> Void)?
 
     private var accessibilitySummary: String {
         var parts = [subtitle, title]
@@ -821,22 +807,6 @@ private struct ConversationToolbarModifier: ViewModifier {
                             .frame(height: 24)
                             .background(AppTheme.Colors.warning.opacity(0.12))
                             .clipShape(Capsule())
-                    }
-
-                    if renameTopic != nil || renameChannel != nil {
-                        Menu {
-                            if let renameTopic {
-                                Button("Rename topic…", action: renameTopic)
-                            }
-                            if let renameChannel {
-                                Button("Rename channel…", action: renameChannel)
-                            }
-                        } label: {
-                            Image(systemName: "ellipsis.circle")
-                        }
-                        .menuIndicator(.hidden)
-                        .help("Conversation actions")
-                        .accessibilityLabel("Conversation actions")
                     }
                 }
             }
